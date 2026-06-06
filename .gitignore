@@ -10,10 +10,14 @@ __pycache__/
 training/roof_dataset/**/*.png
 training/roof_dataset/**/*.jpg
 training/roof_dataset/**/*.jpeg
-output/
-**/output/
+# training-run outputs ONLY -- anchored so it does NOT match src/output/ (the
+# report-generation module). A bare `output/` / `**/output/` swallows src/output.
+/output/
+/model_maps/
+training/output/
 *.pt
 *.pth
+*.ckpt
 
 # generated reports / scratch data
 sample_report/
