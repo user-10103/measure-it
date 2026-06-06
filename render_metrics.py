@@ -55,6 +55,31 @@ total_edg = sum(e for o,f,e in chips)
 abstention_rate = abstained / with_out if with_out else float('nan')
 edges_per_facet = total_edg / total_fac if total_fac else float('nan')
 
+# --- Edge type aggregation from JSON (Gate 3) ---
+type_totals = {}
+chips_with_eave = 0
+chips_interior_only_one_type = []
+chip_type_data = []  # (chip_id, outline, facets, interior, edges_dict)
+
+if json_path.exists():
+    for r in chips_raw:
+        o = 1 if r.get("outline") else 0
+        f = r.get("facets_pred", 0)
+        edges_d = r.get("edges", {})
+        interior = sum(v for k, v in edges_d.items() if k.lower() in ("ridge", "hip", "valley"))
+        chip_id = r.get("chip", "?")
+        chip_type_data.append((chip_id, o, f, interior, edges_d))
+        for k, v in edges_d.items():
+            type_totals[k] = type_totals.get(k, 0) + v
+        if edges_d.get("eave", 0) + edges_d.get("rake", 0) > 0:
+            chips_with_eave += 1
+        if f > 0 and interior > 0:
+            int_types = {k: v for k, v in edges_d.items() if k.lower() in ("ridge", "hip", "valley") and v > 0}
+            if len(int_types) == 1:
+                chips_interior_only_one_type.append((chip_id, list(int_types.keys())[0], interior))
+else:
+    chip_type_data = [("?", o, f, e, {}) for o, f, e in chips]
+
 print(f"=== Render convergence metrics  [{source}] ===")
 print(f"Chips processed       : {total}")
 print(f"With outline          : {with_out}")
@@ -64,9 +89,29 @@ print(f"Total interior edges  : {total_edg}  (ridge+hip+valley only)")
 print(f"Total facets          : {total_fac}")
 print(f"Edges per facet       : {edges_per_facet:.1f}  (target: ~2-3 clean; ~6+ = fragmented)")
 print()
+
+if type_totals:
+    print("Edge type distribution (Gate 3):")
+    max_n = max(type_totals.values()) if type_totals else 1
+    for t in ("eave", "rake", "hip", "valley", "ridge"):
+        n = type_totals.get(t, 0)
+        bar = "█" * min(40, n * 40 // max(max_n, 1))
+        print(f"  {t:>7}: {n:5d}  {bar}")
+    print()
+    eave_pct = chips_with_eave / with_out if with_out else 0
+    print(f"Chips with eaves       : {chips_with_eave}/{with_out} ({eave_pct:.0%})  (should be ~100%)")
+    if chips_interior_only_one_type:
+        print(f"WARNING: {len(chips_interior_only_one_type)} chip(s) have all interior edges one type (mis-typing?):")
+        for cid, t, n in chips_interior_only_one_type[:5]:
+            print(f"     {cid[:12]}  all-{t} ({n} edges)")
+    else:
+        print("Interior type mix      : OK (no chip is all-one-type)")
+    print()
+
 print("Per-chip detail:")
-print(f"  {'outline':>7}  {'facets':>6}  {'int_edges':>9}  {'e/f':>5}")
-for o,f,e in chips:
+print(f"  {'chip':>16} {'out':>3} {'fac':>4} {'int':>5} {'e/f':>5}  edge types")
+for chip_id, o, f, e, ed in chip_type_data:
     epf = f"{e/f:.1f}" if f else "—"
     abstain = " ← abstained" if (o and f == 0) else ""
-    print(f"  {o:>7}  {f:>6}  {e:>9}  {epf:>5}{abstain}")
+    type_str = " ".join(f"{k}:{v}" for k, v in sorted(ed.items()) if v > 0)
+    print(f"  {chip_id[:16]:>16}  {o:>3}  {f:>4}  {e:>5}  {epf:>5}  {type_str}{abstain}")
