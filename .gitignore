@@ -5,8 +5,11 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 
-# training: dataset + chips + weights are large/regenerable
-training/roof_dataset/
+# training: keep the COCO label files (small, reproducible); chips are fetched
+# on the pod from S3, weights/outputs are large.
+training/roof_dataset/**/*.png
+training/roof_dataset/**/*.jpg
+training/roof_dataset/**/*.jpeg
 output/
 **/output/
 *.pt
