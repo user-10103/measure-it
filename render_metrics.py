@@ -100,6 +100,17 @@ if type_totals:
     print()
     eave_pct = chips_with_eave / with_out if with_out else 0
     print(f"Chips with eaves       : {chips_with_eave}/{with_out} ({eave_pct:.0%})  (should be ~100%)")
+    # Eave vs rake ratio — key post-fix check.
+    # FL hip-dominant dataset: perimeter is mostly eaves; rakes are gable ends only.
+    # Flat-plane artifact (a=b=0) makes classify_perimeter_edge degenerate → over-produces rakes.
+    # Post-fix planes should restore eave >> rake. If not, perimeter typing is still broken.
+    n_eave = type_totals.get("eave", 0)
+    n_rake = type_totals.get("rake", 0)
+    if n_eave + n_rake > 0:
+        er_ratio = n_eave / (n_rake + 1e-9)
+        er_ok = er_ratio >= 2.0
+        er_verdict = "PASS (eave >> rake)" if er_ok else f"FAIL — rake-heavy (flat-plane artifact?); ratio={er_ratio:.2f}, want >= 2.0"
+        print(f"Eave:rake ratio        : {n_eave}:{n_rake} = {er_ratio:.2f}  {er_verdict}")
     if chips_interior_only_one_type:
         print(f"WARNING: {len(chips_interior_only_one_type)} chip(s) have all interior edges one type (mis-typing?):")
         for cid, t, n in chips_interior_only_one_type[:5]:
@@ -115,3 +126,25 @@ for chip_id, o, f, e, ed in chip_type_data:
     abstain = " ← abstained" if (o and f == 0) else ""
     type_str = " ".join(f"{k}:{v}" for k, v in sorted(ed.items()) if v > 0)
     print(f"  {chip_id[:16]:>16}  {o:>3}  {f:>4}  {e:>5}  {epf:>5}  {type_str}{abstain}")
+
+# ── Ship verdict ────────────────────────────────────────────────────────────
+gates = []
+gates.append(("Abstention < 15%",   abstention_rate < 0.15,  f"{abstention_rate:.1%}"))
+ef_val = edges_per_facet if total_fac else float('nan')
+gates.append(("Edges/facet < 3.5",  ef_val < 3.5,            f"{ef_val:.1f}"))
+if type_totals:
+    n_eave2 = type_totals.get("eave", 0)
+    n_rake2  = type_totals.get("rake", 0)
+    er2 = n_eave2 / (n_rake2 + 1e-9)
+    gates.append(("Eave > rake (>= 2x)", er2 >= 2.0,          f"{n_eave2}:{n_rake2} = {er2:.2f}"))
+    gates.append(("No all-one-type chip", not chips_interior_only_one_type, "OK" if not chips_interior_only_one_type else f"{len(chips_interior_only_one_type)} chip(s)"))
+
+print("=" * 55)
+print("SHIP VERDICT")
+all_pass = all(ok for _, ok, _ in gates)
+for name, ok, val in gates:
+    tick = "✓" if ok else "✗"
+    print(f"  {tick} {name:<28} {val}")
+print()
+print("  → SHIP" if all_pass else "  → NOT YET — see ✗ gates above")
+print("=" * 55)
