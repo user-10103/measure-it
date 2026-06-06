@@ -37,3 +37,29 @@ def test_opposite_facets_are_opposite():
 
 def test_no_outline_returns_none():
     assert facet_aspect_deg(SOUTH_FACET, None) is None
+
+
+def test_interior_facet_uses_centroid_bearing():
+    """Interior facet (no outline boundary) falls back to roof_centroid->facet_centroid bearing."""
+    from shapely.geometry import Point
+    # 2x2 outline centred at (5,5); interior facet is NE of centre -> downslope NE ~ 45 deg
+    interior = Polygon([(5, 5), (7, 5), (7, 7), (5, 7)])
+    outline = Polygon([(0, 0), (10, 0), (10, 10), (0, 10)])
+    roof_c = Point(5, 5)  # outline centroid
+    # Without roof_centroid: returns None (interior, no eave)
+    assert facet_aspect_deg(interior, outline) is None
+    # With roof_centroid: returns ~45 deg (NE)
+    deg = facet_aspect_deg(interior, outline, roof_centroid=roof_c)
+    assert deg is not None
+    assert abs((deg - 45) % 360) < 10, f"expected ~45, got {deg:.1f}"
+
+
+def test_interior_facet_south_of_centre():
+    """Interior facet SW of roof centre -> downslope bearing ~225 deg."""
+    from shapely.geometry import Point
+    interior = Polygon([(2, 2), (4, 2), (4, 4), (2, 4)])
+    outline = Polygon([(0, 0), (10, 0), (10, 10), (0, 10)])
+    roof_c = Point(5, 5)
+    deg = facet_aspect_deg(interior, outline, roof_centroid=roof_c)
+    assert deg is not None
+    assert abs((deg - 225) % 360) < 10, f"expected ~225, got {deg:.1f}"

@@ -14,18 +14,29 @@ ridge-vs-hip classifier needs, and it needs no trained model.
 import math
 from typing import Optional
 
-from shapely.geometry import Polygon
+from shapely.geometry import Point, Polygon
 
 EAVE_TOL_M = 1.0          # facet-boundary within this of the outline = eave
 MIN_EAVE_LEN_M = 0.5
 
 
-def facet_aspect_deg(facet_poly: Polygon, outline: Optional[Polygon],
-                     tol: float = EAVE_TOL_M) -> Optional[float]:
+def facet_aspect_deg(
+        facet_poly: Polygon,
+        outline: Optional[Polygon],
+        tol: float = EAVE_TOL_M,
+        roof_centroid: Optional[Point] = None,
+) -> Optional[float]:
     """Downslope bearing (deg, 0=N, 90=E) from facet geometry, or None.
 
     Returns None when the eave can't be located (interior facet, no outline) so
     the caller can fall back to the labelled aspect.
+
+    When *roof_centroid* is provided and the eave-detection path fails, falls
+    back to the centroid-bearing heuristic: the downslope direction of an
+    interior facet points FROM the roof's high-point (approximated by
+    outline.centroid or the supplied roof_centroid) TOWARD the facet centroid.
+    This is geometrically sound for hip/complex roofs where interior facets
+    slope outward from the ridge.
     """
     if outline is None or facet_poly is None or facet_poly.is_empty:
         return None
@@ -34,10 +45,19 @@ def facet_aspect_deg(facet_poly: Polygon, outline: Optional[Polygon],
     except Exception:
         return None
     if eave.is_empty or eave.length < MIN_EAVE_LEN_M:
+        # Interior facet: no eave on the outline perimeter.
+        # Fall back to centroid-bearing if a roof centroid reference is given.
+        if roof_centroid is not None:
+            rc = roof_centroid
+            fc = facet_poly.centroid
+            dx, dy = fc.x - rc.x, fc.y - rc.y   # ridge -> facet = downslope
+            if math.hypot(dx, dy) < 1e-6:
+                return None
+            return (90.0 - math.degrees(math.atan2(dy, dx))) % 360.0
         return None
     ec = eave.centroid                          # low side of the facet
-    c = facet_poly.centroid                     # interior-ish
-    dx, dy = ec.x - c.x, ec.y - c.y             # facet -> eave = downslope
+    c = facet_poly.centroid                    # interior-ish
+    dx, dy = ec.x - c.x, ec.y - c.y           # facet -> eave = downslope
     if math.hypot(dx, dy) < 1e-6:
         return None
     return (90.0 - math.degrees(math.atan2(dy, dx))) % 360.0

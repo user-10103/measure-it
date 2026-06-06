@@ -148,7 +148,7 @@ def process_chip_rgb(
     # that genuinely oppose across ridges. Falls back to the labelled aspect when
     # the eave can't be located. See src/roofs/geometric_aspect.py.
     for f in facets:
-        asp_deg = facet_aspect_deg(f.polygon, outline)
+        asp_deg = facet_aspect_deg(f.polygon, outline, roof_centroid=outline.centroid if outline is not None else None)
         if asp_deg is not None:
             f.aspect_bin = compute_aspect_bin(asp_deg)
             slope = f.slope_deg if f.slope_deg is not None else 0.0
