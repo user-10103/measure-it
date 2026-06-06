@@ -384,27 +384,27 @@ def classify_all_edges(
 def merge_collinear_edges(
     edges: "List[RoofEdge]",
     angle_tol_deg: float = 10.0,
+    snap_tol_m: float = 0.3,
 ) -> "List[RoofEdge]":
-    """Merge consecutive same-type edges whose directions are near-collinear.
+    """Merge same-type edges that form a continuous physical run.
 
     The tiling step produces one RoofEdge per shared polygon boundary segment;
-    a single physical ridge becomes several short entries.  This pass merges
-    runs of same-edge-type segments that are within *angle_tol_deg* of each
-    other in bearing, replacing them with one LineString whose length is the
-    sum and whose geometry is the merged line.
+    a single physical ridge becomes several short entries.  The previous
+    sequential-scan approach only merged *consecutive* same-type entries in list
+    order, which missed segments of the same physical run that were interleaved
+    with edges of other types.
+
+    This replacement uses a proximity graph:
+      1. Group edges by type.
+      2. Within each type, build an undirected graph: two segments are linked
+         if (a) an endpoint of one is within *snap_tol_m* of an endpoint of the
+         other AND (b) their bearing difference is <= angle_tol_deg.
+      3. Merge each connected component with shapely.ops.linemerge.
 
     Length totals are invariant (sum before == sum after).
-
-    Args:
-        edges: list of RoofEdge returned by classify_edges_from_facets.
-        angle_tol_deg: maximum bearing difference (degrees) to treat two
-            adjacent same-type segments as collinear.  Default 10°.
-
-    Returns:
-        New list of RoofEdge, typically shorter than the input.
     """
     import math
-    from shapely.geometry import LineString
+    from shapely.geometry import LineString, MultiLineString
     from shapely.ops import linemerge
 
     if not edges:
@@ -420,43 +420,84 @@ def merge_collinear_edges(
         d = abs(a - b) % 180
         return min(d, 180 - d)
 
-    def _flush(run: "List[RoofEdge]", etype: "EdgeType") -> "RoofEdge":
-        if len(run) == 1:
-            return run[0]
-        merged_geom = linemerge([e.geometry for e in run])
+    def _endpoints(line: LineString):
+        coords = list(line.coords)
+        return (coords[0][0], coords[0][1]), (coords[-1][0], coords[-1][1])
+
+    def _pt_dist(p, q):
+        return math.hypot(p[0] - q[0], p[1] - q[1])
+
+    # Union-Find for grouping
+    parent = list(range(len(edges)))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(x, y):
+        parent[find(x)] = find(y)
+
+    # Pre-compute bearings and endpoints once
+    bearings = [_bearing(e.geometry) for e in edges]
+    endpoints = [_endpoints(e.geometry) for e in edges]
+
+    # For each pair of same-type edges, check proximity + bearing
+    for i in range(len(edges)):
+        for j in range(i + 1, len(edges)):
+            if edges[i].edge_type != edges[j].edge_type:
+                continue
+            if _angle_diff(bearings[i], bearings[j]) > angle_tol_deg:
+                continue
+            # Check if any endpoints are close
+            ep_i = endpoints[i]
+            ep_j = endpoints[j]
+            close = False
+            for pi in ep_i:
+                for pj in ep_j:
+                    if _pt_dist(pi, pj) <= snap_tol_m:
+                        close = True
+                        break
+                if close:
+                    break
+            if close:
+                union(i, j)
+
+    # Group by component
+    from collections import defaultdict
+    components = defaultdict(list)
+    for i, edge in enumerate(edges):
+        components[find(i)].append(edge)
+
+    merged = []
+    for group in components.values():
+        if len(group) == 1:
+            merged.append(group[0])
+            continue
+        # Merge geometries
+        multi = MultiLineString([e.geometry for e in group])
+        merged_geom = linemerge(multi)
         if merged_geom.geom_type != "LineString":
-            # fallback: take longest segment
-            merged_geom = max([e.geometry for e in run], key=lambda g: g.length)
-        total_len = sum(e.length_m for e in run)
-        return RoofEdge(
-            edge_id=run[0].edge_id,
-            edge_type=etype,
+            # linemerge couldn't join (disconnected fragments) — take longest
+            if merged_geom.geom_type == "MultiLineString":
+                merged_geom = max(merged_geom.geoms, key=lambda g: g.length)
+            else:
+                merged_geom = group[0].geometry
+        total_len = sum(e.length_m for e in group)
+        rep = group[0]
+        all_facet_ids = set()
+        for e in group:
+            all_facet_ids.update(e.facet_ids or ())
+        merged.append(RoofEdge(
+            edge_id=rep.edge_id,
+            edge_type=rep.edge_type,
             geometry=merged_geom,
             length_m=round(total_len, 2),
-            facet_ids=tuple(fid for e in run for fid in (e.facet_ids or ())),
-            dihedral_angle_deg=run[0].dihedral_angle_deg,
-        )
+            facet_ids=tuple(sorted(all_facet_ids)),
+            dihedral_angle_deg=rep.dihedral_angle_deg,
+        ))
 
-    merged: "List[RoofEdge]" = []
-    run: "List[RoofEdge]" = [edges[0]]
-    run_type = edges[0].edge_type
-    run_bearing = _bearing(edges[0].geometry)
-
-    for edge in edges[1:]:
-        bearing = _bearing(edge.geometry)
-        same_type = edge.edge_type == run_type
-        near_collinear = _angle_diff(bearing, run_bearing) <= angle_tol_deg
-        if same_type and near_collinear:
-            run.append(edge)
-            # update running average bearing
-            run_bearing = (run_bearing * (len(run) - 1) + bearing) / len(run)
-        else:
-            merged.append(_flush(run, run_type))
-            run = [edge]
-            run_type = edge.edge_type
-            run_bearing = bearing
-
-    merged.append(_flush(run, run_type))
     return merged
 
 
