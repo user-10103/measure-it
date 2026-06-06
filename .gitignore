@@ -1,0 +1,24 @@
+# venv / caches
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+
+# training: dataset + chips + weights are large/regenerable
+training/roof_dataset/
+output/
+**/output/
+*.pt
+*.pth
+
+# generated reports / scratch data
+sample_report/
+*.pdf
+
+# env / secrets (never commit real creds)
+.env
+*.key
+
+# OS
+.DS_Store

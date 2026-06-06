@@ -1,0 +1,170 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "measure-it"
+version = "0.1.0"
+description = "Automated roof identification, polygon extraction, elevation fusion, and metrics output"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "Roof Metrics Team"}
+]
+keywords = ["roof", "metrics", "lidar", "naip", "geospatial", "gis"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: GIS",
+]
+
+dependencies = [
+    # Core geospatial libraries
+    "geopandas>=0.14.0",
+    "shapely>=2.0.0",
+    "pyproj>=3.6.0",
+    "rasterio>=1.3.9",
+    "pyogrio>=0.7.0",
+    "pdal>=3.0.0",
+
+    # HTTP and data fetching
+    "requests>=2.31.0",
+    "boto3>=1.34.0",
+    "certifi>=2023.0.0",
+
+    # Scientific computing
+    "numpy>=1.24.0",
+    "scipy>=1.11.0",
+    "scikit-learn>=1.3.0",
+
+    # Image processing
+    "opencv-python>=4.8.0",
+    "Pillow>=10.0.0",
+
+    # Visualization
+    "matplotlib>=3.8.0",
+    "folium>=0.15.0",
+
+    # Progress bars
+    "tqdm>=4.66.0",
+
+    # Environment management
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.7.0",
+]
+
+test = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+]
+
+[project.scripts]
+measure-it = "src.pipeline:main"
+measure-it-healthcheck = "src.healthcheck:main"
+
+[project.urls]
+
+
+[tool.setuptools]
+packages = ["src", "src.ingestion", "src.roofs", "src.lidar", "src.utils"]
+
+[tool.setuptools.package-data]
+src = ["py.typed"]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-v",
+    "--strict-markers",
+    "--tb=short",
+]
+markers = [
+    "integration: marks tests that require network access",
+    "slow: marks tests as slow",
+]
+norecursedirs = [
+    ".git",
+    ".venv",
+    "venv",
+    "env",
+    "data",
+    "output",
+    "__pycache__",
+]
+
+[tool.black]
+line-length = 100
+target-version = ["py38", "py39", "py310", "py311"]
+include = '\.pyi?$'
+exclude = '''
+/(
+    \.git
+  | \.venv
+  | venv
+  | env
+  | data
+  | output
+  | __pycache__
+  | build
+  | dist
+)/
+'''
+
+[tool.ruff]
+line-length = 100
+target-version = "py38"
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "UP",  # pyupgrade
+]
+ignore = [
+    "E501",  # line too long (handled by black)
+    "B008",  # do not perform function calls in argument defaults
+    "C901",  # too complex
+]
+exclude = [
+    ".git",
+    ".venv",
+    "venv",
+    "env",
+    "data",
+    "output",
+    "__pycache__",
+    "build",
+    "dist",
+]
+
+[tool.ruff.per-file-ignores]
+"__init__.py" = ["F401"]  # unused imports
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+ignore_missing_imports = true

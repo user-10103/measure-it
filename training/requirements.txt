@@ -1,0 +1,6 @@
+# RF-DETR-Seg fine-tune deps (RunPod). Torch+CUDA come from the RunPod base image
+# (use a PyTorch 2.x CUDA template); install the rest on top.
+rfdetr            # Apache-2.0; provides RFDETRSegPreview (DINOv2 backbone)
+pycocotools
+boto3             # chip download from S3
+supervision       # used by rfdetr for COCO loading/eval
