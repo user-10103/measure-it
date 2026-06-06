@@ -118,6 +118,18 @@ def process_chip_rgb(
             if not outline.is_valid:
                 outline = outline.buffer(0)
 
+    # Guard: outline detected but zero facets → occluded/unrecognised roof.
+    # The model correctly abstained; flag it so callers can route to manual review
+    # rather than delivering a blank report.
+    occluded_roof = (outline is not None and len(facets) == 0)
+    if occluded_roof:
+        import logging as _log
+        _log.getLogger(__name__).warning(
+            "process_chip_rgb: outline present but 0 facets for %s — "
+            "flagging occluded_roof=True (needs_review)",
+            address or building_id,
+        )
+
     # Snap facets into a shared-boundary partition: closes gaps, completes areas,
     # and lets the classifier read interior ridge/hip/valley edges (which need
     # adjacent facets to share boundaries). See src/roofs/tiling.py.
@@ -159,7 +171,8 @@ def process_chip_rgb(
                                                      str(out / "edges.csv"))
 
     return {"report_input": report_input, "summary": model.to_dict(),
-            "output_files": output_files}
+            "output_files": output_files,
+            "occluded_roof": occluded_roof}
 
 
 def process_address_id(
