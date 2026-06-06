@@ -151,7 +151,10 @@ def process_chip_rgb(
         asp_deg = facet_aspect_deg(f.polygon, outline, roof_centroid=outline.centroid if outline is not None else None)
         if asp_deg is not None:
             f.aspect_bin = compute_aspect_bin(asp_deg)
-            slope = f.slope_deg if f.slope_deg is not None else 0.0
+            # 4:12 = 18.43 deg default: flat (0 deg) collapses all aspects to the same
+            # normal vector, so _are_coplanar can't distinguish them. A typical
+            # residential pitch gives normals >30 deg apart for opposite aspects.
+            slope = f.slope_deg if f.slope_deg is not None else 18.43
             f.plane = plane_from_pitch_aspect(slope, aspect=asp_deg)
 
     facet_polys = snapped
