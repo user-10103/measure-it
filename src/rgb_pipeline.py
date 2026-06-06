@@ -160,6 +160,9 @@ def process_chip_rgb(
     edges = merge_collinear_edges(edges)  # collapse jagged tiling segs → one line per physical ridge/hip/valley
 
     report_input = build_report_input(address, building_id, facets, edges, aerial_image_path)
+    # Surface occlusion ON the report (not just the result dict) so an
+    # outline-only roof can't be delivered as a silently-blank finished PDF.
+    report_input["occluded_roof"] = occluded_roof
     model = build_report_model(report_input)
 
     output_files: Dict[str, str] = {}
