@@ -1,4 +1,5 @@
 """Tests for the monocular pitch estimator (fallback + math; no torch needed)."""
+import pytest
 import math
 
 import numpy as np
@@ -24,9 +25,14 @@ def test_default_fallback():
 
 
 def test_ensure_model_returns_false_without_torch():
+    from unittest.mock import patch
     est = MonocularPitchEstimator()
-    # torch/transformers absent in this env -> graceful False, no raise
-    assert est._ensure_model() is False
+    # Simulate transformers being absent even if torch is installed
+    with patch.dict("sys.modules", {"transformers": None}):
+        est._load_failed = False
+        est._pipe = None
+        result = est._ensure_model()
+    assert result is False
 
 
 def test_plane_slope_from_depth_patch():
