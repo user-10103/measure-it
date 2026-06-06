@@ -381,6 +381,85 @@ def classify_all_edges(
     return all_edges
 
 
+def merge_collinear_edges(
+    edges: "List[RoofEdge]",
+    angle_tol_deg: float = 10.0,
+) -> "List[RoofEdge]":
+    """Merge consecutive same-type edges whose directions are near-collinear.
+
+    The tiling step produces one RoofEdge per shared polygon boundary segment;
+    a single physical ridge becomes several short entries.  This pass merges
+    runs of same-edge-type segments that are within *angle_tol_deg* of each
+    other in bearing, replacing them with one LineString whose length is the
+    sum and whose geometry is the merged line.
+
+    Length totals are invariant (sum before == sum after).
+
+    Args:
+        edges: list of RoofEdge returned by classify_edges_from_facets.
+        angle_tol_deg: maximum bearing difference (degrees) to treat two
+            adjacent same-type segments as collinear.  Default 10°.
+
+    Returns:
+        New list of RoofEdge, typically shorter than the input.
+    """
+    import math
+    from shapely.geometry import LineString
+    from shapely.ops import linemerge
+
+    if not edges:
+        return edges
+
+    def _bearing(line: LineString) -> float:
+        coords = list(line.coords)
+        dx = coords[-1][0] - coords[0][0]
+        dy = coords[-1][1] - coords[0][1]
+        return math.degrees(math.atan2(dx, dy)) % 180  # undirected bearing
+
+    def _angle_diff(a: float, b: float) -> float:
+        d = abs(a - b) % 180
+        return min(d, 180 - d)
+
+    def _flush(run: "List[RoofEdge]", etype: "EdgeType") -> "RoofEdge":
+        if len(run) == 1:
+            return run[0]
+        merged_geom = linemerge([e.geometry for e in run])
+        if merged_geom.geom_type != "LineString":
+            # fallback: take longest segment
+            merged_geom = max([e.geometry for e in run], key=lambda g: g.length)
+        total_len = sum(e.length_m for e in run)
+        return RoofEdge(
+            edge_id=run[0].edge_id,
+            edge_type=etype,
+            geometry=merged_geom,
+            length_m=round(total_len, 2),
+            facet_ids=tuple(fid for e in run for fid in (e.facet_ids or ())),
+            dihedral_angle_deg=run[0].dihedral_angle_deg,
+        )
+
+    merged: "List[RoofEdge]" = []
+    run: "List[RoofEdge]" = [edges[0]]
+    run_type = edges[0].edge_type
+    run_bearing = _bearing(edges[0].geometry)
+
+    for edge in edges[1:]:
+        bearing = _bearing(edge.geometry)
+        same_type = edge.edge_type == run_type
+        near_collinear = _angle_diff(bearing, run_bearing) <= angle_tol_deg
+        if same_type and near_collinear:
+            run.append(edge)
+            # update running average bearing
+            run_bearing = (run_bearing * (len(run) - 1) + bearing) / len(run)
+        else:
+            merged.append(_flush(run, run_type))
+            run = [edge]
+            run_type = edge.edge_type
+            run_bearing = bearing
+
+    merged.append(_flush(run, run_type))
+    return merged
+
+
 def compute_edge_lengths_by_type(edges: List[RoofEdge]) -> Dict[str, float]:
     """
     Compute total length by edge type.

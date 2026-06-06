@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 from src.roofs.segment import segment_facets
-from src.roofs.edges import classify_edges_from_facets
+from src.roofs.edges import classify_edges_from_facets, merge_collinear_edges
 from src.roofs.tiling import tile_facets
 from src.roofs.metrics import compute_aspect_bin, compute_aspect_deg
 from src.roofs.plane_fit import plane_from_pitch_aspect
@@ -73,6 +73,8 @@ def build_report_input(
         "length_m": float(e.length_m),
         "geometry_xy": [list(pt) for pt in e.geometry.coords][:2],
     } for e in edges]
+    # occluded_roof is set by the caller (process_chip_rgb) and injected into
+    # the top-level result dict; downstream JSON export should carry it through.
     return {"address": address, "building_id": building_id,
             "aerial_image_path": aerial_image_path, "north_angle_deg": 0.0,
             "facets": facet_dicts, "edges": edge_dicts}
@@ -155,6 +157,7 @@ def process_chip_rgb(
     facet_polys = snapped
     planes = [f.plane for f in facets]
     edges = classify_edges_from_facets(facet_polys, planes, outline)
+    edges = merge_collinear_edges(edges)  # collapse jagged tiling segs → one line per physical ridge/hip/valley
 
     report_input = build_report_input(address, building_id, facets, edges, aerial_image_path)
     model = build_report_model(report_input)
