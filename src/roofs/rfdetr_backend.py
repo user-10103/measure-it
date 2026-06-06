@@ -2,63 +2,94 @@
 RFDETRBackend — RF-DETR segmentation model wired as a RoofModelBackend.
 
 Loads a checkpoint produced by training/train_rfdetr.py and runs inference
-on a single chip (np.ndarray, HWC BGR or RGB uint8).  Returns pixel-coord
-dicts that drop straight into segment_facets_ml / process_chip_rgb.
+on a single chip (np.ndarray, HWC uint8 RGB).  Returns pixel-coord dicts
+that drop straight into segment_facets_ml / process_chip_rgb.
 
 Class mapping (from training/roof_dataset train/_annotations.coco.json):
-  category 0 = "roof_polygon"  →  outline
-  category 1 = "facet"         →  facets[*].polygon
+  COCO category id 1 = "roof_polygon"  →  outline   (rfdetr 0-indexes → 0)
+  COCO category id 2 = "facet"         →  facets     (rfdetr 0-indexes → 1)
 
 Usage:
     from src.roofs.rfdetr_backend import RFDETRBackend
     backend = RFDETRBackend("/path/to/checkpoint_best_ema.pth")
-    pred = backend.predict(chip_rgb)   # chip is H×W×3 uint8 ndarray
+    pred = backend.predict(chip_rgb)   # H×W×3 uint8 RGB ndarray
     # pred = {"outline": [[x,y], ...] | None,
     #          "facets": [{"polygon": [[x,y], ...]}, ...]}
+
+Hard deps (inference only, not needed at import time):
+    rfdetr, supervision, opencv-python (cv2), numpy
 """
 from __future__ import annotations
 
 import logging
-import warnings
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
-import cv2
 import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# Lazy imports so the rest of the measure-it package loads without torch.
+# Module-level model cache: resolved_path_str → loaded model object.
+# cv2 / rfdetr / supervision are imported lazily inside functions so that
+# the rest of measure-it can import this module without those heavy deps.
 _model_cache: Dict[str, Any] = {}
 
 
-def _mask_to_polygon(mask: np.ndarray, epsilon_frac: float = 0.005) -> Optional[List[List[float]]]:
-    """Convert a binary HxW bool/uint8 mask to an [x,y] polygon.
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
 
-    Uses the largest external contour and applies Douglas-Peucker
-    simplification so the polygon is a manageable size.
+def _mask_to_polygon(
+    mask: np.ndarray,
+    scale_xy: Optional[tuple] = None,
+    epsilon_frac: float = 0.005,
+) -> Optional[List[List[float]]]:
+    """Convert a binary H×W bool/uint8 mask to a simplified [x,y] polygon.
 
-    Returns None if the mask is empty or produces a degenerate contour.
+    Args:
+        mask:         H×W bool or uint8 array (any non-zero = foreground).
+        scale_xy:     Optional (sx, sy) tuple.  Every point is multiplied by
+                      (sx, sy) after contour extraction.  Pass this when the
+                      mask was produced at a different resolution than the
+                      original chip (e.g. model-internal 512 vs chip 768×780).
+        epsilon_frac: Douglas-Peucker ε as a fraction of the contour perimeter.
+
+    Returns:
+        [[x, y], ...] in the chip's pixel coordinate space, or None if the
+        mask is empty / produces a degenerate contour (< 3 pts).
     """
+    import cv2  # lazy — only needed at inference time
+
     mask_u8 = (mask > 0).astype(np.uint8) * 255
     contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return None
-    # largest contour by area
+
     cnt = max(contours, key=cv2.contourArea)
     if cv2.contourArea(cnt) < 4:
         return None
-    # simplify
+
     peri = cv2.arcLength(cnt, True)
     approx = cv2.approxPolyDP(cnt, epsilon_frac * peri, True)
     if len(approx) < 3:
         return None
-    # approx shape is (N,1,2) → [[x,y], ...]
-    return [[float(pt[0][0]), float(pt[0][1])] for pt in approx]
+
+    # approx shape: (N, 1, 2) → [[x, y], ...]
+    pts = [[float(pt[0][0]), float(pt[0][1])] for pt in approx]
+
+    if scale_xy is not None:
+        sx, sy = scale_xy
+        pts = [[x * sx, y * sy] for x, y in pts]
+
+    return pts
 
 
-def _load_model(checkpoint_path: str):
-    """Load (and cache) an RFDETRSeg model from a .pth checkpoint."""
+def _load_model(checkpoint_path: str) -> Any:
+    """Load (and cache) an RF-DETR model from a .pth checkpoint.
+
+    Uses rfdetr.from_checkpoint which auto-detects model size from the
+    weight header — no need to know Small/Medium/Large at call time.
+    """
     key = str(Path(checkpoint_path).resolve())
     if key in _model_cache:
         return _model_cache[key]
@@ -66,9 +97,10 @@ def _load_model(checkpoint_path: str):
     import warnings
     warnings.filterwarnings("ignore", category=FutureWarning)
 
-    # rfdetr 1.7+ uses from_checkpoint; it auto-detects model size from weights.
-    from rfdetr import RFDETRSegSmall  # noqa: imported for side-effects on first call
-    from rfdetr import from_checkpoint  # top-level API
+    # rfdetr.from_checkpoint is the stable public API (rfdetr ≥ 1.7).
+    # Do NOT import RFDETRSegSmall/etc. "for side-effects" — that breaks
+    # on version changes and is unnecessary.
+    from rfdetr import from_checkpoint  # noqa
 
     logger.info(f"Loading RF-DETR checkpoint: {checkpoint_path}")
     model = from_checkpoint(checkpoint_path)
@@ -77,38 +109,43 @@ def _load_model(checkpoint_path: str):
     return model
 
 
+# ---------------------------------------------------------------------------
+# Public backend class
+# ---------------------------------------------------------------------------
+
 class RFDETRBackend:
-    """RoofModelBackend that runs the trained RF-DETR-Seg checkpoint.
+    """RoofModelBackend using the trained RF-DETR-Seg checkpoint.
 
     Parameters
     ----------
     checkpoint_path:
-        Path to checkpoint_best_ema.pth (or any .pth produced by
-        training/train_rfdetr.py).
+        Path to checkpoint_best_ema.pth (or any .pth from train_rfdetr.py).
     threshold:
-        Confidence threshold passed to model.predict(). Default 0.35
-        (lower than the rfdetr default of 0.5 so lower-confidence facets
-        are still returned for the tiling/snap step to resolve).
+        Confidence threshold for model.predict(). Default 0.35 — deliberately
+        lower than rfdetr's default 0.5 so borderline facets survive for the
+        tiling/snap step to resolve.
     resolution:
-        Input resolution the model was trained at (default 512, matching
-        train_rfdetr.py default).  Used only for documentation; rfdetr
-        resizes internally.
+        Documented training resolution (default 512). Not passed to the model
+        (rfdetr handles resizing internally); stored for __repr__ only.
     """
 
-    # Categories (must match training COCO categories order, 0-indexed)
-    CAT_ROOF_POLYGON = 0  # "roof_polygon" → outline
-    CAT_FACET = 1         # "facet"        → facets
+    # 0-indexed category ids as rfdetr sees them (COCO 1-indexed → 0-indexed).
+    # Verified against training/roof_dataset/train/_annotations.coco.json:
+    #   {"id": 1, "name": "roof_polygon"} → rfdetr class 0
+    #   {"id": 2, "name": "facet"}        → rfdetr class 1
+    CAT_ROOF_POLYGON = 0
+    CAT_FACET        = 1
 
     def __init__(
         self,
         checkpoint_path: str,
         threshold: float = 0.35,
         resolution: int = 512,
-    ):
+    ) -> None:
         self.checkpoint_path = str(checkpoint_path)
         self.threshold = threshold
         self.resolution = resolution
-        # Eagerly load so startup errors surface immediately.
+        # Eagerly load so startup errors surface immediately, not at first call.
         self._model = _load_model(self.checkpoint_path)
 
     # ------------------------------------------------------------------
@@ -116,86 +153,97 @@ class RFDETRBackend:
     # ------------------------------------------------------------------
 
     def predict(self, image: np.ndarray) -> Dict[str, Any]:
-        """Run the model on a chip and return the pipeline prediction dict.
+        """Run the model on one chip image.
 
         Parameters
         ----------
         image:
-            H×W×3 uint8 numpy array (RGB or BGR — rfdetr accepts both via
-            PIL conversion internally when passed as ndarray).
+            H×W×3 uint8 numpy array in RGB order.
 
         Returns
         -------
-        dict with keys:
-            "outline":  [[x, y], ...] in pixel coords, or None
-            "facets":   [{"polygon": [[x, y], ...]}, ...]
+        {"outline": [[x,y], ...] | None, "facets": [{"polygon": [[x,y], ...]}, ...]}
+
+        All coordinates are in the chip's own pixel space (same H×W as the
+        input image), regardless of the model's internal processing resolution.
         """
         import warnings
         warnings.filterwarnings("ignore")
 
-        h, w = image.shape[:2]
+        img_h, img_w = image.shape[:2]
 
-        # rfdetr.predict accepts np.ndarray (HWC uint8 RGB)
-        detections = self._model.predict(
-            image,
-            threshold=self.threshold,
-        )
+        detections = self._model.predict(image, threshold=self.threshold)
 
-        # detections is sv.Detections with:
-        #   .xyxy           (N,4) bboxes
-        #   .mask           (N,H,W) bool array, or None
-        #   .class_id       (N,) int
-        #   .confidence     (N,)
-
+        # sv.Detections attributes we use:
+        #   .mask       (N, mask_H, mask_W) bool array, or None
+        #   .class_id   (N,) int  (0-indexed)
+        #   .confidence (N,) float
         if detections is None or len(detections) == 0:
             logger.warning("RF-DETR returned no detections.")
             return {"outline": None, "facets": []}
 
-        masks = detections.mask          # (N,H,W) bool | None
-        class_ids = detections.class_id  # (N,) int
-        confidences = getattr(detections, "confidence", None)
+        masks      = detections.mask
+        class_ids  = detections.class_id
+        confidence = getattr(detections, "confidence", None)
 
         if masks is None:
-            logger.warning("RF-DETR detections have no masks — check model type.")
+            logger.warning("RF-DETR detections carry no masks — wrong model type?")
             return {"outline": None, "facets": []}
 
-        # ---- roof_polygon → outline ----
+        # ----------------------------------------------------------------
+        # RESOLUTION CHECK — detect and correct mask/chip size mismatch.
+        # rfdetr may return masks at its internal resolution (e.g. 512×512)
+        # rather than the chip's native size.  If they differ, every polygon
+        # would be in the wrong coordinate space.  We compute a scale factor
+        # and pass it through to _mask_to_polygon.
+        # ----------------------------------------------------------------
+        _, mask_h, mask_w = masks.shape
+        if mask_h != img_h or mask_w != img_w:
+            scale_xy = (img_w / mask_w, img_h / mask_h)
+            logger.warning(
+                f"Mask size ({mask_w}×{mask_h}) ≠ chip size ({img_w}×{img_h}). "
+                f"Rescaling polygons by {scale_xy[0]:.4f}×{scale_xy[1]:.4f}."
+            )
+        else:
+            scale_xy = None
+
+        # ----------------------------------------------------------------
+        # roof_polygon (cat 0) → outline
+        # ----------------------------------------------------------------
         outline: Optional[List[List[float]]] = None
-        roof_indices = np.where(class_ids == self.CAT_ROOF_POLYGON)[0]
-        if len(roof_indices) > 0:
-            # Pick highest-confidence roof polygon (or largest mask area)
-            if confidences is not None:
-                best_idx = roof_indices[np.argmax(confidences[roof_indices])]
+        roof_idx = np.where(class_ids == self.CAT_ROOF_POLYGON)[0]
+        if len(roof_idx) > 0:
+            # Prefer highest confidence; fall back to largest mask area.
+            if confidence is not None:
+                best = roof_idx[np.argmax(confidence[roof_idx])]
             else:
-                best_idx = roof_indices[
-                    np.argmax([masks[i].sum() for i in roof_indices])
-                ]
-            outline = _mask_to_polygon(masks[best_idx])
+                best = roof_idx[np.argmax([masks[i].sum() for i in roof_idx])]
+            outline = _mask_to_polygon(masks[best], scale_xy=scale_xy)
             if outline is None:
                 logger.warning("roof_polygon mask produced degenerate contour.")
 
-        # ---- facet → facets ----
+        # ----------------------------------------------------------------
+        # facet (cat 1) → facets list
+        # ----------------------------------------------------------------
         facets: List[Dict[str, Any]] = []
-        facet_indices = np.where(class_ids == self.CAT_FACET)[0]
-        for idx in facet_indices:
-            poly = _mask_to_polygon(masks[idx])
+        facet_idx = np.where(class_ids == self.CAT_FACET)[0]
+        for i in facet_idx:
+            poly = _mask_to_polygon(masks[i], scale_xy=scale_xy)
             if poly is not None:
                 facets.append({"polygon": poly})
 
         logger.debug(
-            f"RF-DETR predict: outline={'yes' if outline else 'no'}, "
-            f"{len(facets)} facet(s) from {image.shape[:2]} chip"
+            f"RF-DETR: chip {img_w}×{img_h}, masks {mask_w}×{mask_h}, "
+            f"outline={'yes' if outline else 'no'}, {len(facets)} facet(s)"
         )
         return {"outline": outline, "facets": facets}
 
     # ------------------------------------------------------------------
-    # Convenience: bulk predict on a list of chips
+    # Convenience
     # ------------------------------------------------------------------
 
-    def predict_batch(
-        self, images: List[np.ndarray]
-    ) -> List[Dict[str, Any]]:
-        """Predict on a list of chips, one at a time (model requires bs=1)."""
+    def predict_batch(self, images: List[np.ndarray]) -> List[Dict[str, Any]]:
+        """Predict on a list of chips sequentially (model requires bs=1)."""
         return [self.predict(img) for img in images]
 
     def __repr__(self) -> str:
@@ -206,32 +254,89 @@ class RFDETRBackend:
 
 
 # ---------------------------------------------------------------------------
-# Quick smoke-test (run this file directly: python -m src.roofs.rfdetr_backend)
+# Smoke-test — run directly:
+#   cd /workspace/measure-it
+#   python src/roofs/rfdetr_backend.py output/checkpoint_best_ema.pth \
+#          training/roof_dataset/val/some_chip.png
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    import argparse
-    import sys
+    import argparse, sys
+    import cv2  # fine here — this block only runs when invoked directly
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
-    ap = argparse.ArgumentParser(description="Smoke-test RFDETRBackend on a chip image.")
+    ap = argparse.ArgumentParser(description="Smoke-test RFDETRBackend on a chip.")
     ap.add_argument("checkpoint", help="Path to checkpoint_best_ema.pth")
-    ap.add_argument("image", help="Path to a chip PNG/JPG")
+    ap.add_argument("image",      help="Path to a chip PNG/JPG")
     ap.add_argument("--threshold", type=float, default=0.35)
     args = ap.parse_args()
 
     backend = RFDETRBackend(args.checkpoint, threshold=args.threshold)
-    img = cv2.imread(args.image)
-    if img is None:
+
+    bgr = cv2.imread(args.image)
+    if bgr is None:
         print(f"ERROR: cannot read {args.image}", file=sys.stderr)
         sys.exit(1)
-    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    pred = backend.predict(img_rgb)
+    img_rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+    img_h, img_w = img_rgb.shape[:2]
 
-    print("=== Prediction ===")
+    # Access raw detections to verify mask resolution before polygon conversion.
+    import warnings, numpy as np
+    warnings.filterwarnings("ignore")
+    raw = backend._model.predict(img_rgb, threshold=args.threshold)
+
+    print(f"\n=== Raw detection check ===")
+    print(f"Chip size : {img_w} × {img_h}")
+    if raw is not None and len(raw) > 0 and raw.mask is not None:
+        _, mh, mw = raw.mask.shape
+        match = "✓ MATCH" if (mh == img_h and mw == img_w) else f"✗ MISMATCH — will rescale by ({img_w/mw:.4f}, {img_h/mh:.4f})"
+        print(f"Mask size : {mw} × {mh}  {match}")
+        print(f"N detections: {len(raw)}")
+        for det_i in range(len(raw)):
+            cid  = raw.class_id[det_i]
+            conf = raw.confidence[det_i] if raw.confidence is not None else float('nan')
+            name = {0: "roof_polygon", 1: "facet"}.get(int(cid), f"cat{cid}")
+            ys, xs = np.where(raw.mask[det_i])
+            if len(xs):
+                bbox = f"x:[{xs.min()}-{xs.max()}] y:[{ys.min()}-{ys.max()}]"
+            else:
+                bbox = "empty mask"
+            print(f"  [{det_i}] class={name}({cid}) conf={conf:.3f}  mask_bbox={bbox}")
+    else:
+        print("No detections or no masks.")
+
+    # Now run the full predict (with rescaling applied).
+    pred    = backend.predict(img_rgb)
     outline = pred["outline"]
     facets  = pred["facets"]
-    print(f"outline: {len(outline)} pts" if outline else "outline: None")
-    print(f"facets:  {len(facets)} facet(s)")
+
+    print(f"\n=== Prediction output ===")
+    if outline:
+        xs = [p[0] for p in outline]
+        ys = [p[1] for p in outline]
+        print(f"outline : {len(outline)} pts  bbox x:[{min(xs):.1f}-{max(xs):.1f}] y:[{min(ys):.1f}-{max(ys):.1f}]")
+        # Sanity: outline bbox should span most of the chip
+        x_span = max(xs) - min(xs)
+        y_span = max(ys) - min(ys)
+        if x_span < img_w * 0.3 or y_span < img_h * 0.3:
+            print(f"  ⚠ WARNING: outline spans only {x_span/img_w:.0%} × {y_span/img_h:.0%} of chip — may be swapped with facet")
+    else:
+        print("outline : None")
+
+    print(f"facets  : {len(facets)} facet(s)")
     for i, f in enumerate(facets):
-        print(f"  facet[{i}]: {len(f['polygon'])} pts")
+        xs = [p[0] for p in f["polygon"]]
+        ys = [p[1] for p in f["polygon"]]
+        print(f"  [{i}] {len(f['polygon'])} pts  bbox x:[{min(xs):.1f}-{max(xs):.1f}] y:[{min(ys):.1f}-{max(ys):.1f}]")
+
+    # Final verdict
+    print()
+    issues = []
+    if outline and (max(xs := [p[0] for p in outline]) - min(xs)) < img_w * 0.3:
+        issues.append("outline too small (category swap?)")
+    if not facets:
+        issues.append("no facets detected (lower --threshold or check category mapping)")
+    if issues:
+        print("⚠ ISSUES:", "; ".join(issues))
+    else:
+        print("✓ Looks good — outline spans chip, facets present")
