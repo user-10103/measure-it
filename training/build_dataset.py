@@ -51,7 +51,18 @@ def main():
     print(f"full: {len(coco['images'])} images, {len(coco['annotations'])} anns, "
           f"cats={[c['name'] for c in coco['categories']]}")
 
-    splits = make_splits([im["id"] for im in coco["images"]], seed=args.seed)
+    # --- corrected split: group by unique chip stem, not per-annotation image id ---
+    # make_splits dedupes internally (sorted(set(...))), so passing chip stems
+    # produces 956 unique chips split 80/10/10 with no chip crossing splits.
+    chip_stems = [os.path.splitext(im["file_name"])[0] for im in coco["images"]]
+    stem_splits = make_splits(chip_stems, seed=args.seed)
+    # convert back to image-id sets so subset() still works
+    stem_to_ids = {}
+    for im in coco["images"]:
+        stem = os.path.splitext(im["file_name"])[0]
+        stem_to_ids.setdefault(stem, []).append(im["id"])
+    splits = {sp: [iid for stem in stems for iid in stem_to_ids.get(stem, [])]
+              for sp, stems in stem_splits.items()}
     # RF-DETR expects folder names train/valid/test
     name_map = {"train": "train", "val": "valid", "test": "test"}
     for split, ids in splits.items():
