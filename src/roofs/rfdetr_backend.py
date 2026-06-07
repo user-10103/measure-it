@@ -146,7 +146,7 @@ class RFDETRBackend:
         checkpoint_path: str,
         threshold: float = 0.35,
         resolution: int = 512,
-        mask_epsilon: float = 0.005,
+        mask_epsilon: float = 0.025  # locked: e/f<3.5 with margin; do not raise further,
     ) -> None:
         self.checkpoint_path = str(checkpoint_path)
         self.threshold = threshold

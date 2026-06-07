@@ -29,6 +29,9 @@ COPLANAR_ANGLE_TOL_DEG = 8.0   # facets with normals within this are the same pl
 COPLANAR_ZGAP_M = 0.3          # ...and within this vertical gap at the shared point
 OUTLINE_SIMPLIFY_M = 1.0       # Douglas-Peucker on the outline -> straight sides
 MIN_EDGE_LEN_M = 0.5           # drop slivers shorter than this
+RAKE_PARALLELISM_THRESH = 0.75  # |cos(angle)| >= this -> rake; < this -> eave.
+                               # 0.75 ~ 41 deg from parallel. Eave: 0-41 deg,
+                               # rake: 41-90 deg to the downslope direction.
 # ridge vs hip (among convex edges): a ridge joins facets facing ~OPPOSITE ways
 # (downslopes ~180deg apart -> cos ~ -1); a hip joins facets ~90deg apart
 # (cos ~ 0). cos(angle between gradients) below this => ridge. This is robust to
@@ -715,7 +718,7 @@ def classify_perimeter_edge(plane: PlaneModel, p0: tuple, p1: tuple) -> EdgeType
         return EdgeType.EAVE
     ex, ey = ex / el, ey / el
     parallelism = abs(dsx * ex + dsy * ey)         # 0 = perpendicular, 1 = parallel
-    return EdgeType.RAKE if parallelism >= 0.5 else EdgeType.EAVE
+    return EdgeType.RAKE if parallelism >= RAKE_PARALLELISM_THRESH else EdgeType.EAVE
 
 
 def _adjacent_facet(merged: List[dict], outline: Polygon, p0: tuple, p1: tuple) -> Optional[dict]:
