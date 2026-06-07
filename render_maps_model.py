@@ -67,10 +67,12 @@ def main():
     ap.add_argument("--out", default="model_maps")
     ap.add_argument("--gsd", type=float, default=0.3, help="m/px for non-geo PNG chips")
     ap.add_argument("--threshold", type=float, default=0.35)
+    ap.add_argument("--mask-epsilon", type=float, default=0.005,
+                    help="Douglas-Peucker epsilon_frac for mask->polygon (default: 0.005)")
     ap.add_argument("--limit", type=int, default=15)
     args = ap.parse_args()
 
-    backend = RFDETRBackend(args.checkpoint, threshold=args.threshold)
+    backend = RFDETRBackend(args.checkpoint, threshold=args.threshold, mask_epsilon=args.mask_epsilon)
 
     if os.path.isdir(args.chips):
         files = sorted(sum((glob.glob(os.path.join(args.chips, f"*.{e}"))

@@ -141,10 +141,12 @@ class RFDETRBackend:
         checkpoint_path: str,
         threshold: float = 0.35,
         resolution: int = 512,
+        mask_epsilon: float = 0.005,
     ) -> None:
         self.checkpoint_path = str(checkpoint_path)
         self.threshold = threshold
         self.resolution = resolution
+        self.mask_epsilon = mask_epsilon
         # Eagerly load so startup errors surface immediately, not at first call.
         self._model = _load_model(self.checkpoint_path)
 
@@ -218,7 +220,7 @@ class RFDETRBackend:
                 best = roof_idx[np.argmax(confidence[roof_idx])]
             else:
                 best = roof_idx[np.argmax([masks[i].sum() for i in roof_idx])]
-            outline = _mask_to_polygon(masks[best], scale_xy=scale_xy)
+            outline = _mask_to_polygon(masks[best], scale_xy=scale_xy, epsilon_frac=self.mask_epsilon)
             if outline is None:
                 logger.warning("roof_polygon mask produced degenerate contour.")
 
@@ -228,7 +230,7 @@ class RFDETRBackend:
         facets: List[Dict[str, Any]] = []
         facet_idx = np.where(class_ids == self.CAT_FACET)[0]
         for i in facet_idx:
-            poly = _mask_to_polygon(masks[i], scale_xy=scale_xy)
+            poly = _mask_to_polygon(masks[i], scale_xy=scale_xy, epsilon_frac=self.mask_epsilon)
             if poly is not None:
                 facets.append({"polygon": poly})
 
