@@ -494,7 +494,7 @@ def merge_collinear_edges(
             edge_type=rep.edge_type,
             geometry=merged_geom,
             length_m=round(total_len, 2),
-            facet_ids=tuple(sorted(all_facet_ids)),
+            facet_ids=tuple(sorted(x for x in all_facet_ids if x is not None)),
             dihedral_angle_deg=rep.dihedral_angle_deg,
         ))
 
