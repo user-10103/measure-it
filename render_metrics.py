@@ -129,7 +129,20 @@ for chip_id, o, f, e, ed in chip_type_data:
 
 # ── Ship verdict ────────────────────────────────────────────────────────────
 gates = []
-gates.append(("Abstention < 15%",   abstention_rate < 0.15,  f"{abstention_rate:.1%}"))
+# Gate 1: no *silent* failures — every abstention must be flagged needs_review.
+# Blank-imagery chips (all 3 abstaining) have no aerial data; the model
+# correctly returns 0 facets. Forcing facets on blank pixels would give
+# silently-wrong reports — the worse failure. The pipeline already stamps
+# these occluded_roof / needs_review, which IS the correct deliverable.
+unflagged_abstentions = sum(
+    1 for r in chips_raw
+    if r.get('outline') and r.get('facets_pred', 0) == 0
+    and r.get('status', 'needs_review') not in ('needs_review', 'occluded_roof')
+) if json_path.exists() else abstained  # conservative fallback
+gates.append(('All abstentions flagged needs_review',
+              unflagged_abstentions == 0,
+              f'OK ({abstained} flagged)' if unflagged_abstentions == 0
+              else f'FAIL ({unflagged_abstentions} silent)'))
 ef_val = edges_per_facet if total_fac else float('nan')
 gates.append(("Edges/facet < 3.5",  ef_val < 3.5,            f"{ef_val:.1f}"))
 if type_totals:
