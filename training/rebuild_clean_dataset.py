@@ -28,11 +28,43 @@ def subset(coco, image_ids):
         a["image_id"] = id_map[a["image_id"]]
     return {"images": imgs, "annotations": anns, "categories": coco["categories"]}
 
+def dedupe_canonical(coco):
+    """Keep one entry per chip (file_name) — the copy with the most facet anns.
+
+    The LS export annotates each chip ~3x; disjoint splitting keeps all copies in
+    one split (harmless oversampling). This collapses them to one canonical entry
+    per chip for cleaner epoch semantics + faster training.
+    """
+    from collections import defaultdict
+    anns_by_img = defaultdict(list)
+    for a in coco["annotations"]:
+        anns_by_img[a["image_id"]].append(a)
+    by_fn = defaultdict(list)
+    for im in coco["images"]:
+        by_fn[im["file_name"]].append(im)
+    keep = set()
+    for ims in by_fn.values():
+        best = max(ims, key=lambda im: sum(
+            1 for a in anns_by_img[im["id"]] if a.get("category_id") == 2))
+        keep.add(best["id"])
+    imgs = [im for im in coco["images"] if im["id"] in keep]
+    anns = [a for a in coco["annotations"] if a["image_id"] in keep]
+    id_map = {im["id"]: i + 1 for i, im in enumerate(imgs)}
+    for im in imgs:
+        im["id"] = id_map[im["id"]]
+    for j, a in enumerate(anns):
+        a["id"] = j + 1
+        a["image_id"] = id_map[a["image_id"]]
+    return {"images": imgs, "annotations": anns, "categories": coco["categories"]}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ls",   required=True, help="Label Studio JSON export")
     ap.add_argument("--out",  default="training/roof_dataset_clean")
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--dedupe", action="store_true",
+                    help="keep one canonical (richest) entry per chip — drops ~3x dup")
     args = ap.parse_args()
 
     coco = ls_export_to_coco(json.load(open(args.ls)))
@@ -56,6 +88,8 @@ def main():
         d = os.path.join(args.out, folder)
         os.makedirs(d, exist_ok=True)
         sub = subset(json.loads(json.dumps(coco)), ids)
+        if args.dedupe:
+            sub = dedupe_canonical(sub)
         json.dump(sub, open(os.path.join(d, "_annotations.coco.json"), "w"))
         with open(os.path.join(d, "chips_needed.txt"), "w") as f:
             f.write("\n".join(im["file_name"] for im in sub["images"]))
