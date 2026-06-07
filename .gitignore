@@ -7,9 +7,9 @@ __pycache__/
 
 # training: keep the COCO label files (small, reproducible); chips are fetched
 # on the pod from S3, weights/outputs are large.
-training/roof_dataset/**/*.png
-training/roof_dataset/**/*.jpg
-training/roof_dataset/**/*.jpeg
+training/roof_dataset*/**/*.png
+training/roof_dataset*/**/*.jpg
+training/roof_dataset*/**/*.jpeg
 # training-run outputs ONLY -- anchored so it does NOT match src/output/ (the
 # report-generation module). A bare `output/` / `**/output/` swallows src/output.
 /output/
