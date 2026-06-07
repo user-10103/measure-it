@@ -20,7 +20,10 @@ def main():
                     help="dir with train/valid/test + _annotations.coco.json")
     ap.add_argument("--output", default="output")
     ap.add_argument("--epochs", type=int, default=50)
-    ap.add_argument("--batch-size", type=int, default=4)
+    ap.add_argument("--batch-size", type=int, default=1,
+                    help="MUST stay 1: chips are variable-sized and DETR can't collate "
+                         "a batch of different-sized images (matcher tensor mismatch). "
+                         "batch>1 crashes; use --grad-accum for effective batch.")
     ap.add_argument("--grad-accum", type=int, default=4, help="effective batch = bs*grad_accum")
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--resolution", type=int, default=512)
