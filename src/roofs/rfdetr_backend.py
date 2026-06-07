@@ -100,6 +100,11 @@ def _load_model(checkpoint_path: str) -> Any:
     # rfdetr.from_checkpoint is the stable public API (rfdetr ≥ 1.7).
     # Do NOT import RFDETRSegSmall/etc. "for side-effects" — that breaks
     # on version changes and is unnecessary.
+    # Compatibility shim: torch<2.5 lacks float8 types needed by transformers>=4.45
+    import torch as _torch
+    for _fp8 in ["float8_e4m3fn","float8_e5m2","float8_e4m3fnuz","float8_e5m2fnuz","float8_e8m0fnu"]:
+        if not hasattr(_torch, _fp8):
+            setattr(_torch, _fp8, _torch.float16)
     from rfdetr import from_checkpoint  # noqa
 
     logger.info(f"Loading RF-DETR checkpoint: {checkpoint_path}")
