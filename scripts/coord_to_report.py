@@ -268,6 +268,59 @@ def refine_outline(rgb, outline, max_shift=10, scales=(1.0, 1.04, 1.08, 1.12), E
     return best.buffer(0), bestsc   # absolute edge score (comparable across sources)
 
 
+def _rotate(pts, ang, cx, cy):
+    c, s = math.cos(ang), math.sin(ang)
+    return [[(x - cx) * c - (y - cy) * s + cx, (x - cx) * s + (y - cy) * c + cy] for x, y in pts]
+
+
+def regularize_footprint(poly, angle_tol=18.0, min_rectilinear=0.65):
+    """Snap a noisy footprint to a clean rectilinear (Manhattan) polygon.
+
+    Most homes are rectilinear; raw OSM/MS outlines have jittery, off-square edges
+    that give the straight skeleton ragged facets. Find the dominant orientation,
+    rotate to it, force each edge axis-aligned, rotate back. Skips genuinely
+    angled/curved roofs (octagons, bays) so it never distorts them.
+    """
+    poly = poly.buffer(0).simplify(max(poly.length * 0.008, 1.0))
+    if poly.geom_type != "Polygon":
+        poly = max(poly.geoms, key=lambda p: p.area)
+    coords = list(poly.exterior.coords)[:-1]
+    n = len(coords)
+    if n < 4:
+        return poly
+    cx, cy = poly.centroid.x, poly.centroid.y
+    sin4 = cos4 = 0.0                                   # dominant orientation mod 90°
+    for i in range(n):
+        a, b = coords[i], coords[(i + 1) % n]
+        dx, dy = b[0] - a[0], b[1] - a[1]; L = math.hypot(dx, dy)
+        ang = math.atan2(dy, dx)
+        sin4 += L * math.sin(4 * ang); cos4 += L * math.cos(4 * ang)
+    th = math.atan2(sin4, cos4) / 4
+    rot = _rotate(coords, -th, cx, cy)
+    axis_len = tot = 0.0; cls = []
+    for i in range(n):
+        a, b = rot[i], rot[(i + 1) % n]
+        dx, dy = b[0] - a[0], b[1] - a[1]; L = math.hypot(dx, dy); tot += L
+        off = min(abs(math.degrees(math.atan2(dy, dx))) % 90, 90 - abs(math.degrees(math.atan2(dy, dx))) % 90)
+        if off < angle_tol:
+            axis_len += L
+        cls.append("H" if abs(dx) >= abs(dy) else "V")
+    if tot == 0 or axis_len / tot < min_rectilinear:    # not rectilinear -> leave alone
+        return poly
+    pts = [list(p) for p in rot]
+    for _ in range(15):                                 # relax edges to axis-aligned
+        for i in range(n):
+            j = (i + 1) % n
+            if cls[i] == "H":
+                m = (pts[i][1] + pts[j][1]) / 2; pts[i][1] = pts[j][1] = m
+            else:
+                m = (pts[i][0] + pts[j][0]) / 2; pts[i][0] = pts[j][0] = m
+    out = Polygon(_rotate(pts, th, cx, cy)).buffer(0)
+    if out.geom_type != "Polygon":
+        out = max(out.geoms, key=lambda p: p.area)
+    return out if 0.6 * poly.area < out.area < 1.5 * poly.area else poly
+
+
 def _seg_dist(P, a, b):
     ab = b - a; L2 = float(ab @ ab)
     if L2 == 0:
@@ -444,6 +497,11 @@ def report_for(coord):
     src += f" | {fp_src}"
     if len(scored) > 1:
         src += f">{scored[1][1]}"
+    # regularize the refined outline -> single canonical roof outline (facets + report agree)
+    if os.environ.get("NO_REGULARIZE") != "1":
+        rg = regularize_footprint(outline)
+        if rg.geom_type == "Polygon" and 0.6 * outline.area < rg.area < 1.5 * outline.area:
+            outline = rg
 
     # 5) facets — ALGORITHMS ONLY.
     # primary: true straight skeleton of the footprint (handles L/T/complex shapes),
@@ -451,23 +509,21 @@ def report_for(coord):
     # the eave there. Imagery shading/line only as a degenerate fallback.
     method = "straight-skeleton"; flat = False
     try:
-        reg = outline.simplify(max(outline.length * 0.004, 1.0))   # regularize noisy OSM
-        if reg.geom_type != "Polygon" or reg.area < 0.5 * outline.area:
-            reg = outline
-        f0, edges = straight_skeleton_facets(reg)
+        # outline is already refined + regularized (single canonical roof outline)
+        f0, edges = straight_skeleton_facets(outline)
         # (a) flat-roof check: uniform tone across all skeleton regions -> one flat plane
         is_flat, spread = roof_is_flat(rgb, list(f0.values()))
         if is_flat:
-            facets = [reg]; flat = True; method = f"flat (spread={spread:.2f})"
+            facets = [outline]; flat = True; method = f"flat (spread={spread:.2f})"
         else:
             # (b) hip-vs-gable: OFF by default. Even the corroborated test misfires
             # because a hip's central ridge is collinear with a gable's ridge (both
             # on the centerline through the end-eave midpoint), so nadir line-geometry
             # can't separate them. Reliable hip/gable needs the trained model or 3D.
             # Opt in with DETECT_GABLE=1.
-            gabs = gable_edges(rgb, f0, edges, reg) if os.environ.get("DETECT_GABLE") == "1" else set()
+            gabs = gable_edges(rgb, f0, edges, outline) if os.environ.get("DETECT_GABLE") == "1" else set()
             if gabs:
-                f0, _ = straight_skeleton_facets(reg, edge_idx=[ei for ei in range(len(edges)) if ei not in gabs])
+                f0, _ = straight_skeleton_facets(outline, edge_idx=[ei for ei in range(len(edges)) if ei not in gabs])
                 method += f" (+{len(gabs)} gable)"
             facets = list(f0.values())
     except Exception as e:
