@@ -244,13 +244,14 @@ def _boundary_edge_score(poly, E):
     return tot / max(cnt, 1)
 
 
-def refine_outline(rgb, outline, max_shift=10, scales=(1.0, 1.04, 1.08, 1.12), E=None):
+def refine_outline(rgb, outline, max_shift=10, buffers=(0, 3, 6, 9, 12), E=None):
     """Register + expand the footprint onto the real roof edges in the image.
 
-    OSM gives the WALL footprint, usually offset a few px from the orthophoto and
-    inside the roof (eave overhang). Search small translations + uniform expansions
-    that maximize the footprint boundary's overlap with image edges -> the roof
-    outline (bigger, aligned). Engineering-standard edge-based registration.
+    OSM/MS give the WALL footprint; the roof overhangs the walls by a roughly
+    CONSTANT eave distance. Search a constant outward offset (mitre buffer = sharp
+    corners) plus a small translation, maximizing the boundary's overlap with image
+    edges. Constant offset is more correct than a uniform scale, which over-expands
+    long walls relative to short ones. buffers are in pixels (~0.076 m/px: 12px≈3ft).
     """
     if E is None:
         gray = np.asarray(rgb.convert("L").filter(ImageFilter.GaussianBlur(1)), float)
@@ -258,10 +259,13 @@ def refine_outline(rgb, outline, max_shift=10, scales=(1.0, 1.04, 1.08, 1.12), E
         E = np.hypot(gx, gy); E = E / (E.max() + 1e-6)
     cx, cy = outline.centroid.x, outline.centroid.y
     best, bestsc = outline, _boundary_edge_score(outline, E)
-    for s in scales:
+    for bd in buffers:
+        exp = outline if bd == 0 else outline.buffer(bd, join_style=2, mitre_limit=4.0)
+        if exp.geom_type != "Polygon":
+            exp = max(exp.geoms, key=lambda p: p.area) if hasattr(exp, "geoms") else outline
         for dx in range(-max_shift, max_shift + 1, 2):
             for dy in range(-max_shift, max_shift + 1, 2):
-                cand = _xform(outline, s, dx, dy, cx, cy)
+                cand = _xform(exp, 1.0, dx, dy, cx, cy)
                 sc = _boundary_edge_score(cand, E)
                 if sc > bestsc:
                     bestsc, best = sc, cand
