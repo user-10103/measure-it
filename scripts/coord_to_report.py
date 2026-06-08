@@ -26,6 +26,8 @@ from shapely.geometry import Polygon, Point, shape as shp_shape, mapping as shp_
 from shapely.ops import unary_union, polygonize
 
 FP_CACHE = Path.home() / ".cache" / "measureit_footprints.json"
+MSFT_LINKS = "https://minedbuildings.z5.web.core.windows.net/global-buildings/dataset-links.csv"
+MSFT_LINKS_CACHE = Path.home() / ".cache" / "msft_links.csv"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.rgb_pipeline import process_chip_rgb
@@ -116,6 +118,63 @@ def osm_footprint(lon, lat, radius=45):
     return best
 
 
+def _quadkey(lat, lon, z=9):
+    sinlat = math.sin(math.radians(lat))
+    x = (lon + 180) / 360
+    y = 0.5 - math.log((1 + sinlat) / (1 - sinlat)) / (4 * math.pi)
+    tx, ty = int(x * 2 ** z), int(y * 2 ** z)
+    qk = ""
+    for i in range(z, 0, -1):
+        digit, mask = 0, 1 << (i - 1)
+        if tx & mask: digit += 1
+        if ty & mask: digit += 2
+        qk += str(digit)
+    return qk
+
+
+def msft_footprint(lon, lat):
+    """Nearest Microsoft (Global ML) building footprint to the point. Cached."""
+    key = f"ms:{round(lon, 5)},{round(lat, 5)}"
+    cache = json.loads(FP_CACHE.read_text()) if FP_CACHE.exists() else {}
+    if key in cache:
+        return shp_shape(cache[key]) if cache[key] else None
+    try:
+        if not MSFT_LINKS_CACHE.exists():
+            MSFT_LINKS_CACHE.parent.mkdir(parents=True, exist_ok=True)
+            MSFT_LINKS_CACHE.write_bytes(_get(MSFT_LINKS, timeout=60))
+        import csv, gzip
+        qk = _quadkey(lat, lon, 9)
+        url = None
+        for row in csv.DictReader(open(MSFT_LINKS_CACHE)):
+            if row.get("QuadKey") == qk:
+                url = row["Url"]; break
+        best = None
+        if url:
+            raw = _get(url, timeout=120)
+            txt = gzip.decompress(raw).decode() if url.endswith(".gz") or raw[:2] == b"\x1f\x8b" else raw.decode()
+            pt = Point(lon, lat); bd = 1e9
+            for line in txt.splitlines():
+                if not line.strip():
+                    continue
+                feat = json.loads(line)
+                g = feat.get("geometry")
+                if not g:
+                    continue
+                poly = shp_shape(g).buffer(0)
+                if poly.is_empty or poly.geom_type != "Polygon":
+                    continue
+                d = 0.0 if poly.contains(pt) else poly.distance(pt)
+                if d < bd:
+                    bd, best = d, poly
+                    if d == 0.0:
+                        break
+    except Exception:
+        best = None
+    cache[key] = shp_mapping(best) if best is not None else None
+    FP_CACHE.write_text(json.dumps(cache))
+    return best
+
+
 def export_bbox(base, xmin, ymin, xmax, ymax, w, h, timeout=70):
     q = urllib.parse.urlencode({"bbox": f"{xmin},{ymin},{xmax},{ymax}", "bboxSR": 4326,
                                 "size": f"{w},{h}", "imageSR": 3857, "format": "png", "f": "image"})
@@ -164,6 +223,49 @@ def hip_facets_from_footprint(outline, min_area_frac=0.02):
             if p.geom_type == "Polygon" and p.area > min_area_frac * outline.area:
                 facets.append(p)
     return facets
+
+
+def _xform(poly, s, dx, dy, cx, cy):
+    return Polygon([((x - cx) * s + cx + dx, (y - cy) * s + cy + dy)
+                    for x, y in poly.exterior.coords])
+
+
+def _boundary_edge_score(poly, E):
+    """Mean image-edge strength sampled along a polygon's boundary."""
+    H, W = E.shape
+    per = poly.exterior.length
+    n = max(48, int(per / 3))
+    tot = cnt = 0.0
+    for i in range(n):
+        p = poly.exterior.interpolate(i / n, normalized=True)
+        x, y = int(round(p.x)), int(round(p.y))
+        if 0 <= x < W and 0 <= y < H:
+            tot += E[y, x]; cnt += 1
+    return tot / max(cnt, 1)
+
+
+def refine_outline(rgb, outline, max_shift=10, scales=(1.0, 1.04, 1.08, 1.12), E=None):
+    """Register + expand the footprint onto the real roof edges in the image.
+
+    OSM gives the WALL footprint, usually offset a few px from the orthophoto and
+    inside the roof (eave overhang). Search small translations + uniform expansions
+    that maximize the footprint boundary's overlap with image edges -> the roof
+    outline (bigger, aligned). Engineering-standard edge-based registration.
+    """
+    if E is None:
+        gray = np.asarray(rgb.convert("L").filter(ImageFilter.GaussianBlur(1)), float)
+        gy, gx = np.gradient(gray)
+        E = np.hypot(gx, gy); E = E / (E.max() + 1e-6)
+    cx, cy = outline.centroid.x, outline.centroid.y
+    best, bestsc = outline, _boundary_edge_score(outline, E)
+    for s in scales:
+        for dx in range(-max_shift, max_shift + 1, 2):
+            for dy in range(-max_shift, max_shift + 1, 2):
+                cand = _xform(outline, s, dx, dy, cx, cy)
+                sc = _boundary_edge_score(cand, E)
+                if sc > bestsc:
+                    bestsc, best = sc, cand
+    return best.buffer(0), bestsc   # absolute edge score (comparable across sources)
 
 
 def _seg_dist(P, a, b):
@@ -307,26 +409,41 @@ def report_for(coord):
     base, gsd = COUNTY_EP.get(county, FCDOP)
     src = county if county in COUNTY_EP else f"FCDOP(6in) [{county}]"
 
-    # 2) building outline from OSM (public footprint)
-    fp = osm_footprint(lon, lat)
-    if fp is None:
-        return f"{label}: no OSM building footprint found (skip — needs image-seg fallback)"
+    # 2) building outline — BEST OF BOTH: OpenStreetMap + Microsoft footprints
+    cands = [(n, f) for n, f in (("osm", osm_footprint(lon, lat)),
+                                 ("msft", msft_footprint(lon, lat))) if f is not None]
+    if not cands:
+        return f"{label}: no footprint (OSM or Microsoft)"
 
-    # 3) chip bbox = footprint bounds + 18% margin; fetch 3-inch over it
-    x0, y0, x1, y1 = fp.bounds
-    mx, my = (x1 - x0) * 0.18, (y1 - y0) * 0.18
-    bx0, by0, bx1, by1 = x0 - mx, y0 - my, x1 + mx, y1 + my
+    # 3) chip bbox over the union of candidates + 18% margin; fetch 3-inch
+    xs0 = min(f.bounds[0] for _, f in cands); ys0 = min(f.bounds[1] for _, f in cands)
+    xs1 = max(f.bounds[2] for _, f in cands); ys1 = max(f.bounds[3] for _, f in cands)
+    mx, my = (xs1 - xs0) * 0.18, (ys1 - ys0) * 0.18
+    bx0, by0, bx1, by1 = xs0 - mx, ys0 - my, xs1 + mx, ys1 + my
     bw_m = (bx1 - bx0) * 111320 * math.cos(math.radians(lat))
     bh_m = (by1 - by0) * 111320
     W = max(64, int(round(bw_m / gsd))); H = max(64, int(round(bh_m / gsd)))
     rgb = export_bbox(base, bx0, by0, bx1, by1, W, H)
 
-    # 4) project footprint lon/lat -> chip pixels (y flips: north=up)
     def to_px(lo, la):
         return ((lo - bx0) / (bx1 - bx0) * W, (by1 - la) / (by1 - by0) * H)
-    outline = Polygon([to_px(lo, la) for lo, la in fp.exterior.coords]).buffer(0)
-    if outline.geom_type != "Polygon":
-        outline = max(outline.geoms, key=lambda p: p.area)
+
+    # 4) refine BOTH footprints onto the real roof edges; keep the better fit
+    gray = np.asarray(rgb.convert("L").filter(ImageFilter.GaussianBlur(1)), float)
+    gyy, gxx = np.gradient(gray); E = np.hypot(gxx, gyy); E = E / (E.max() + 1e-6)
+    refine = os.environ.get("NO_REFINE") != "1"
+    scored = []
+    for name, f in cands:
+        o = Polygon([to_px(lo, la) for lo, la in f.exterior.coords]).buffer(0)
+        if o.geom_type != "Polygon":
+            o = max(o.geoms, key=lambda p: p.area)
+        ro, sc = refine_outline(rgb, o, E=E) if refine else (o, _boundary_edge_score(o, E))
+        scored.append((sc, name, o, ro))
+    scored.sort(reverse=True, key=lambda t: t[0])
+    bestsc, fp_src, outline_raw, outline = scored[0]
+    src += f" | {fp_src}"
+    if len(scored) > 1:
+        src += f">{scored[1][1]}"
 
     # 5) facets — ALGORITHMS ONLY.
     # primary: true straight skeleton of the footprint (handles L/T/complex shapes),
@@ -366,7 +483,10 @@ def report_for(coord):
     OUT.mkdir(parents=True, exist_ok=True)
     odir = OUT / slug(label); odir.mkdir(parents=True, exist_ok=True)
     ov = rgb.copy(); d = ImageDraw.Draw(ov)
-    d.line(list(outline.exterior.coords) + [outline.exterior.coords[0]], fill=(0, 255, 255), width=4)
+    d.line(list(outline_raw.exterior.coords) + [outline_raw.exterior.coords[0]],
+           fill=(255, 90, 0), width=2)                 # raw OSM footprint (orange)
+    d.line(list(outline.exterior.coords) + [outline.exterior.coords[0]],
+           fill=(0, 255, 255), width=4)                # refined roof outline (cyan)
     rng = np.random.default_rng(7)
     for f in facets:
         c = tuple(int(v) for v in rng.integers(70, 255, 3))
@@ -382,8 +502,8 @@ def report_for(coord):
                            pixel_to_world=lambda x, y: (x * px_w, y * px_h),
                            aerial_image_path=str(ov_path), output_dir=str(odir), write_outputs=True)
     s = res["summary"]
-    return (f"OK  {label[:38]:38s} | {src} | {W}x{H}px | facets={len(facets)}({method}) | "
-            f"{s['total_area_sqft']:.0f} sqft | {s['predominant_pitch']} | {odir/'report.pdf'}")
+    return (f"OK  {label[:30]:30s} | {src} | facets={len(facets)}({method}) | "
+            f"{s['total_area_sqft']:.0f} sqft | fit={bestsc:.3f} | {odir.name}/report.pdf")
 
 
 def main():
