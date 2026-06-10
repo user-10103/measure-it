@@ -1,13 +1,17 @@
 """
 Address geocoding utilities.
-Converts street addresses to lat/lon coordinates using Google Maps Geocoding API.
+Converts street addresses to lat/lon coordinates using Nominatim (OpenStreetMap).
+No API key required.
 """
 import logging
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 import requests
-from src.config import GOOGLE_MAPS_API_KEY
 
 logger = logging.getLogger(__name__)
+
+NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
+NOMINATIM_HEADERS = {"User-Agent": "measure-it-roof-pipeline/1.0"}
+CENSUS_GEOCODER_URL = "https://geocoding.geo.census.gov/geocoder/locations/onelineaddress"
 
 
 class GeocodingError(Exception):
@@ -15,79 +19,93 @@ class GeocodingError(Exception):
     pass
 
 
-def geocode_address(address: str, api_key: Optional[str] = None) -> Dict[str, float]:
+def _geocode_nominatim(address: str) -> Optional[Dict[str, float]]:
+    """Try Nominatim; return coords dict or None on miss."""
+    try:
+        r = requests.get(
+            NOMINATIM_URL,
+            params={"q": address, "format": "json", "limit": 1, "addressdetails": 0},
+            headers=NOMINATIM_HEADERS,
+            timeout=10,
+        )
+        r.raise_for_status()
+        results = r.json()
+        if results:
+            return {"lat": float(results[0]["lat"]), "lon": float(results[0]["lon"])}
+    except Exception:
+        pass
+    return None
+
+
+def _geocode_census(address: str) -> Optional[Dict[str, float]]:
+    """Try US Census Bureau Geocoder; return coords dict or None on miss."""
+    try:
+        r = requests.get(
+            CENSUS_GEOCODER_URL,
+            params={"address": address, "benchmark": "Public_AR_Current", "format": "json"},
+            timeout=15,
+        )
+        r.raise_for_status()
+        matches = r.json().get("result", {}).get("addressMatches", [])
+        if matches:
+            coords = matches[0]["coordinates"]
+            return {"lat": float(coords["y"]), "lon": float(coords["x"])}
+    except Exception:
+        pass
+    return None
+
+
+def geocode_address(address: str) -> Dict[str, float]:
     """
-    Convert street address to latitude/longitude coordinates.
+    Convert street address to latitude/longitude. No API key required.
+
+    Tries Nominatim (OpenStreetMap) first, then falls back to the US Census
+    Bureau Geocoder which has complete coverage of all US addresses.
 
     Args:
         address: Full street address (e.g., "123 Main St, City, State ZIP")
-        api_key: Google Maps API key (defaults to config value)
 
     Returns:
         Dictionary with 'lat' and 'lon' keys
 
     Raises:
-        GeocodingError: If geocoding fails or returns no results
+        GeocodingError: If both geocoders return no results
 
     Example:
         >>> coords = geocode_address("16347 Heathrow Dr, Tampa, FL 33647")
         >>> print(coords)
         {'lat': 28.1178764, 'lon': -82.3951068}
     """
-    if api_key is None:
-        api_key = GOOGLE_MAPS_API_KEY
+    logger.info(f"Geocoding: {address}")
 
-    if not api_key:
-        raise GeocodingError(
-            "Google Maps API key not configured. "
-            "Set GOOGLE_MAPS_API_KEY in your .env file."
-        )
-
-    url = "https://maps.googleapis.com/maps/api/geocode/json"
-    params = {
-        "address": address,
-        "key": api_key
-    }
-
-    try:
-        logger.info(f"Geocoding address: {address}")
-        response = requests.get(url, params=params, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-
-        if data.get("status") != "OK":
-            raise GeocodingError(
-                f"Geocoding failed with status: {data.get('status')}. "
-                f"Message: {data.get('error_message', 'No error message')}"
-            )
-
-        if not data.get("results"):
-            raise GeocodingError(f"No results found for address: {address}")
-
-        location = data["results"][0]["geometry"]["location"]
-        coords = {
-            "lat": location["lat"],
-            "lon": location["lng"]
-        }
-
-        logger.info(f"Geocoded to: ({coords['lat']:.6f}, {coords['lon']:.6f})")
+    coords = _geocode_nominatim(address)
+    if coords:
+        logger.info(f"Nominatim -> ({coords['lat']:.6f}, {coords['lon']:.6f})")
         return coords
 
-    except requests.RequestException as e:
-        raise GeocodingError(f"Network error during geocoding: {str(e)}") from e
+    logger.info("Nominatim miss — trying US Census Geocoder")
+    coords = _geocode_census(address)
+    if coords:
+        logger.info(f"Census -> ({coords['lat']:.6f}, {coords['lon']:.6f})")
+        return coords
+
+    raise GeocodingError(
+        f"Could not geocode address: '{address}'. "
+        "Check that the address is a valid US street address."
+    )
 
 
 def get_coordinates(
     address: Optional[str] = None,
     lat: Optional[float] = None,
-    lon: Optional[float] = None
+    lon: Optional[float] = None,
 ) -> Dict[str, float]:
     """
     Get coordinates from either address or explicit lat/lon.
 
     Priority:
-    1. If lat/lon provided, use them
-    2. Otherwise, geocode the address
+    1. If lat/lon provided, use them directly
+    2. Otherwise geocode the address with Nominatim
 
     Args:
         address: Street address to geocode
@@ -100,20 +118,11 @@ def get_coordinates(
     Raises:
         ValueError: If neither address nor lat/lon provided
         GeocodingError: If geocoding fails
-
-    Example:
-        >>> # Using explicit coordinates
-        >>> coords = get_coordinates(lat=28.1178764, lon=-82.3951068)
-        >>>
-        >>> # Using address
-        >>> coords = get_coordinates(address="16347 Heathrow Dr, Tampa, FL 33647")
     """
-    # If lat/lon provided, use them
     if lat is not None and lon is not None:
         logger.info(f"Using explicit coordinates: ({lat:.6f}, {lon:.6f})")
         return {"lat": lat, "lon": lon}
 
-    # Otherwise geocode the address
     if address:
         return geocode_address(address)
 

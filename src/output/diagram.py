@@ -111,7 +111,7 @@ def render_diagram(report_input: dict, mode: str = "plain",
             cy = sum(p[1] for p in poly) / len(poly)
             sx, sy = tx(cx, cy)
             if mode == "area":
-                label = str(int(round(m2_to_sqft(f.get("plan_area_m2", 0.0)))))
+                label = str(int(round(m2_to_sqft(f.get("surface_area_m2") or f.get("plan_area_m2", 0.0)))))
                 if f.get("is_flat"):
                     label = "Flat " + label
             else:  # pitch

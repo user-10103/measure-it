@@ -386,6 +386,26 @@ def find_tile_containing_point(
         >>> tile = find_tile_containing_point(tiles, 28.1178, -82.3951)
     """
     building_wgs84 = Point(lon, lat)
+
+    # Fast path: a locally cached tile that contains the point lets us skip
+    # opening up to hundreds of remote COG headers (~minutes per run).
+    naip_cache = DATA_CACHE_DIR / "naip"
+    if naip_cache.exists():
+        by_name = {Path(k).name: k for k in tiles}
+        for local in sorted(naip_cache.glob("*.tif")):
+            key = by_name.get(local.name)
+            if key is None:
+                continue
+            try:
+                with rasterio.open(local) as src:
+                    tr = Transformer.from_crs("EPSG:4326", src.crs, always_xy=True)
+                    pt = shp_transform(tr.transform, building_wgs84)
+                    if box(*src.bounds).contains(pt):
+                        logger.info(f"Found matching tile in local cache: {local.name}")
+                        return key
+            except Exception:
+                continue
+
     aws_session = aws_session if aws_session is not None else AWSSession(boto3.Session(), requester_pays=True)
 
     checks = max_checks or len(tiles)

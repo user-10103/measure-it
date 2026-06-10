@@ -22,6 +22,10 @@ logger = logging.getLogger(__name__)
 # Standard roof pitches (rise:12 format)
 STANDARD_PITCHES = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 16, 18, 20, 24]
 
+# Slopes below this are flat roof sections (membrane/built-up). LiDAR noise on
+# flat roofs otherwise reads as 1:12-2:12 and flips the flat/pitched split.
+FLAT_SLOPE_DEG = 2.5
+
 # Compass bins for aspect
 COMPASS_BINS = {
     "N": (337.5, 22.5),
@@ -52,6 +56,7 @@ class FacetMetrics:
     surface_area_m2: float
     inliers_count: int
     residual_median_m: float
+    is_flat: bool = False
 
     def to_dict(self) -> dict:
         """Export as dict matching agent spec schema."""
@@ -65,7 +70,8 @@ class FacetMetrics:
             "plan_area_m2": round(self.plan_area_m2, 2),
             "surface_area_m2": round(self.surface_area_m2, 2),
             "inliers_count": self.inliers_count,
-            "residual_median_m": round(self.residual_median_m, 3)
+            "residual_median_m": round(self.residual_median_m, 3),
+            "is_flat": self.is_flat
         }
 
 
@@ -249,7 +255,8 @@ def compute_surface_area(plan_area: float, slope_deg: float) -> float:
 def compute_facet_metrics(
     facet_id: int,
     points: np.ndarray,
-    plane: PlaneModel
+    plane: PlaneModel,
+    boundary: Optional[Polygon] = None
 ) -> FacetMetrics:
     """
     Compute all metrics for a single facet.
@@ -260,12 +267,20 @@ def compute_facet_metrics(
         facet_id: Facet identifier
         points: Point array for this facet
         plane: Fitted PlaneModel
+        boundary: Optional clipped facet polygon. When given, plan area comes
+            from its exact area instead of the inlier convex hull (which
+            overcounts on concave facets and overlapping clusters).
 
     Returns:
         FacetMetrics dataclass with all computed values
     """
     # Slope
     slope_deg = compute_slope_deg(plane)
+
+    # Flat snap: below FLAT_SLOPE_DEG the slope is membrane-roof LiDAR noise.
+    is_flat = slope_deg < FLAT_SLOPE_DEG
+    if is_flat:
+        slope_deg = 0.0
 
     # Pitch
     pitch_string = compute_pitch_string(slope_deg)
@@ -275,7 +290,10 @@ def compute_facet_metrics(
     aspect_bin = compute_aspect_bin(aspect_deg)
 
     # Area
-    plan_area = compute_plan_area(points, plane.inlier_mask)
+    if boundary is not None and not boundary.is_empty:
+        plan_area = float(boundary.area)
+    else:
+        plan_area = compute_plan_area(points, plane.inlier_mask)
     surface_area = compute_surface_area(plan_area, slope_deg)
 
     metrics = FacetMetrics(
@@ -288,13 +306,15 @@ def compute_facet_metrics(
         plan_area_m2=plan_area,
         surface_area_m2=surface_area,
         inliers_count=plane.inlier_count,
-        residual_median_m=plane.residual_median
+        residual_median_m=plane.residual_median,
+        is_flat=is_flat
     )
 
     logger.info(
         f"Facet {facet_id}: slope={slope_deg:.1f}°, pitch={pitch_string}, "
         f"aspect={aspect_bin} ({aspect_deg:.0f}°), "
         f"area={surface_area:.1f}m² ({plan_area:.1f}m² plan)"
+        + (" [flat]" if is_flat else "")
     )
 
     return metrics
@@ -302,7 +322,8 @@ def compute_facet_metrics(
 
 def compute_all_facet_metrics(
     facets: List,  # List[Facet] from segment.py
-    planes: List[PlaneModel]
+    planes: List[PlaneModel],
+    boundaries: Optional[Dict[int, Polygon]] = None
 ) -> List[FacetMetrics]:
     """
     Compute metrics for all facets.
@@ -310,6 +331,7 @@ def compute_all_facet_metrics(
     Args:
         facets: List of Facet objects from segmentation
         planes: List of PlaneModel objects (one per facet)
+        boundaries: Optional {facet_id: clipped polygon} for exact plan areas
 
     Returns:
         List of FacetMetrics
@@ -325,7 +347,8 @@ def compute_all_facet_metrics(
         metrics = compute_facet_metrics(
             facet_id=facet.facet_id,
             points=facet.points,
-            plane=plane
+            plane=plane,
+            boundary=(boundaries or {}).get(facet.facet_id)
         )
         metrics_list.append(metrics)
 

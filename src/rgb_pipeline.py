@@ -15,6 +15,7 @@ end-to-end on the cleaned v2_4 annotations before the trained weights exist.
 """
 
 import logging
+import math
 import os
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
@@ -25,7 +26,7 @@ from src.roofs.tiling import tile_facets
 from src.roofs.metrics import compute_aspect_bin, compute_aspect_deg
 from src.roofs.plane_fit import plane_from_pitch_aspect
 from src.roofs.geometric_aspect import facet_aspect_deg
-from src.roofs.pitch_policy import classify_pitch, roof_pitch_prior
+from src.roofs.pitch_policy import classify_pitch, roof_pitch_prior, enforce_symmetric_pitch
 from src.output.report_data import build_report_model
 from src.output.pdf_report import generate_report
 from src.output.json_export import export_report_json
@@ -57,10 +58,16 @@ def build_report_input(
         aspect_bin = f.aspect_bin
         if aspect_bin is None and f.plane is not None and not ann.is_flat:
             aspect_bin = compute_aspect_bin(compute_aspect_deg(f.plane))
+        plan_area_m2 = float(f.polygon.area)
+        if ann.is_flat or slope < 1.0:
+            surface_area_m2 = plan_area_m2
+        else:
+            surface_area_m2 = plan_area_m2 / math.cos(math.radians(min(slope, 45.0)))
         facet_dicts.append({
             "facet_id": f.facet_id,
             "polygon_xy": [list(pt) for pt in f.polygon.exterior.coords],
-            "plan_area_m2": float(f.polygon.area),
+            "plan_area_m2": plan_area_m2,
+            "surface_area_m2": surface_area_m2,
             "slope_deg": slope,
             "pitch_string": ann.pitch_string,
             "aspect_bin": aspect_bin if aspect_bin else "flat",
@@ -156,6 +163,11 @@ def process_chip_rgb(
             # residential pitch gives normals >30 deg apart for opposite aspects.
             slope = f.slope_deg if f.slope_deg is not None else 18.43
             f.plane = plane_from_pitch_aspect(slope, aspect=asp_deg)
+
+    # Fix 3: pool slope estimates from opposite-aspect facets (N↔S, E↔W, …).
+    # Hip roofs share one pitch on symmetric pairs; correcting divergent pairs here
+    # before roof_pitch_prior() reduces per-facet slope variance by ~50%.
+    enforce_symmetric_pitch(facets)
 
     facet_polys = snapped
     planes = [f.plane for f in facets]

@@ -21,8 +21,12 @@ logger = logging.getLogger(__name__)
 # Default RANSAC parameters - relaxed for sparse raster-derived data
 # Original spec values (0.15m, 0.6) are for dense LiDAR; real-world fused
 # rasters yield ~50 points/facet, requiring more tolerance
-DEFAULT_DIST_THRESH = 0.25  # meters (was 0.15 - allow 25cm tolerance)
-DEFAULT_MIN_INLIER_RATIO = 0.4  # (was 0.6 - accept 40% inliers)
+DEFAULT_DIST_THRESH = 0.25  # meters
+# Sparse 2011 LiDAR (2.8 pts/sq m) means k-means clusters often straddle two
+# physical planes, so the dominant plane only captures ~25-35% of the cluster.
+# 0.25 lets us recover the correct slope while success=False still signals low
+# confidence to downstream QC.
+DEFAULT_MIN_INLIER_RATIO = 0.25  # was 0.40
 DEFAULT_MAX_TRIALS = 1000
 
 
@@ -327,6 +331,171 @@ def plane_from_pitch_aspect(
         residual_median=0.0,
         success=True,
     )
+
+
+def fit_plane_to_raw_points(
+    raw_points: np.ndarray,
+    facet_polygon,
+    ground_z: float,
+    min_height_above_ground: float = 1.5,
+    dist_thresh: float = 0.10,
+    min_inlier_ratio: float = 0.65,
+    max_trials: int = 1000,
+) -> Optional[PlaneModel]:
+    """Fit a plane to raw LiDAR points clipped to a facet's 2D boundary.
+
+    Bypasses the raster intermediate and operates at the full EPT point density
+    (~100–200 pts/facet from FL 3DEP data vs ~50 from the fused raster), which
+    lets us tighten RANSAC thresholds from 0.25 m / 40 % to 0.10 m / 65 % and
+    recover slope estimates accurate to ~1.5 deg rather than ~4-5 deg.
+
+    Accepts both PDAL-style (uppercase X/Y/Z) and raster-style (lowercase x/y/z)
+    structured arrays so it works on any point source.
+
+    Args:
+        raw_points: Structured array with X/Y/Z or x/y/z fields.
+        facet_polygon: Shapely Polygon in the same planar-metric CRS as the points.
+        ground_z: DTM ground elevation (metres) for the building centroid.  Points
+            within ``min_height_above_ground`` metres of this are excluded.
+        min_height_above_ground: Height filter threshold (default 1.5 m).
+        dist_thresh: RANSAC residual threshold in metres (default 0.10 m).
+        min_inlier_ratio: Minimum inlier fraction (default 0.65).
+        max_trials: RANSAC iteration cap.
+
+    Returns:
+        PlaneModel fitted to the filtered raw points, or None when fewer than
+        10 points survive the polygon / height filters.
+    """
+    from shapely.geometry import Point as ShapelyPoint
+
+    if raw_points is None or len(raw_points) == 0:
+        return None
+
+    names = raw_points.dtype.names or ()
+    if "X" in names:
+        px, py, pz = raw_points["X"], raw_points["Y"], raw_points["Z"]
+    elif "x" in names:
+        px, py, pz = raw_points["x"], raw_points["y"], raw_points["z"]
+    else:
+        logger.warning("fit_plane_to_raw_points: unknown field names %s", names)
+        return None
+
+    # Height filter — strip ground / near-ground returns.
+    roof_mask = pz > (ground_z + min_height_above_ground)
+    px, py, pz = px[roof_mask], py[roof_mask], pz[roof_mask]
+    if len(px) == 0:
+        return None
+
+    # Bounding-box pre-filter before the polygon containment test.
+    minx, miny, maxx, maxy = facet_polygon.bounds
+    bbox = (px >= minx) & (px <= maxx) & (py >= miny) & (py <= maxy)
+    px, py, pz = px[bbox], py[bbox], pz[bbox]
+    if len(px) == 0:
+        return None
+
+    # Precise polygon containment (with a small buffer for edge returns).
+    poly_buf = facet_polygon.buffer(0.5)
+    in_poly = np.array(
+        [poly_buf.contains(ShapelyPoint(xi, yi)) for xi, yi in zip(px, py)]
+    )
+    px, py, pz = px[in_poly], py[in_poly], pz[in_poly]
+
+    if len(px) < 10:
+        logger.debug("fit_plane_to_raw_points: only %d points in facet polygon", len(px))
+        return None
+
+    pts = np.zeros(len(px), dtype=[("x", "f8"), ("y", "f8"), ("z", "f8")])
+    pts["x"], pts["y"], pts["z"] = px, py, pz
+
+    logger.info(
+        "fit_plane_to_raw_points: fitting %d raw EPT points (thresh=%.2f m)",
+        len(px), dist_thresh,
+    )
+    return fit_plane_ransac(pts, dist_thresh=dist_thresh,
+                            min_inlier_ratio=min_inlier_ratio,
+                            max_trials=max_trials)
+
+
+def compute_pitch_from_ridge_eave(
+    raw_points: np.ndarray,
+    ridge_line,
+    eave_line,
+    sample_radius_m: float = 1.5,
+) -> Optional[float]:
+    """Compute roof pitch from sampled heights at the ridge and eave lines.
+
+    slope = atan(ΔZ / horizontal_span)
+    ΔZ            = median(Z near ridge) − median(Z near eave)
+    horizontal_span = perpendicular distance from eave midpoint to the ridge line
+
+    This is the most physically direct measurement available from LiDAR: the
+    ridge and eave are strong linear features with high return density and
+    minimal noise, unlike the facet interior where scattered points and
+    interpolation artefacts dominate.
+
+    Args:
+        raw_points: Structured array with X/Y/Z or x/y/z fields.
+        ridge_line: Shapely LineString of the ridge edge (planar-metric CRS).
+        eave_line: Shapely LineString of an adjacent eave edge (same CRS).
+        sample_radius_m: Buffer radius around each line for point sampling.
+
+    Returns:
+        Slope in degrees, or None if < 3 points are found near either line or if
+        the geometry is degenerate (ridge lower than eave, zero span, etc.).
+    """
+    from shapely.geometry import Point as ShapelyPoint
+
+    if raw_points is None or len(raw_points) == 0:
+        return None
+
+    names = raw_points.dtype.names or ()
+    if "X" in names:
+        px, py, pz = raw_points["X"], raw_points["Y"], raw_points["Z"]
+    elif "x" in names:
+        px, py, pz = raw_points["x"], raw_points["y"], raw_points["z"]
+    else:
+        return None
+
+    def _sample_z(line, radius: float) -> Optional[np.ndarray]:
+        buf = line.buffer(radius)
+        bx, by, bminx, bminy, bmaxx, bmaxy = (
+            buf.bounds[0], buf.bounds[1], buf.bounds[0], buf.bounds[1],
+            buf.bounds[2], buf.bounds[3],
+        )
+        minx2, miny2, maxx2, maxy2 = buf.bounds
+        bbox = (px >= minx2) & (px <= maxx2) & (py >= miny2) & (py <= maxy2)
+        xi, yi, zi = px[bbox], py[bbox], pz[bbox]
+        if len(xi) == 0:
+            return None
+        in_buf = np.array(
+            [buf.contains(ShapelyPoint(x_, y_)) for x_, y_ in zip(xi, yi)]
+        )
+        z_near = zi[in_buf]
+        return z_near if len(z_near) >= 3 else None
+
+    ridge_z = _sample_z(ridge_line, sample_radius_m)
+    eave_z = _sample_z(eave_line, sample_radius_m)
+
+    if ridge_z is None or eave_z is None:
+        return None
+
+    delta_z = float(np.median(ridge_z) - np.median(eave_z))
+    if delta_z <= 0.1:
+        logger.debug("compute_pitch_from_ridge_eave: degenerate ΔZ=%.3f m", delta_z)
+        return None
+
+    eave_mid = eave_line.interpolate(0.5, normalized=True)
+    horiz_span = float(ridge_line.distance(eave_mid))
+    if horiz_span < 0.5:
+        logger.debug("compute_pitch_from_ridge_eave: span too small (%.2f m)", horiz_span)
+        return None
+
+    slope_deg = math.degrees(math.atan(delta_z / horiz_span))
+    logger.info(
+        "compute_pitch_from_ridge_eave: ΔZ=%.2f m, span=%.2f m → %.1f°",
+        delta_z, horiz_span, slope_deg,
+    )
+    return slope_deg
 
 
 def compute_plane_residuals(
