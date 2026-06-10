@@ -21,6 +21,50 @@ from src.config import WESM_INDEX_PATH
 
 logger = logging.getLogger(__name__)
 
+ENTWINE_RESOURCES_URL = "https://usgs.entwine.io/boundaries/resources.geojson"
+ENTWINE_CACHE = Path(__file__).resolve().parents[2] / "data" / "ept_resources.geojson"
+
+
+def discover_ept_from_entwine(lat: float, lon: float) -> Optional[str]:
+    """Find the newest EPT dataset covering a point via the usgs.entwine.io
+    boundary index (no WESM.gpkg needed).
+
+    Caches resources.geojson under data/. Picks the covering dataset whose
+    name carries the most recent trailing year (e.g. FL_HillsboroughCo-Lot2_2011).
+
+    Returns the ept.json URL, or None when nothing covers the point.
+    """
+    import json as _json
+
+    if not ENTWINE_CACHE.exists():
+        import requests
+        logger.info(f"Downloading entwine EPT index to {ENTWINE_CACHE}")
+        ENTWINE_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        resp = requests.get(ENTWINE_RESOURCES_URL, timeout=120)
+        resp.raise_for_status()
+        ENTWINE_CACHE.write_bytes(resp.content)
+
+    from shapely.geometry import shape as _shape
+    pt = Point(lon, lat)
+    candidates = []
+    data = _json.load(open(ENTWINE_CACHE))
+    for feat in data.get("features", []):
+        name = feat.get("properties", {}).get("name", "")
+        try:
+            if _shape(feat["geometry"]).contains(pt):
+                m = re.search(r"(\d{4})$", name)
+                year = int(m.group(1)) if m else 0
+                candidates.append((year, name))
+        except Exception:
+            continue
+    if not candidates:
+        logger.warning(f"No entwine EPT coverage at ({lat:.5f}, {lon:.5f})")
+        return None
+    year, name = max(candidates)
+    url = f"https://s3-us-west-2.amazonaws.com/usgs-lidar-public/{name}/ept.json"
+    logger.info(f"Entwine EPT for ({lat:.5f}, {lon:.5f}): {name} ({year})")
+    return url
+
 
 def discover_lidar_dataset(lat: float, lon: float, index_path: str = None) -> Optional[dict]:
     """
