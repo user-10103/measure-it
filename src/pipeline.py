@@ -608,6 +608,10 @@ def process_address(
                 # footprint (8 m porch/lanai expansion). Clipping those cells
                 # to the MS outline would amputate the porch — use the union
                 # of the NAIP cells themselves as the roof extent instead.
+                # CAP: a porch adds tens of percent; on treed suburban lots the
+                # expansion captures vegetation and the union can balloon to 4x
+                # the footprint (observed: 244 m2 house -> 1012 m2 "extent").
+                # Beyond 1.4x we keep the MS outline as the trustworthy extent.
                 if naip_seg_used and outline_native is not None:
                     try:
                         from shapely.ops import unary_union as _uun
@@ -617,11 +621,20 @@ def process_address(
                         if _cells_union.geom_type == "Polygon" and _cells_union.area > 0:
                             _ext = _cells_union.union(outline_native)
                             if _ext.geom_type == "Polygon":
-                                logger.info(
-                                    "Roof extent: NAIP cells + footprint = %.1f sq m "
-                                    "(MS footprint alone %.1f)", _ext.area, outline_native.area,
-                                )
-                                outline_native = _ext
+                                _ratio = _ext.area / max(outline_native.area, 1e-9)
+                                if _ratio <= 1.4:
+                                    logger.info(
+                                        "Roof extent: NAIP cells + footprint = %.1f sq m "
+                                        "(MS footprint alone %.1f)", _ext.area, outline_native.area,
+                                    )
+                                    outline_native = _ext
+                                else:
+                                    logger.warning(
+                                        "NAIP extent %.1f sq m is %.1fx the MS footprint "
+                                        "(%.1f sq m) — vegetation capture suspected; "
+                                        "keeping MS outline", _ext.area, _ratio,
+                                        outline_native.area,
+                                    )
                     except Exception as _ue:
                         logger.warning(f"NAIP roof-extent union failed ({_ue}) — using MS outline")
 

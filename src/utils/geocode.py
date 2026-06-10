@@ -19,6 +19,42 @@ class GeocodingError(Exception):
     pass
 
 
+# ── persistent geocode cache ─────────────────────────────────────────────────
+from pathlib import Path as _Path
+import json as _json
+
+_GEOCODE_CACHE_PATH = _Path(__file__).resolve().parents[2] / "data" / "geocode_cache.json"
+_geocode_cache: Optional[dict] = None
+
+
+def _cache_key(address: str) -> str:
+    return " ".join(address.strip().lower().split())
+
+
+def _cache_load() -> dict:
+    global _geocode_cache
+    if _geocode_cache is None:
+        try:
+            _geocode_cache = _json.load(open(_GEOCODE_CACHE_PATH))
+        except Exception:
+            _geocode_cache = {}
+    return _geocode_cache
+
+
+def _cache_get(address: str) -> Optional[Dict[str, float]]:
+    return _cache_load().get(_cache_key(address))
+
+
+def _cache_put(address: str, coords: Dict[str, float]) -> None:
+    cache = _cache_load()
+    cache[_cache_key(address)] = {"lat": coords["lat"], "lon": coords["lon"]}
+    try:
+        _GEOCODE_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _json.dump(cache, open(_GEOCODE_CACHE_PATH, "w"), indent=0)
+    except Exception as e:
+        logger.debug(f"geocode cache write failed: {e}")
+
+
 def _geocode_nominatim(address: str) -> Optional[Dict[str, float]]:
     """Try Nominatim; return coords dict or None on miss."""
     try:
@@ -78,15 +114,27 @@ def geocode_address(address: str) -> Dict[str, float]:
     """
     logger.info(f"Geocoding: {address}")
 
+    # Persistent cache: Nominatim returns slightly different coordinates for
+    # the same address across calls (observed: 12 cm jitter), and that jitter
+    # butterfly-effects through the EPT fetch window into different facet
+    # geometry. Caching pins each address to one coordinate forever — this is
+    # a REPRODUCIBILITY requirement, not just a speed win.
+    cached = _cache_get(address)
+    if cached:
+        logger.info(f"Geocode cache -> ({cached['lat']:.6f}, {cached['lon']:.6f})")
+        return cached
+
     coords = _geocode_nominatim(address)
     if coords:
         logger.info(f"Nominatim -> ({coords['lat']:.6f}, {coords['lon']:.6f})")
+        _cache_put(address, coords)
         return coords
 
     logger.info("Nominatim miss — trying US Census Geocoder")
     coords = _geocode_census(address)
     if coords:
         logger.info(f"Census -> ({coords['lat']:.6f}, {coords['lon']:.6f})")
+        _cache_put(address, coords)
         return coords
 
     raise GeocodingError(

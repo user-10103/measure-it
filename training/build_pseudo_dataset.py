@@ -38,6 +38,11 @@ MIN_QC_CONFIDENCE = 0.6
 MIN_FACETS, MAX_FACETS = 3, 40
 MIN_UNION_IOU = 0.7          # facet union vs outline, pixel space
 MIN_AREA_M2, MAX_AREA_M2 = 80.0, 600.0
+# Canopy gate: tree crowns overhanging the roof corrupt the nDSM and produce
+# fragmented, mushy facet labels even when registration is perfect. NDVI from
+# the chip's own NIR band measures it directly.
+MAX_CANOPY_FRACTION = 0.25   # of roof pixels with NDVI > 0.3
+CANOPY_NDVI = 0.3
 
 CATEGORIES = [
     {"id": 1, "name": "roof_polygon", "supercategory": "roof"},
@@ -145,6 +150,8 @@ def process_one(addr: str, state: str, work_dir: Path):
         inv = ~src.transform
         W, H = src.width, src.height
         rgb = src.read([1, 2, 3])
+        nir = src.read(4).astype(np.float32) if src.count >= 4 else None
+        chip_transform = src.transform
 
     to_chip = None
     facets_crs = fg_props.get("crs") or ""
@@ -153,6 +160,29 @@ def process_one(addr: str, state: str, work_dir: Path):
         if not CRS.from_user_input(facets_crs).equals(CRS.from_user_input(chip_crs)):
             to_chip = Transformer.from_crs(facets_crs, chip_crs, always_xy=True).transform
             logger.info(f"{aid}: reprojecting labels {facets_crs} -> {chip_crs}")
+
+    # Canopy gate: NDVI over the roof outline. Overhanging crowns corrupt the
+    # nDSM-derived facets (observed: 16 mushy fragments on a canopy-covered
+    # house) — registration stays perfect but the label SHAPES are garbage.
+    if nir is not None:
+        from rasterio.features import geometry_mask as _geom_mask
+        from shapely.ops import transform as _shp_tx2
+        _outline_chip = outline_geom
+        if to_chip is not None:
+            _outline_chip = _shp_tx2(to_chip, outline_geom)
+        try:
+            roof_px = ~_geom_mask([_outline_chip.__geo_interface__], out_shape=(H, W),
+                                  transform=chip_transform)
+            if roof_px.any():
+                red = rgb[0].astype(np.float32)
+                ndvi = (nir - red) / (nir + red + 1e-6)
+                canopy = float((ndvi[roof_px] > CANOPY_NDVI).mean())
+                rec["canopy_fraction"] = round(canopy, 3)
+                if canopy > MAX_CANOPY_FRACTION:
+                    rec["status"] = f"reject:canopy={canopy:.2f}"
+                    return rec, None
+        except Exception as _ce:
+            logger.debug(f"{aid}: canopy gate skipped ({_ce})")
 
     outline_ring = world_to_pixel_ring(outline_geom.exterior.coords, inv, to_chip)
     facet_rings = []
@@ -233,7 +263,19 @@ def main():
             done[r["address_id"]] = r
 
     addrs = json.load(open(args.addresses))
-    batch = addrs[args.offset:args.offset + args.limit]
+    # addresses.json contains duplicates (149 observed) — dedup by stable id
+    # BEFORE slicing so offset/limit windows never overlap on the same address
+    seen_ids = set()
+    unique = []
+    for entry in addrs:
+        a = entry["address"] if isinstance(entry, dict) else str(entry)
+        k = address_id(a)
+        if k not in seen_ids:
+            seen_ids.add(k)
+            unique.append(entry)
+    if len(unique) < len(addrs):
+        logger.info(f"Deduped address list: {len(addrs)} -> {len(unique)}")
+    batch = unique[args.offset:args.offset + args.limit]
 
     accepted = {}
     mf = open(manifest_path, "a")
