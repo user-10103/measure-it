@@ -85,10 +85,11 @@ def _mask_to_polygon(
 
 
 def _load_model(checkpoint_path: str) -> Any:
-    """Load (and cache) an RF-DETR model from a .pth checkpoint.
+    """Load (and cache) an RF-DETR model from a checkpoint.
 
-    Uses rfdetr.from_checkpoint which auto-detects model size from the
-    weight header — no need to know Small/Medium/Large at call time.
+    Supports both:
+    - .pth exports (from rfdetr training) — loaded via from_checkpoint()
+    - .ckpt files (PyTorch Lightning) — loaded via RFDETRSegPreview(pretrain_weights=)
     """
     key = str(Path(checkpoint_path).resolve())
     if key in _model_cache:
@@ -97,18 +98,21 @@ def _load_model(checkpoint_path: str) -> Any:
     import warnings
     warnings.filterwarnings("ignore", category=FutureWarning)
 
-    # rfdetr.from_checkpoint is the stable public API (rfdetr ≥ 1.7).
-    # Do NOT import RFDETRSegSmall/etc. "for side-effects" — that breaks
-    # on version changes and is unnecessary.
     # Compatibility shim: torch<2.5 lacks float8 types needed by transformers>=4.45
     import torch as _torch
     for _fp8 in ["float8_e4m3fn","float8_e5m2","float8_e4m3fnuz","float8_e5m2fnuz","float8_e8m0fnu"]:
         if not hasattr(_torch, _fp8):
             setattr(_torch, _fp8, _torch.float16)
-    from rfdetr import from_checkpoint  # noqa
 
     logger.info(f"Loading RF-DETR checkpoint: {checkpoint_path}")
-    model = from_checkpoint(checkpoint_path)
+    if checkpoint_path.endswith(".ckpt"):
+        # Lightning checkpoint — from_checkpoint() would raise KeyError: 'args'
+        from rfdetr import RFDETRSegPreview
+        model = RFDETRSegPreview(pretrain_weights=checkpoint_path, resolution=512)
+    else:
+        from rfdetr import from_checkpoint
+        model = from_checkpoint(checkpoint_path)
+
     _model_cache[key] = model
     logger.info("RF-DETR model loaded and cached.")
     return model
@@ -146,11 +150,13 @@ class RFDETRBackend:
         checkpoint_path: str,
         threshold: float = 0.35,
         resolution: int = 512,
+        infer_shape: int = 624,  # must be divisible by patch_size*num_windows (12*2=24)
         mask_epsilon: float = 0.025  # locked: e/f<3.5 with margin; do not raise further,
     ) -> None:
         self.checkpoint_path = str(checkpoint_path)
         self.threshold = threshold
         self.resolution = resolution
+        self.infer_shape = infer_shape
         self.mask_epsilon = mask_epsilon
         # Eagerly load so startup errors surface immediately, not at first call.
         self._model = _load_model(self.checkpoint_path)
@@ -179,7 +185,8 @@ class RFDETRBackend:
 
         img_h, img_w = image.shape[:2]
 
-        detections = self._model.predict(image, threshold=self.threshold)
+        detections = self._model.predict(image, threshold=self.threshold,
+                                         shape=self.infer_shape)
 
         # sv.Detections attributes we use:
         #   .mask       (N, mask_H, mask_W) bool array, or None
