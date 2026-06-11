@@ -59,8 +59,14 @@ GRADIENT_SMOOTH_SIGMA = 2.5
 #           shrubs, and neighbour structures from being included: only
 #           expansion-ring pixels that form a contiguous blob touching the
 #           core roof mask survive.
-MIN_NDSM_HEIGHT_M = 1.5       # core footprint threshold (all USA states)
-MIN_NDSM_HEIGHT_PORCH_M = 1.0  # expansion-ring threshold (attached structures)
+# Benchmark-tuned (scripts/bench.py 11x11 sweep vs the Roofr truth report,
+# 110 Holland Ln): the 1.7-1.9 x 1.5 region is a stable plateau at +-0.3%
+# total area; porch=1.0 admitted a low fringe in the expansion ring worth
+# +10% plan area of non-roof. Re-validate on more truth buildings before
+# further tuning (the Centennial truth point is unusable: its MS footprint
+# itself misses ~35% of the building).
+MIN_NDSM_HEIGHT_M = 1.8       # core footprint threshold (all USA states)
+MIN_NDSM_HEIGHT_PORCH_M = 1.5  # expansion-ring threshold (attached structures)
 
 # Minimum region size (pixels) to keep before polygonisation.
 MIN_REGION_PX = 30

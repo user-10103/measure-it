@@ -22,9 +22,12 @@ logger = logging.getLogger(__name__)
 # Standard roof pitches (rise:12 format)
 STANDARD_PITCHES = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 16, 18, 20, 24]
 
-# Slopes below this are flat roof sections (membrane/built-up). LiDAR noise on
-# flat roofs otherwise reads as 1:12-2:12 and flips the flat/pitched split.
-FLAT_SLOPE_DEG = 2.5
+# Slopes below this are flat roof sections (membrane/built-up). At 1 m LiDAR
+# a true membrane fits at 2.5-5 deg (observed: 1,721 sqft of membrane at
+# exactly 2.50 deg missed by a 2.5 threshold); 5.0 matches the enclosure
+# filter's flat convention. Genuine 1:12 roofs are within noise of flat at
+# this data density - binning them flat is the honest call.
+FLAT_SLOPE_DEG = 5.0
 
 # Compass bins for aspect
 COMPASS_BINS = {

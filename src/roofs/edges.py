@@ -761,7 +761,7 @@ def classify_perimeter_edge(
     Without it, step flashing cannot be distinguished from eave.
     """
     g = math.hypot(plane.a, plane.b)
-    if g < math.tan(math.radians(2.5)):
+    if g < math.tan(math.radians(5.0)):
         # Flat facet perimeter is a parapet wall. Threshold matches the metrics
         # flat snap (2.5 deg) — fitted membrane-roof planes are never exactly
         # gradient-zero, so an epsilon test would classify them as eaves.
@@ -838,7 +838,7 @@ def _classify_step_junction(
 
     lower = plane_i if z_i < z_j else plane_j
     g = math.hypot(lower.a, lower.b)
-    lower_is_flat = g < math.tan(math.radians(2.5))
+    lower_is_flat = g < math.tan(math.radians(5.0))
 
     # A flat membrane meeting a pitched section is NEVER a ridge/hip/valley —
     # any real gap there is roof-meets-wall. Use a tighter trigger for that

@@ -620,12 +620,19 @@ def process_address(
                         ))
                         if _cells_union.geom_type == "Polygon" and _cells_union.area > 0:
                             _ext = _cells_union.union(outline_native)
+                            # Spatial collar: legitimate roof beyond the MS
+                            # footprint (eave overhang, attached porch) lives
+                            # within a few meters of it; yard vegetation does
+                            # not. Observed: an unclipped union carried +10.5%
+                            # plan area of canopy fringe under the ratio cap.
+                            _ext = _valid(_ext.intersection(outline_native.buffer(3.0)))
                             if _ext.geom_type == "Polygon":
                                 _ratio = _ext.area / max(outline_native.area, 1e-9)
                                 if _ratio <= 1.4:
                                     logger.info(
-                                        "Roof extent: NAIP cells + footprint = %.1f sq m "
-                                        "(MS footprint alone %.1f)", _ext.area, outline_native.area,
+                                        "Roof extent: NAIP cells + footprint (3 m collar) "
+                                        "= %.1f sq m (MS footprint alone %.1f)",
+                                        _ext.area, outline_native.area,
                                     )
                                     outline_native = _ext
                                 else:
