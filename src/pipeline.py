@@ -619,6 +619,13 @@ def process_address(
                             [_valid(b) for _, b in facet_polygons if b is not None]
                         ))
                         if _cells_union.geom_type == "Polygon" and _cells_union.area > 0:
+                            # nDSM edge smear: the Gaussian smoothing (sigma
+                            # 2.5 px at 0.5 m grid) bleeds roof height into
+                            # ground pixels, dilating the height-threshold
+                            # boundary outward by ~0.6 m uniformly along the
+                            # perimeter (verified visually vs the Roofr truth:
+                            # a 0.9 m band where real overhang is ~0.2-0.3 m).
+                            _cells_union = _valid(_cells_union.buffer(-0.6))
                             _ext = _cells_union.union(outline_native)
                             # Spatial collar: legitimate roof beyond the MS
                             # footprint (eave overhang, attached porch) lives
