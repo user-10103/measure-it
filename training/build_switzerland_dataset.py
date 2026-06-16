@@ -73,8 +73,8 @@ _NS_GML  = "http://www.opengis.net/gml"
 
 # ─── API endpoints ────────────────────────────────────────────────────────────
 
-STAC_BASE   = "https://data.geo.admin.ch/api/stac/v0.9"
-COLLECTION  = "ch.swisstopo.swissbuildings3d_3-0"
+STAC_BASE   = "https://data.geo.admin.ch/api/stac/v1"
+COLLECTION  = "ch.swisstopo.swissbuildings3d_3_0"
 STAC_ITEMS  = f"{STAC_BASE}/collections/{COLLECTION}/items"
 
 SWISS_WMS   = "https://wms.geo.admin.ch/"
@@ -180,9 +180,9 @@ def fetch_tile_urls(lon_min, lat_min, lon_max, lat_max):
         for feat in data.get("features", []):
             tile_id = feat.get("id", "unknown")
             assets  = feat.get("assets", {})
-            url     = _pick_gml_url(assets)
+            url, fmt = _pick_asset(assets)
             if url:
-                results.append((tile_id, url))
+                results.append((tile_id, url, fmt))
 
         # Follow STAC "next" link (pagination)
         params   = None
@@ -196,23 +196,32 @@ def fetch_tile_urls(lon_min, lat_min, lon_max, lat_max):
 
 
 def _pick_gml_url(assets: dict) -> str:
-    """Extract the CityGML download URL from a STAC item's assets dict."""
-    # Prefer explicit GML zip
+    """
+    Extract the best download URL from a STAC item's assets dict.
+    Preference order: CityGML > GDB > DWG (DWG is not parseable in Python).
+    Returns (url, format) tuple where format is 'gml' or 'gdb'.
+    For backwards compat this function still exists but callers should check
+    the format via _pick_asset().
+    """
+    url, fmt = _pick_asset(assets)
+    return url
+
+
+def _pick_asset(assets: dict):
+    """Return (url, fmt) where fmt is 'gml' or 'gdb' or ''."""
     for key, asset in assets.items():
         href = asset.get("href", "")
-        if href.endswith(".gml.zip"):
-            return href
-    # Fallback: any zip from swisstopo
+        if href.endswith(".gml.zip") or href.endswith(".citygml.zip"):
+            return href, "gml"
     for key, asset in assets.items():
         href = asset.get("href", "")
-        if href.endswith(".zip") and "swisstopo" in href.lower():
-            return href
-    # Last resort: any zip
+        if href.endswith(".gdb.zip"):
+            return href, "gdb"
     for key, asset in assets.items():
         href = asset.get("href", "")
         if href.endswith(".zip"):
-            return href
-    return ""
+            return href, "gml"
+    return "", ""
 
 
 def test_stac_connection():
@@ -222,8 +231,8 @@ def test_stac_connection():
         tiles = fetch_tile_urls(8.490, 47.340, 8.590, 47.400)
         if tiles:
             print(f"  OK — found {len(tiles)} tile(s) for Zurich centre")
-            for tid, url in tiles[:3]:
-                print(f"    {tid}  →  {url}")
+            for tid, url, fmt in tiles[:3]:
+                print(f"    {tid}  ({fmt})  →  {url}")
         else:
             print("  WARNING: 0 tiles returned — check collection name / bbox")
     except Exception as e:
@@ -384,8 +393,107 @@ def parse_citygml_buildings(path):
         yield bid, footprint, roof_polys
 
 
-def download_parse_tile(tile_id, url, tmp_dir):
-    """Download tile ZIP → unzip GML → parse buildings. Returns list."""
+def parse_gdb_buildings(gdb_path: Path):
+    """
+    Parse an Esri File Geodatabase → yield (building_id, footprint, [roof_polys]).
+    Tries common swisstopo layer names for roof faces.
+    Requires fiona (pip install fiona).
+    """
+    try:
+        import fiona
+    except ImportError:
+        print("  [gdb] fiona not installed — run: pip install fiona")
+        return
+
+    try:
+        layers = fiona.listlayers(str(gdb_path))
+    except Exception as e:
+        print(f"  [gdb] cannot list layers in {gdb_path.name}: {e}")
+        return
+
+    # swisstopo swissBUILDINGS3D 3.0 GDB layer names (German/English variants)
+    ROOF_CANDIDATES = [
+        "DACH", "Dach", "dach",
+        "ROOF", "Roof", "roof",
+        "DACHFLAECHE", "DachFlaeche",
+        "ROOFSURFACE", "RoofSurface",
+        "TLM_DACH", "SB3D_DACH",
+    ]
+
+    roof_layer = None
+    for candidate in ROOF_CANDIDATES:
+        if candidate in layers:
+            roof_layer = candidate
+            break
+
+    if roof_layer is None:
+        # fallback: pick first polygon layer that isn't ground/wall
+        for lyr in layers:
+            lname = lyr.upper()
+            if "BODEN" in lname or "GRUND" in lname or "FASSADE" in lname or "WALL" in lname:
+                continue
+            roof_layer = lyr
+            break
+
+    if roof_layer is None:
+        print(f"  [gdb] no roof layer found. Available: {layers}")
+        return
+
+    # Group features by building ID attribute
+    from collections import defaultdict
+    building_polys = defaultdict(list)
+
+    try:
+        with fiona.open(str(gdb_path), layer=roof_layer) as src:
+            for feat in src:
+                geom = feat.get("geometry")
+                if not geom:
+                    continue
+                props = feat.get("properties", {})
+                # try common building-ID field names
+                bid = (props.get("EGID") or props.get("egid") or
+                       props.get("UUID") or props.get("uuid") or
+                       props.get("OBJECTID") or props.get("FID") or
+                       str(feat.get("id", "")))
+                bid = str(bid)
+
+                gtype = geom["type"]
+                coords_list = []
+                if gtype == "Polygon":
+                    coords_list = [geom["coordinates"][0]]
+                elif gtype == "MultiPolygon":
+                    coords_list = [ring[0] for ring in geom["coordinates"]]
+                elif gtype == "MultiSurface" or gtype == "PolyhedralSurface":
+                    for surface in geom.get("geometries", []):
+                        if surface["type"] == "Polygon":
+                            coords_list.append(surface["coordinates"][0])
+
+                for ring in coords_list:
+                    pts = [(c[0], c[1]) for c in ring if len(c) >= 2]
+                    p = _build_polygon(pts)
+                    if p:
+                        building_polys[bid].append(p)
+    except Exception as e:
+        print(f"  [gdb] read error on layer '{roof_layer}': {e}")
+        return
+
+    for bid, polys in building_polys.items():
+        if len(polys) < MIN_FACETS or len(polys) > MAX_FACETS:
+            continue
+        total_area = sum(p.area for p in polys)
+        if total_area < MIN_ROOF_M2:
+            continue
+        try:
+            footprint = unary_union(polys).convex_hull
+            if footprint.geom_type != "Polygon" or footprint.area < MIN_ROOF_M2:
+                continue
+        except Exception:
+            continue
+        yield bid, footprint, polys
+
+
+def download_parse_tile(tile_id, url, tmp_dir, fmt="gml"):
+    """Download tile ZIP → unzip → parse buildings. Handles GML and GDB."""
     try:
         r = _get(url, timeout=300)
         zip_data = r.content
@@ -395,6 +503,30 @@ def download_parse_tile(tile_id, url, tmp_dir):
 
     try:
         zf = zipfile.ZipFile(io.BytesIO(zip_data))
+    except Exception as e:
+        print(f"\n    [{tile_id}] unzip failed: {e}")
+        return []
+
+    if fmt == "gdb":
+        # GDB is a directory of files — extract the whole .gdb folder
+        gdb_members = [n for n in zf.namelist() if ".gdb" in n]
+        if not gdb_members:
+            print(f"\n    [{tile_id}] no .gdb in zip (contents: {zf.namelist()[:5]})")
+            return []
+        gdb_dir = Path(tmp_dir) / f"{tile_id}.gdb"
+        gdb_dir.mkdir(exist_ok=True)
+        for member in gdb_members:
+            fname = Path(member).name
+            if fname:
+                with zf.open(member) as src, open(gdb_dir / fname, "wb") as dst:
+                    dst.write(src.read())
+        buildings = list(parse_gdb_buildings(gdb_dir))
+        try:
+            import shutil; shutil.rmtree(str(gdb_dir), ignore_errors=True)
+        except Exception:
+            pass
+        return buildings
+    else:
         gml_names = [n for n in zf.namelist() if n.endswith(".gml") or n.endswith(".xml")]
         if not gml_names:
             print(f"\n    [{tile_id}] no .gml in zip (contents: {zf.namelist()[:5]})")
@@ -402,16 +534,12 @@ def download_parse_tile(tile_id, url, tmp_dir):
         gml_path = Path(tmp_dir) / f"{tile_id}.gml"
         with zf.open(gml_names[0]) as src, open(gml_path, "wb") as dst:
             dst.write(src.read())
-    except Exception as e:
-        print(f"\n    [{tile_id}] unzip failed: {e}")
-        return []
-
-    buildings = list(parse_citygml_buildings(gml_path))
-    try:
-        gml_path.unlink()
-    except Exception:
-        pass
-    return buildings
+        buildings = list(parse_citygml_buildings(gml_path))
+        try:
+            gml_path.unlink()
+        except Exception:
+            pass
+        return buildings
 
 
 # ─── SWISSIMAGE WMS chip fetch ────────────────────────────────────────────────
@@ -543,10 +671,10 @@ def main():
         print(f"  {name:<24} … ", end="", flush=True)
         try:
             tiles = fetch_tile_urls(lon_min, lat_min, lon_max, lat_max)
-            new   = [(tid, url) for tid, url in tiles if tid not in seen_tiles]
-            for tid, url in new:
+            new   = [(tid, url, fmt) for tid, url, fmt in tiles if tid not in seen_tiles]
+            for tid, url, fmt in new:
                 seen_tiles.add(tid)
-                tile_queue.append((tid, url))
+                tile_queue.append((tid, url, fmt))
             print(f"{len(new)} new tiles")
         except Exception as e:
             print(f"FAILED ({e})")
@@ -560,16 +688,18 @@ def main():
             "Run with --discover-only for a connection test."
         )
 
-    # ── Step 2: Download & parse CityGML tiles ────────────────────────────────
+    detected_fmt = tile_queue[0][2] if tile_queue else "gml"
+    print(f"  Data format: {detected_fmt.upper()}")
+
+    # ── Step 2: Download & parse tiles ───────────────────────────────────────
     t0 = time.time()
-    print(f"\n[2/4] Downloading & parsing CityGML tiles …")
+    print(f"\n[2/4] Downloading & parsing swissBUILDINGS3D tiles ({detected_fmt.upper()}) …")
     all_buildings = []
 
     with tempfile.TemporaryDirectory() as tmp_dir:
-        for i, (tile_id, url) in enumerate(tile_queue, 1):
-            mb = 0
+        for i, (tile_id, url, fmt) in enumerate(tile_queue, 1):
             print(f"  [{i}/{len(tile_queue)}] {tile_id[:40]:<42}", end="", flush=True)
-            bldgs = download_parse_tile(tile_id, url, tmp_dir)
+            bldgs = download_parse_tile(tile_id, url, tmp_dir, fmt=fmt)
             bldgs = [(bid, fp, s) for bid, fp, s in bldgs if bid not in done_ids]
             all_buildings.extend(bldgs)
             print(f" {len(bldgs):>5} bldgs  (total: {len(all_buildings)})")
