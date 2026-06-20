@@ -3,35 +3,29 @@
 Convert carecamp93 Automatic Roof Plane Extraction dataset → COCO format.
 
 Source: https://github.com/carecamp93/Automatic_Roof_Plane_Extraction
-Cities:  Las Vegas NV + Atlanta GA + Paris (use --cities lasvegas atlanta to skip Paris)
-Format:  Per-building image chips + roof plane annotations as polyline shapefiles
-         (planar graph edges) which we assemble into polygon rings via Shapely.
+Cities:  Lozenets (Sofia BG), OudeMarkt (NL), Stadsveld (Enschede NL)
+         (README claims Las Vegas + Atlanta + Paris but Drive only contains European cities)
 
-Download the data from the Google Drive links in the repo README, then run:
+Annotation format: .npy files — Python dicts mapping (x,y) corner tuples to
+                   lists of connected (x,y) neighbor tuples (planar graph adjacency).
+                   We reconstruct polygon rings via Shapely polygonize().
+Image format:      256×256 RGB .jpg chips in rgb/ or clipped/ subdirs.
 
+Download the Stage 1 data from:
+  https://drive.google.com/drive/folders/12AmomRCLc28QwAtFo-9YXQpJq4Q_FTAk
+
+Run:
     python training/build_carecamp93_dataset.py \\
-        --input  /path/to/carecamp93_data \\
+        --input  /content/carecamp93/stage1 \\
         --output training/carecamp93_dataset \\
         --s3-bucket florida-roofs-v4 \\
         --s3-prefix carecamp93
 
-Input directory structure expected (from Google Drive download):
-    carecamp93_data/
-        lasvegas/
-            images/     *.png  (one per building)
-            labels/     *.shp  or  *.json  (one per building, matching filename stem)
-        atlanta/
-            images/     *.png
-            labels/     *.shp  or  *.json
-        paris/
-            images/     *.png
-            labels/     *.shp  or  *.json
-
-If the label format differs from what is expected, run with --inspect
-to print a sample label file and adjust the parsing accordingly.
+Run --inspect first to see the actual folder/file structure:
+    python training/build_carecamp93_dataset.py --input /content/carecamp93/stage1 --inspect
 
 Dependencies:
-    pip install geopandas shapely pyproj Pillow tqdm boto3
+    pip install numpy geopandas shapely Pillow tqdm boto3
 """
 
 import argparse
@@ -39,17 +33,19 @@ import hashlib
 import json
 import os
 import sys
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Optional
+
+import numpy as np
 
 try:
     import geopandas as gpd
     from shapely.ops import polygonize, unary_union
-    from shapely.geometry import Polygon, MultiPolygon, mapping
+    from shapely.geometry import Polygon, MultiPolygon, LineString
     HAS_GPD = True
 except ImportError:
     HAS_GPD = False
+    from shapely.ops import polygonize, unary_union
+    from shapely.geometry import Polygon, MultiPolygon, LineString
 
 try:
     from PIL import Image
@@ -63,25 +59,68 @@ CATEGORIES = [
     {"id": 1, "name": "roof_polygon"},
     {"id": 2, "name": "facet"},
 ]
-CAT_ROOF = 1
+CAT_ROOF  = 1
 CAT_FACET = 2
 
-CHIP_PX = 512   # resize all chips to 512×512 to match training set
+CHIP_PX = 512  # resize all chips to 512×512 to match training set
+
+# Folder name candidates tried in order
+IMG_FOLDER_NAMES = ["rgb", "clipped", "chips", "images", "img", "RGB", "Clipped"]
+LBL_FOLDER_NAMES = ["npy", "labels", "annotations", "gt", "NPY"]
+IMG_EXTS = [".jpg", ".jpeg", ".png", ".tif", ".tiff"]
 
 
 # ─── Label parsers ────────────────────────────────────────────────────────────
 
+def load_labels_npy(label_path: Path):
+    """
+    Load a .npy planar-graph adjacency dict from carecamp93.
+
+    Format: dict mapping (x, y) corner tuple → list of (x, y) neighbor tuples.
+    We build LineStrings from each edge, then run polygonize() to get closed
+    polygon rings representing individual roof planes.
+
+    Coordinates are in pixel space (0–255 for 256×256 chips).
+    """
+    try:
+        data = np.load(str(label_path), allow_pickle=True).item()
+    except Exception as e:
+        print(f"  [npy] failed to load {label_path.name}: {e}")
+        return []
+
+    if not isinstance(data, dict):
+        print(f"  [npy] unexpected format in {label_path.name}: {type(data)}")
+        return []
+
+    lines = []
+    for corner, neighbors in data.items():
+        if not (isinstance(corner, (tuple, list)) and len(corner) == 2):
+            continue
+        for nb in (neighbors or []):
+            if isinstance(nb, (tuple, list)) and len(nb) == 2:
+                lines.append(LineString([corner, nb]))
+
+    if not lines:
+        return []
+
+    polys = list(polygonize(lines))
+    valid = []
+    for p in polys:
+        if p is None or p.is_empty:
+            continue
+        if not p.is_valid:
+            p = p.buffer(0)
+        if p.is_valid and not p.is_empty:
+            valid.append(p)
+    return valid
+
+
 def load_labels_shp(label_path: Path):
-    """
-    Load a shapefile of roof plane polylines/polygons.
-    carecamp93 stores planar graph edges as polylines;
-    polygonize() assembles them into closed rings.
-    Returns list of Shapely Polygons in pixel coordinates.
-    """
+    """Load shapefile — polygons directly or polyline edges → polygonize."""
+    if not HAS_GPD:
+        sys.exit("pip install geopandas  (needed for .shp labels)")
     gdf = gpd.read_file(str(label_path))
     polys = []
-
-    # Case 1: already Polygon geometry
     for geom in gdf.geometry:
         if geom is None:
             continue
@@ -89,28 +128,16 @@ def load_labels_shp(label_path: Path):
             polys.append(geom)
         elif geom.geom_type == "MultiPolygon":
             polys.extend(geom.geoms)
-
     if polys:
         return polys
-
-    # Case 2: LineString / planar graph edges → polygonize
     lines = [g for g in gdf.geometry if g is not None]
-    assembled = list(polygonize(lines))
-    return assembled
+    return list(polygonize(lines))
 
 
 def load_labels_json(label_path: Path, img_w: int, img_h: int):
-    """
-    Load JSON label file.  Tries common formats:
-      - {"planes": [[x,y,...], ...]}           flat poly coords per plane
-      - {"annotations": [{"segmentation": ...}]}  COCO-style
-      - [[x,y,...], ...]                        bare list of planes
-    Returns list of Shapely Polygons in pixel coordinates.
-    """
+    """Load JSON label — tries planes/annotations/bare-list formats."""
     with open(label_path) as f:
         data = json.load(f)
-
-    polys = []
 
     def _flat_to_poly(flat):
         pts = [(flat[i], flat[i+1]) for i in range(0, len(flat)-1, 2)]
@@ -119,38 +146,33 @@ def load_labels_json(label_path: Path, img_w: int, img_h: int):
             return p if p.is_valid else p.buffer(0)
         return None
 
+    polys = []
     if isinstance(data, list):
-        # bare list of planes
         for item in data:
             if isinstance(item, list):
                 p = _flat_to_poly(item)
                 if p and not p.is_empty:
                     polys.append(p)
-
     elif isinstance(data, dict):
-        # {"planes": [...]}
         for plane in data.get("planes", []):
             if isinstance(plane, list):
                 p = _flat_to_poly(plane)
                 if p and not p.is_empty:
                     polys.append(p)
-
-        # COCO-style annotations
         for ann in data.get("annotations", []):
             for seg in ann.get("segmentation", []):
                 p = _flat_to_poly(seg)
                 if p and not p.is_empty:
                     polys.append(p)
-
     return polys
 
 
 def load_labels(label_path: Path, img_w: int, img_h: int):
     """Dispatch to correct parser based on file extension."""
     suffix = label_path.suffix.lower()
-    if suffix == ".shp":
-        if not HAS_GPD:
-            sys.exit("pip install geopandas  (needed for .shp labels)")
+    if suffix == ".npy":
+        return load_labels_npy(label_path)
+    elif suffix == ".shp":
         return load_labels_shp(label_path)
     elif suffix in (".json", ".geojson"):
         return load_labels_json(label_path, img_w, img_h)
@@ -159,12 +181,10 @@ def load_labels(label_path: Path, img_w: int, img_h: int):
         return []
 
 
-def poly_to_coco_flat(poly: Polygon, img_w: int, img_h: int,
-                       orig_w: int, orig_h: int):
-    """
-    Convert a Shapely Polygon in original image pixel space to
-    COCO flat [x1,y1,x2,y2,...] scaled to CHIP_PX×CHIP_PX.
-    """
+# ─── Coordinate helpers ───────────────────────────────────────────────────────
+
+def poly_to_coco_flat(poly: Polygon, orig_w: int, orig_h: int):
+    """Convert Shapely Polygon in original pixel space → COCO flat list scaled to CHIP_PX."""
     sx = CHIP_PX / orig_w
     sy = CHIP_PX / orig_h
     try:
@@ -191,24 +211,45 @@ def flat_area(flat):
     return abs(sum(xs[i]*ys[(i+1)%n] - xs[(i+1)%n]*ys[i] for i in range(n))) / 2.0
 
 
+# ─── Folder discovery ─────────────────────────────────────────────────────────
+
+def find_subdir(city_dir: Path, candidates: list) -> Path | None:
+    """Return first existing subdirectory from a list of name candidates."""
+    for name in candidates:
+        p = city_dir / name
+        if p.is_dir():
+            return p
+    return None
+
+
+def find_label_exts(lbl_dir: Path):
+    """Return the dominant label extension in a label directory."""
+    counts = {}
+    for f in lbl_dir.iterdir():
+        ext = f.suffix.lower()
+        if ext in (".npy", ".shp", ".json", ".geojson"):
+            counts[ext] = counts.get(ext, 0) + 1
+    if not counts:
+        return None
+    return max(counts, key=counts.get)
+
+
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
     ap = argparse.ArgumentParser(
-        description="carecamp93 roof planes → COCO instance segmentation"
+        description="carecamp93 roof planes (European cities) → COCO instance segmentation"
     )
-    ap.add_argument("--input",      required=True,
-                    help="Root directory of downloaded carecamp93 data")
-    ap.add_argument("--output",     default="training/carecamp93_dataset")
-    ap.add_argument("--val-frac",   type=float, default=0.10)
-    ap.add_argument("--seed",       type=int,   default=42)
-    ap.add_argument("--cities",     nargs="*",
-                    default=["lasvegas", "atlanta"],
-                    help="Which city subdirectories to include (default: lasvegas atlanta)")
-    ap.add_argument("--s3-bucket",  default=None)
-    ap.add_argument("--s3-prefix",  default="carecamp93")
-    ap.add_argument("--workers",    type=int, default=8)
-    ap.add_argument("--inspect",    action="store_true",
+    ap.add_argument("--input",     required=True,
+                    help="Root directory of downloaded Stage 1 carecamp93 data")
+    ap.add_argument("--output",    default="training/carecamp93_dataset")
+    ap.add_argument("--val-frac",  type=float, default=0.10)
+    ap.add_argument("--seed",      type=int,   default=42)
+    ap.add_argument("--cities",    nargs="*",  default=None,
+                    help="Which city subdirectories to include (default: all found)")
+    ap.add_argument("--s3-bucket", default=None)
+    ap.add_argument("--s3-prefix", default="carecamp93")
+    ap.add_argument("--inspect",   action="store_true",
                     help="Print sample files and exit — use to diagnose format")
     args = ap.parse_args()
 
@@ -222,67 +263,93 @@ def main():
             if not city_dir.is_dir():
                 continue
             print(f"── {city_dir.name} ──")
-            img_dir = city_dir / "images"
-            lbl_dir = city_dir / "labels"
-            if img_dir.exists():
-                imgs = sorted(img_dir.glob("*"))[:3]
-                print(f"  images/  ({len(list(img_dir.glob('*')))} files)")
-                for f in imgs: print(f"    {f.name}")
-            if lbl_dir.exists():
-                lbls = sorted(lbl_dir.glob("*"))[:3]
-                print(f"  labels/  ({len(list(lbl_dir.glob('*')))} files)")
-                for f in lbls:
-                    print(f"    {f.name}")
-                    if f.suffix.lower() in (".json", ".geojson"):
-                        content = f.read_text()[:500]
-                        print(f"    content preview: {content}")
+            # show top-level files/dirs
+            for item in sorted(city_dir.iterdir())[:8]:
+                tag = "DIR" if item.is_dir() else f"{item.stat().st_size//1024}KB"
+                print(f"  [{tag}] {item.name}")
+                if item.is_dir():
+                    sub = sorted(item.iterdir())[:4]
+                    for s in sub:
+                        print(f"        {s.name}")
+                    if len(list(item.iterdir())) > 4:
+                        print(f"        … ({len(list(item.iterdir()))} total)")
+
+            # try to find image + label dirs
+            img_dir = find_subdir(city_dir, IMG_FOLDER_NAMES)
+            lbl_dir = find_subdir(city_dir, LBL_FOLDER_NAMES)
+            print(f"  → images at: {img_dir.name if img_dir else 'NOT FOUND'}")
+            print(f"  → labels at: {lbl_dir.name if lbl_dir else 'NOT FOUND'}")
+            if lbl_dir:
+                ext = find_label_exts(lbl_dir)
+                print(f"  → label ext: {ext if ext else 'UNKNOWN'}")
+                if ext == ".npy":
+                    sample = next((f for f in lbl_dir.iterdir() if f.suffix == ".npy"), None)
+                    if sample:
+                        try:
+                            data = np.load(str(sample), allow_pickle=True).item()
+                            n_corners = len(data)
+                            n_edges   = sum(len(v) for v in data.values())
+                            print(f"  → sample .npy: {sample.name} — {n_corners} corners, {n_edges} edges")
+                            polys = load_labels_npy(sample)
+                            print(f"  → polygonize → {len(polys)} roof planes")
+                        except Exception as e:
+                            print(f"  → .npy load error: {e}")
             print()
         return
 
-    # ── Collect all (image, label) pairs ─────────────────────────────────────
+    # ── Collect city directories ──────────────────────────────────────────────
     import random
     rng = random.Random(args.seed)
 
-    pairs = []
-    for city in args.cities:
-        city_dir = inp / city
-        if not city_dir.exists():
-            # try case-insensitive match
-            matches = [d for d in inp.iterdir() if d.name.lower() == city.lower()]
-            if matches:
-                city_dir = matches[0]
+    if args.cities:
+        city_dirs = []
+        for c in args.cities:
+            cd = inp / c
+            if not cd.exists():
+                matches = [d for d in inp.iterdir() if d.name.lower() == c.lower()]
+                cd = matches[0] if matches else None
+            if cd:
+                city_dirs.append(cd)
             else:
-                print(f"  WARNING: city directory '{city}' not found in {inp}")
-                continue
+                print(f"  WARNING: city '{c}' not found in {inp}")
+    else:
+        city_dirs = [d for d in sorted(inp.iterdir()) if d.is_dir()]
 
-        img_dir = city_dir / "images"
-        lbl_dir = city_dir / "labels"
-        if not img_dir.exists():
-            print(f"  WARNING: no images/ in {city_dir}")
+    print(f"\nProcessing cities: {[d.name for d in city_dirs]}")
+
+    # ── Collect all (image, label) pairs ─────────────────────────────────────
+    pairs = []
+    for city_dir in city_dirs:
+        img_dir = find_subdir(city_dir, IMG_FOLDER_NAMES)
+        lbl_dir = find_subdir(city_dir, LBL_FOLDER_NAMES)
+
+        if not img_dir:
+            print(f"  WARNING: no image dir found in {city_dir.name} (tried: {IMG_FOLDER_NAMES})")
             continue
-        if not lbl_dir.exists():
-            print(f"  WARNING: no labels/ in {city_dir}")
+        if not lbl_dir:
+            print(f"  WARNING: no label dir found in {city_dir.name} (tried: {LBL_FOLDER_NAMES})")
             continue
 
-        for img_path in sorted(img_dir.glob("*.png")) + sorted(img_dir.glob("*.jpg")):
-            stem = img_path.stem
-            # find matching label (try .shp, .json, .geojson)
-            lbl_path = None
-            for ext in (".shp", ".json", ".geojson"):
-                candidate = lbl_dir / (stem + ext)
-                if candidate.exists():
-                    lbl_path = candidate
-                    break
-            if lbl_path:
-                pairs.append((img_path, lbl_path, city))
+        lbl_ext = find_label_exts(lbl_dir)
+        if not lbl_ext:
+            print(f"  WARNING: no .npy/.shp/.json labels in {lbl_dir}")
+            continue
 
-    print(f"\nFound {len(pairs)} image/label pairs across cities: {args.cities}")
+        print(f"  {city_dir.name}: images={img_dir.name}/ labels={lbl_dir.name}/ ext={lbl_ext}")
+
+        for img_ext in IMG_EXTS:
+            for img_path in sorted(img_dir.glob(f"*{img_ext}")):
+                lbl_path = lbl_dir / (img_path.stem + lbl_ext)
+                if lbl_path.exists():
+                    pairs.append((img_path, lbl_path, city_dir.name))
+
+    print(f"\nFound {len(pairs)} image/label pairs")
     if not pairs:
         sys.exit("No pairs found — run with --inspect to diagnose the directory structure")
 
     rng.shuffle(pairs)
 
-    # ── Setup output dirs and S3 ───────────────────────────────────────────────
+    # ── Setup output dirs ─────────────────────────────────────────────────────
     for split in ("train", "valid"):
         (out / split).mkdir(parents=True, exist_ok=True)
 
@@ -301,19 +368,17 @@ def main():
         try:
             img = Image.open(img_path).convert("RGB")
             orig_w, orig_h = img.size
-        except Exception as e:
+        except Exception:
             skipped += 1
             continue
 
         facet_polys = load_labels(lbl_path, orig_w, orig_h)
-        if len(facet_polys) < 2:
-            skipped += 1
-            continue
 
-        # Filter tiny or invalid polygons
-        facet_polys = [p for p in facet_polys
-                       if p is not None and p.is_valid
-                       and not p.is_empty and p.area >= 4.0]
+        # Filter tiny / invalid
+        facet_polys = [
+            p for p in facet_polys
+            if p is not None and p.is_valid and not p.is_empty and p.area >= 4.0
+        ]
         if len(facet_polys) < 2:
             skipped += 1
             continue
@@ -321,7 +386,7 @@ def main():
         # Convert to COCO flat coords
         facet_flats = []
         for poly in facet_polys:
-            flat = poly_to_coco_flat(poly, CHIP_PX, CHIP_PX, orig_w, orig_h)
+            flat = poly_to_coco_flat(poly, orig_w, orig_h)
             if flat and flat_area(flat) >= 1.0:
                 facet_flats.append(flat)
         if len(facet_flats) < 2:
@@ -335,16 +400,15 @@ def main():
             if union.geom_type == "MultiPolygon":
                 union = max(union.geoms, key=lambda g: g.area)
             if union.geom_type == "Polygon":
-                roof_flat = poly_to_coco_flat(union, CHIP_PX, CHIP_PX, orig_w, orig_h)
+                roof_flat = poly_to_coco_flat(union, orig_w, orig_h)
         except Exception:
             pass
 
-        # Resize chip to CHIP_PX×CHIP_PX
+        # Resize to CHIP_PX×CHIP_PX
         if img.size != (CHIP_PX, CHIP_PX):
             img = img.resize((CHIP_PX, CHIP_PX), Image.LANCZOS)
 
-        # Stable filename based on source path hash
-        fn  = hashlib.sha1(str(img_path).encode()).hexdigest()[:16] + ".png"
+        fn     = hashlib.sha1(str(img_path).encode()).hexdigest()[:16] + ".png"
         is_val = rng.random() < args.val_frac
         split  = "valid" if is_val else "train"
 
@@ -360,8 +424,7 @@ def main():
                     print(f"\n  S3 fail {fn}: {e}")
 
         img_entry = {"id": image_id, "file_name": fn,
-                     "width": CHIP_PX, "height": CHIP_PX,
-                     "city": city}
+                     "width": CHIP_PX, "height": CHIP_PX, "city": city}
         anns = []
         for flat in facet_flats:
             anns.append({
@@ -393,8 +456,6 @@ def main():
         coco = {"images": imgs, "annotations": anns, "categories": CATEGORIES}
         with open(out / split / "_annotations.coco.json", "w") as f:
             json.dump(coco, f)
-        with open(out / split / "chips_needed_carecamp93.txt", "w") as f:
-            f.write("".join(i["file_name"] + "\n" for i in imgs))
 
     total_facets = sum(1 for a in anns_train + anns_valid if a["category_id"] == CAT_FACET)
     print(f"\n{'='*55}")
@@ -402,12 +463,12 @@ def main():
     print(f"  train: {len(images_train)} images")
     print(f"  valid: {len(images_valid)} images")
     print(f"  facet instances: {total_facets}")
-    print(f"\nMerge into roof_dataset_v4:")
+    print(f"\nNext: merge into roof_dataset_v2:")
     print(f"  python training/merge_datasets.py \\")
-    print(f"      --source training/roof_dataset_clean    phase1 \\")
-    print(f"      --source training/carecamp93_dataset    carecamp93 \\")
-    print(f"      --source training/switzerland_dataset   switzerland \\")
-    print(f"      --output training/roof_dataset_v4")
+    print(f"      --source training/roof_dataset_clean   phase1 \\")
+    print(f"      --source training/carecamp93_dataset   carecamp93 \\")
+    print(f"      --source training/switzerland_dataset  switzerland \\")
+    print(f"      --output training/roof_dataset_v2")
 
 
 if __name__ == "__main__":
