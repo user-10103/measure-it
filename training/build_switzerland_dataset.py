@@ -845,6 +845,14 @@ def main():
         with open(out / split / "chips_needed_switzerland.txt", "w") as f:
             f.write("".join(i["file_name"] + "\n" for i in imgs))
         print(f"  {split}: {len(imgs)} chips → {jpath}")
+        # Upload COCO JSON to S3 so it survives Colab resets
+        if s3 and args.s3_bucket:
+            s3_key = f"{args.s3_prefix}/annotations/{split}.json"
+            try:
+                s3.upload_file(str(jpath), args.s3_bucket, s3_key)
+                print(f"  Uploaded → s3://{args.s3_bucket}/{s3_key}")
+            except Exception as e:
+                print(f"  COCO JSON S3 upload failed: {e}")
 
     total_facets = sum(1 for a in anns_train + anns_valid if a["category_id"] == CAT_FACET)
     elapsed      = time.time() - t0
