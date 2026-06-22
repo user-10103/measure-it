@@ -354,7 +354,7 @@ def process_building_from_tif(tif_ds, building_geom, planes_in_building,
             pass
 
         # Save chip (resized to CHIP_PX)
-        img = Image.fromarray(chip_rgb, "RGB")
+        img = Image.fromarray(chip_rgb)
         img = img.resize((CHIP_PX, CHIP_PX), Image.LANCZOS)
 
         src_str = f"{city_name}_{minx:.2f}_{miny:.2f}"
@@ -416,11 +416,13 @@ def main():
     ap.add_argument("--input",          required=True)
     ap.add_argument("--output",         default="training/carecamp93_dataset")
     ap.add_argument("--clip-from-tif",  action="store_true",
-                    help="Clip chips from large GeoTIFFs (use for Stage 1 data)")
+                    help="Clip chips from large GeoTIFFs (auto-detected if TIFs present)")
     ap.add_argument("--val-frac",       type=float, default=0.10)
     ap.add_argument("--seed",           type=int,   default=42)
     ap.add_argument("--cities",         nargs="*",  default=None,
                     help="City subdirectories to process (default: all found)")
+    ap.add_argument("--max-per-city",   type=int,   default=600,
+                    help="Max buildings to clip per city (default 600, use 0 for all)")
     ap.add_argument("--s3-bucket",      default=None)
     ap.add_argument("--s3-prefix",      default="carecamp93")
     ap.add_argument("--inspect",        action="store_true")
@@ -486,6 +488,14 @@ def main():
         ok=0, skipped=0,
     )
 
+    # Auto-detect GeoTIFF mode: if any city dir contains a large .tif, use it
+    if not args.clip_from_tif:
+        for cd in city_dirs:
+            if find_tif(cd) is not None:
+                args.clip_from_tif = True
+                print("Auto-detected GeoTIFF mode (large .tif found)")
+                break
+
     # ── GeoTIFF clipping mode ─────────────────────────────────────────────────
     if args.clip_from_tif:
         if not HAS_RASTERIO:
@@ -523,6 +533,13 @@ def main():
 
                 # Build spatial index on planes for fast per-building lookup
                 planes_sindex = planes_gdf.sindex
+
+                # Cap buildings per city to keep runtime manageable
+                max_b = args.max_per_city if args.max_per_city > 0 else len(footprints_gdf)
+                if max_b < len(footprints_gdf):
+                    footprints_gdf = footprints_gdf.sample(
+                        n=max_b, random_state=args.seed).reset_index(drop=True)
+                    print(f"  Sampled {max_b} / {len(footprints_gdf)+max_b} buildings")
 
                 for _, building_row in tqdm(footprints_gdf.iterrows(),
                                             total=len(footprints_gdf),
