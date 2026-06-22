@@ -675,14 +675,22 @@ def main():
                 state["anns_train"].extend(anns)
             state["ok"] += 1
 
-    # ── Write COCO JSON ───────────────────────────────────────────────────────
+    # ── Write COCO JSON (local + S3 so it survives Colab resets) ────────────
     for split, imgs, anns in [
         ("train", state["images_train"], state["anns_train"]),
         ("valid", state["images_valid"], state["anns_valid"]),
     ]:
         coco = {"images": imgs, "annotations": anns, "categories": CATEGORIES}
-        with open(out / split / "_annotations.coco.json", "w") as f:
+        local_json = out / split / "_annotations.coco.json"
+        with open(local_json, "w") as f:
             json.dump(coco, f)
+        if s3:
+            s3_key = f"{args.s3_prefix}/annotations/{split}.json"
+            try:
+                s3.upload_file(str(local_json), args.s3_bucket, s3_key)
+                print(f"  Uploaded annotations → s3://{args.s3_bucket}/{s3_key}")
+            except Exception as e:
+                print(f"  COCO JSON S3 upload failed: {e}")
 
     total_facets = sum(
         1 for a in state["anns_train"] + state["anns_valid"]
