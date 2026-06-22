@@ -203,3 +203,62 @@ def process_address_id(
     prediction = backend.predict_for(address_id)
     return process_chip_rgb(prediction, address=address or address_id,
                             building_id=address_id, **kwargs)
+
+
+def make_backend(checkpoint_path: str, threshold: float = 0.35):
+    """Return the right backend from a checkpoint path.
+
+    - .pth / .ckpt → RFDETRBackend (trained model)
+    - .json        → CocoStandinBackend (annotation stand-in for testing)
+    """
+    p = Path(checkpoint_path)
+    if p.suffix == ".json":
+        from src.roofs.segment import CocoStandinBackend
+        return CocoStandinBackend.from_file(str(p))
+    from src.roofs.rfdetr_backend import RFDETRBackend
+    return RFDETRBackend(str(p), threshold=threshold)
+
+
+def process_image_path(
+    image_path: str,
+    backend,
+    address: str = "",
+    building_id: str = "",
+    gsd_m_per_px: float = 0.3,
+    output_dir: Optional[str] = None,
+    write_outputs: bool = True,
+) -> Dict:
+    """Run the RGB pipeline on a chip image file using any RoofModelBackend.
+
+    Primary entry point for the trained model (RFDETRBackend). Reads the chip,
+    calls backend.predict(), then hands the prediction dict to process_chip_rgb().
+
+    Args:
+        image_path: Path to a chip PNG/JPG in RGB or BGR colour order.
+        backend:    Any object with predict(np.ndarray) -> prediction dict.
+                    Typically RFDETRBackend or CocoStandinBackend.
+        address:    Human-readable address for reports.
+        building_id: Identifier for the chip (defaults to stem of image_path).
+        gsd_m_per_px: Ground sample distance used to convert pixels to metres.
+        output_dir: Where to write report.pdf / .json / .csv outputs.
+        write_outputs: Set False to skip writing files (useful in batch loops).
+
+    Returns:
+        Same dict as process_chip_rgb(): report_input, summary, output_files,
+        occluded_roof.
+    """
+    import cv2
+    bgr = cv2.imread(str(image_path))
+    if bgr is None:
+        raise FileNotFoundError(f"Cannot read image: {image_path}")
+    img_rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+    prediction = backend.predict(img_rgb)
+    return process_chip_rgb(
+        prediction,
+        address=address,
+        building_id=building_id or Path(image_path).stem,
+        gsd_m_per_px=gsd_m_per_px,
+        aerial_image_path=str(image_path),
+        output_dir=output_dir,
+        write_outputs=write_outputs,
+    )
