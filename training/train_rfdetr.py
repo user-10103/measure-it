@@ -55,30 +55,46 @@ except Exception as _e:
     import warnings
     warnings.warn(f"fused_optimizer patch failed ({_e}); AdamW dtype errors may occur")
 
-# -- 3. CSV logger extrasaction patch -----------------------------------------
-# On resume, Lightning restores the prior run's metric history into the CSV
-# logger. If the checkpoint was produced with a superset of metric keys the
-# current epoch doesn't yet see, DictWriter raises ValueError. Fix: ignore
-# any extra fields in old rows when rewriting the CSV header.
+# -- 3. CSV logger patch -------------------------------------------------------
+# Two failure modes fixed here:
+#   (a) Extra string keys in old rows that aren't in the current header
+#       → extrasaction='ignore' silently drops them.
+#   (b) None keys in rows (from malformed CSV or a class with no predictions
+#       returning None as its metric key) → explicit filter before writerow.
+# Also patches log_metrics to strip None keys before they reach the CSV at all.
 try:
     import csv as _csv
     import lightning_fabric.loggers.csv_logs as _csv_logs
     from pathlib import Path as _Path
 
     def _patched_rewrite(self, fieldnames):
+        # Strip None from fieldnames — can appear when a class has no predictions
+        fieldnames = [f for f in fieldnames if f is not None]
         tmp = _Path(str(self.metrics_file_path) + ".tmp")
         try:
             with open(self.metrics_file_path, "r") as rf, open(tmp, "w", newline="") as wf:
                 reader = _csv.DictReader(rf)
                 writer = _csv.DictWriter(wf, fieldnames=fieldnames, extrasaction="ignore")
                 writer.writeheader()
-                writer.writerows(reader)
+                for row in reader:
+                    # Drop None keys from every row (trailing-comma artefact)
+                    writer.writerow({k: v for k, v in row.items() if k is not None})
             tmp.replace(self.metrics_file_path)
         except Exception:
             _Path(self.metrics_file_path).unlink(missing_ok=True)
             tmp.unlink(missing_ok=True)
 
     _csv_logs.ExperimentWriter._rewrite_with_new_header = _patched_rewrite
+
+    # Also intercept log_metrics so None keys never enter the metrics dict
+    _orig_log_metrics = _csv_logs.ExperimentWriter.log_metrics
+
+    def _patched_log_metrics(self, metrics_dict, step):
+        clean = {k: v for k, v in metrics_dict.items() if k is not None}
+        return _orig_log_metrics(self, clean, step)
+
+    _csv_logs.ExperimentWriter.log_metrics = _patched_log_metrics
+
 except Exception as _csv_e:
     import warnings
     warnings.warn(f"CSV logger patch failed ({_csv_e}); resume may raise ValueError on metrics.csv")
