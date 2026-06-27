@@ -140,29 +140,26 @@ def load_heat_model(checkpoint_path: str, heat_src: Path, device='cuda'):
         except Exception:
             pass
 
-    def _try_init(cls, *positional_candidates, **kwargs):
-        """Try each set of positional args until one doesn't raise TypeError."""
-        for pos in positional_candidates:
-            try:
-                return cls(*pos, **kwargs)
-            except TypeError:
-                continue
-        raise RuntimeError(f"Could not instantiate {cls.__name__} with any arg pattern")
+    # Exact construction pattern from train.py lines 188-200
+    backbone     = ResNetBackbone()
+    strides      = backbone.strides
+    num_channels = backbone.num_channels
+    print(f"Backbone strides={strides}  num_channels={num_channels}")
 
-    # Instantiate — try (args,), (), (args, other) patterns
-    backbone = _try_init(ResNetBackbone,
-                         (ck_args,),  # ResNetBackbone(args)
-                         ())          # ResNetBackbone()
-
-    corner_model = _try_init(HeatCorner,
-                              (ck_args,),           # HeatCorner(args)
-                              (ck_args, backbone),  # HeatCorner(args, backbone)
-                              ())                   # HeatCorner()
-
-    edge_model = _try_init(HeatEdge,
-                            (ck_args,),                      # HeatEdge(args)
-                            (ck_args, corner_model),         # HeatEdge(args, corner_model)
-                            (ck_args, backbone, corner_model)) # HeatEdge(args, bb, cm)
+    corner_model = HeatCorner(
+        input_dim=128,
+        hidden_dim=256,
+        num_feature_levels=4,
+        backbone_strides=strides,
+        backbone_num_channels=num_channels,
+    )
+    edge_model = HeatEdge(
+        input_dim=128,
+        hidden_dim=256,
+        num_feature_levels=4,
+        backbone_strides=strides,
+        backbone_num_channels=num_channels,
+    )
 
     # Load state dicts — strip DDP 'module.' prefix
     backbone.load_state_dict(_strip_ddp(ck['backbone']), strict=False)
