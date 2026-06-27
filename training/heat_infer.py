@@ -1,111 +1,189 @@
 #!/usr/bin/env python3
 """
-Run HEAT (Hierarchical Edge Attention Transformer) inference on raw image chips
-without the OutdoorBuildingDataset wrapper.
+Run HEAT (Hierarchical Edge Attention Transformer) inference on raw image chips.
 
-Clones carecamp93/Automatic_Roof_Plane_Extraction, loads a pretrained checkpoint,
-and runs forward inference on a directory of PNG chips. Outputs one JSON per chip
-with the predicted roof plane polygons (list of [x,y] vertices).
+Bypasses OutdoorBuildingDataset. Loads all three HEAT components
+(backbone + corner_model + edge_model) from the checkpoint's own saved `args`,
+then runs forward inference on a folder of PNG chips.
 
-Usage (Colab):
+Usage:
     python training/heat_infer.py \
         --checkpoint /tmp/heat_ckpts/SO2m/checkpoint_best.pth \
         --chips-dir  training/naip_dataset/valid \
         --output     /tmp/heat_results \
-        --image-size 256 \
         --n-chips    10
 """
 
 import argparse
 import json
-import os
-import subprocess
 import sys
+import subprocess
 from pathlib import Path
 
 
-def clone_heat(repo_dir: Path):
-    if not repo_dir.exists():
-        print("Cloning HEAT repo...")
-        subprocess.run([
-            'git', 'clone', '--depth', '1',
-            'https://github.com/carecamp93/Automatic_Roof_Plane_Extraction',
-            str(repo_dir),
-        ], check=True)
-    else:
-        print(f"HEAT repo already at {repo_dir}")
-
-
-def install_deps(repo_dir: Path):
-    req = repo_dir / 'requirements.txt'
-    if req.exists():
-        subprocess.run([sys.executable, '-m', 'pip', 'install', '-q', '-r', str(req)])
-
+# ── helpers ───────────────────────────────────────────────────────────────────
 
 def _safe_load(path: str, map_location='cpu') -> dict:
-    """torch.load with weights_only=True (safe), falling back with a warning."""
     import torch
     try:
         return torch.load(path, map_location=map_location, weights_only=True)
     except Exception:
         import warnings
         warnings.warn(
-            f"weights_only=True failed for {path} — falling back to weights_only=False. "
-            "Only load checkpoints from trusted sources.",
-            stacklevel=2,
+            f"weights_only=True failed for {path} — loading with weights_only=False. "
+            "Only use checkpoints from trusted sources.",
         )
         return torch.load(path, map_location=map_location, weights_only=False)  # noqa: S614
 
 
-def load_model(checkpoint_path: str, repo_dir: Path, image_size: int = 256, device='cuda'):
-    """Load HEAT model from checkpoint without the dataset wrapper."""
-    sys.path.insert(0, str(repo_dir))
+def _install_pip_deps(req_path: Path):
+    """Install only pip-installable lines from requirements.txt (skip conda lines)."""
+    if not req_path.exists():
+        return
+    lines = []
+    for raw in req_path.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith('#'):
+            continue
+        if line.startswith('conda') or line.startswith('--'):
+            print(f"  skip (non-pip): {line}")
+            continue
+        lines.append(line)
+    if lines:
+        subprocess.run(
+            [sys.executable, '-m', 'pip', 'install', '-q'] + lines,
+            check=False,
+        )
 
+
+def _find_heat_master(root: Path) -> Path:
+    """Walk repo root to find the heat-master source directory."""
+    # Direct path (user confirmed)
+    candidate = root / '2.- TRAINING-TESTING' / 'heat-master'
+    if candidate.exists():
+        return candidate
+    # Fallback: find first dir containing infer_TESTING.py
+    for p in root.rglob('infer_TESTING.py'):
+        return p.parent
+    return root
+
+
+def _print_section(text: str, keyword: str, chars: int = 2000):
+    """Print the section of a file around a keyword."""
+    idx = text.lower().find(keyword.lower())
+    if idx == -1:
+        print(f"  ('{keyword}' not found)")
+        return
+    start = max(0, idx - 100)
+    print(text[start: start + chars])
+
+
+# ── model loading ─────────────────────────────────────────────────────────────
+
+def load_heat_model(checkpoint_path: str, heat_src: Path, device='cuda'):
+    """
+    Load all three HEAT components using the checkpoint's own saved args.
+
+    HEAT checkpoints contain:
+      checkpoint['args']         — original argparse.Namespace
+      checkpoint['backbone']     — state_dict
+      checkpoint['corner_model'] — state_dict
+      checkpoint['edge_model']   — state_dict
+    """
     import torch
 
-    # Try to import the model class — name varies by HEAT version
-    model = None
-    for module_name in ['models.HEAT', 'model.HEAT', 'HEAT', 'models.heat', 'heat']:
+    print(f"\nLoading checkpoint: {checkpoint_path}")
+    ck = _safe_load(checkpoint_path)
+    print("Checkpoint keys:", list(ck.keys()))
+
+    # Recover original training args stored in checkpoint
+    ck_args = ck.get('args', None)
+    if ck_args is not None:
+        print(f"Checkpoint args: {ck_args}")
+    else:
+        print("WARNING: no 'args' in checkpoint — will attempt default config")
+
+    # Add heat-master to sys.path
+    sys.path.insert(0, str(heat_src))
+    print(f"Added to sys.path: {heat_src}")
+
+    # Try to import build_model from the repo
+    build_model_fn = None
+    for mod_name in ['models', 'model', 'heat', 'build']:
         try:
-            mod = __import__(module_name, fromlist=['HEAT', 'build_model', 'HEATNet'])
-            for cls_name in ['HEAT', 'HEATNet', 'build_model']:
-                if hasattr(mod, cls_name):
-                    cls = getattr(mod, cls_name)
-                    print(f"Found model class: {module_name}.{cls_name}")
-                    model = cls
-                    break
-            if model:
+            mod = __import__(mod_name)
+            if hasattr(mod, 'build_model'):
+                build_model_fn = mod.build_model
+                print(f"Found build_model in module: {mod_name}")
                 break
         except ImportError:
-            continue
+            pass
 
-    if model is None:
-        # Fallback: load checkpoint and inspect what's in it
-        ck = _safe_load(checkpoint_path)
-        print("Checkpoint keys:", list(ck.keys())[:10])
-        print("Cannot locate HEAT model class — inspect repo structure:")
-        for p in Path(repo_dir).rglob('*.py'):
-            print(' ', p.relative_to(repo_dir))
-        return None, None
+    if build_model_fn is None:
+        # Try importing directly from common file names
+        for fname in ['models/corner_models.py', 'models/edge_models.py',
+                      'models/__init__.py', 'model.py']:
+            fpath = heat_src / fname
+            if fpath.exists():
+                import importlib.util
+                spec = importlib.util.spec_from_file_location('heat_models', fpath)
+                mod  = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                if hasattr(mod, 'build_model'):
+                    build_model_fn = mod.build_model
+                    print(f"Found build_model in: {fname}")
+                    break
 
-    # Build or instantiate
+    if build_model_fn is None:
+        # Last resort: look inside infer_TESTING.py for build_model
+        infer_py = heat_src / 'infer_TESTING.py'
+        if infer_py.exists():
+            import importlib.util
+            spec = importlib.util.spec_from_file_location('infer_testing', infer_py)
+            mod  = importlib.util.module_from_spec(spec)
+            try:
+                spec.loader.exec_module(mod)
+                if hasattr(mod, 'build_model'):
+                    build_model_fn = mod.build_model
+                    print("Found build_model in infer_TESTING.py")
+            except Exception as e:
+                print(f"Could not exec infer_TESTING.py: {e}")
+
+    if build_model_fn is None:
+        print("\nERROR: could not locate build_model. Printing repo structure:")
+        for p in heat_src.rglob('*.py'):
+            print(' ', p.relative_to(heat_src))
+        print("\nPrinting infer_TESTING.py build_model section:")
+        infer_py = heat_src / 'infer_TESTING.py'
+        if infer_py.exists():
+            _print_section(infer_py.read_text(), 'build_model')
+        return None, None, None
+
+    # Build model using checkpoint args (or defaults)
     try:
-        net = model(image_size=image_size)
+        backbone, corner_model, edge_model = build_model_fn(ck_args)
     except TypeError:
-        try:
-            net = model()
-        except Exception as e:
-            print(f"Model instantiation failed: {e}")
-            return None, None
+        # Some versions take no args
+        backbone, corner_model, edge_model = build_model_fn()
+    except Exception as e:
+        print(f"build_model() failed: {e}")
+        return None, None, None
 
-    ck = _safe_load(checkpoint_path)
-    state = ck.get('model', ck.get('state_dict', ck))
-    net.load_state_dict(state, strict=False)
-    net = net.to(device)
-    net.eval()
-    print(f"Loaded HEAT checkpoint: {checkpoint_path}")
-    return net, torch.device(device)
+    # Load state dicts
+    backbone.load_state_dict(ck['backbone'], strict=False)
+    corner_model.load_state_dict(ck['corner_model'], strict=False)
+    edge_model.load_state_dict(ck['edge_model'], strict=False)
 
+    dev = torch.device(device if torch.cuda.is_available() else 'cpu')
+    backbone    = backbone.to(dev).eval()
+    corner_model = corner_model.to(dev).eval()
+    edge_model   = edge_model.to(dev).eval()
+
+    print(f"Loaded all three HEAT components on {dev}")
+    return backbone, corner_model, edge_model
+
+
+# ── inference ─────────────────────────────────────────────────────────────────
 
 def chip_to_tensor(chip_path: Path, image_size: int = 256):
     import torch
@@ -114,49 +192,81 @@ def chip_to_tensor(chip_path: Path, image_size: int = 256):
 
     bgr = cv2.imread(str(chip_path))
     if bgr is None:
-        return None
+        return None, 0, 0
     rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
     h_orig, w_orig = rgb.shape[:2]
     resized = cv2.resize(rgb, (image_size, image_size))
     arr = resized.astype(np.float32) / 255.0
-    # ImageNet normalisation
     mean = np.array([0.485, 0.456, 0.406])
     std  = np.array([0.229, 0.224, 0.225])
-    arr = (arr - mean) / std
+    arr  = (arr - mean) / std
     tensor = torch.from_numpy(arr.transpose(2, 0, 1)).float().unsqueeze(0)
     return tensor, h_orig, w_orig
 
 
-def decode_output(output, image_size: int, orig_h: int, orig_w: int):
+def run_heat_inference(backbone, corner_model, edge_model, tensor, device):
     """
-    Attempt to extract polygon vertices from HEAT output.
-    HEAT returns: (polygon_logits, edge_logits, vertex_coords)
-    Shape varies by version — we try common patterns.
+    Run the three-stage HEAT forward pass.
+    Returns raw outputs for inspection if we can't decode polygons automatically.
     """
     import torch
-    polygons = []
+    tensor = tensor.to(device)
+    with torch.no_grad():
+        try:
+            # Standard HEAT forward: backbone → feature, corner prediction
+            features = backbone(tensor)
+            corner_out = corner_model(features, tensor)
+            edge_out   = edge_model(features, corner_out, tensor)
+            return corner_out, edge_out
+        except Exception as e:
+            print(f"  3-stage forward failed ({e}), trying direct call...")
+            try:
+                out = corner_model(tensor)
+                return out, None
+            except Exception as e2:
+                return None, str(e2)
 
-    if isinstance(output, (tuple, list)):
-        # Common HEAT output: (corner_pred, edge_pred, polygon_pred)
-        # corner_pred shape: [B, N_corners, 2]  (normalised 0-1 coords)
-        for item in output:
-            if isinstance(item, torch.Tensor) and item.ndim == 3:
-                coords = item[0].detach().cpu().numpy()  # [N, 2]
-                # Convert normalised coords to original pixel space
-                pts = [(float(c[0]) * orig_w, float(c[1]) * orig_h) for c in coords]
-                if len(pts) >= 3:
-                    polygons.append(pts)
-    elif isinstance(output, dict):
-        for key in ['pred_polygons', 'polygons', 'pred_vertices']:
-            if key in output:
-                item = output[key]
-                if hasattr(item, 'detach'):
-                    coords = item[0].detach().cpu().numpy()
-                    pts = [(float(c[0]) * orig_w, float(c[1]) * orig_h) for c in coords]
-                    polygons.append(pts)
 
-    return polygons
+def decode_corners(corner_out, image_size: int, orig_h: int, orig_w: int):
+    """Extract predicted corner coordinates from HEAT corner output."""
+    import torch
+    import numpy as np
 
+    if corner_out is None:
+        return []
+
+    corners = []
+    if isinstance(corner_out, (tuple, list)):
+        for item in corner_out:
+            if isinstance(item, torch.Tensor) and item.ndim >= 2:
+                arr = item[0].detach().cpu().numpy()
+                if arr.shape[-1] == 2:
+                    # [N, 2] normalised coords
+                    for pt in arr:
+                        x = float(pt[0]) * orig_w
+                        y = float(pt[1]) * orig_h
+                        if 0 <= x <= orig_w and 0 <= y <= orig_h:
+                            corners.append((x, y))
+                elif arr.ndim == 2 and arr.shape[0] == arr.shape[1]:
+                    # Heatmap [H, W] — extract local maxima
+                    from scipy.ndimage import maximum_filter
+                    hm = arr
+                    local_max = (hm == maximum_filter(hm, size=7)) & (hm > 0.3)
+                    ys, xs = np.where(local_max)
+                    for xi, yi in zip(xs, ys):
+                        cx = float(xi) / arr.shape[1] * orig_w
+                        cy = float(yi) / arr.shape[0] * orig_h
+                        corners.append((cx, cy))
+    elif isinstance(corner_out, torch.Tensor):
+        arr = corner_out[0].detach().cpu().numpy()
+        if arr.shape[-1] == 2:
+            for pt in arr:
+                corners.append((float(pt[0]) * orig_w, float(pt[1]) * orig_h))
+
+    return corners
+
+
+# ── main ──────────────────────────────────────────────────────────────────────
 
 def main():
     ap = argparse.ArgumentParser()
@@ -164,32 +274,43 @@ def main():
     ap.add_argument('--chips-dir',   required=True)
     ap.add_argument('--output',      default='/tmp/heat_results')
     ap.add_argument('--image-size',  type=int, default=256)
-    ap.add_argument('--n-chips',     type=int, default=10,
-                    help='number of chips to test (0 = all)')
+    ap.add_argument('--n-chips',     type=int, default=10)
     ap.add_argument('--repo-dir',    default='/content/Automatic_Roof_Plane_Extraction')
     ap.add_argument('--device',      default='cuda')
     args = ap.parse_args()
 
-    repo_dir   = Path(args.repo_dir)
+    import torch
+
+    repo_root  = Path(args.repo_dir)
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    clone_heat(repo_dir)
-    install_deps(repo_dir)
+    # Clone if needed
+    if not repo_root.exists():
+        print("Cloning HEAT repo...")
+        subprocess.run([
+            'git', 'clone', '--depth', '1',
+            'https://github.com/carecamp93/Automatic_Roof_Plane_Extraction',
+            str(repo_root),
+        ], check=True)
 
-    import torch
+    # Find heat-master subdirectory
+    heat_src = _find_heat_master(repo_root)
+    print(f"HEAT source dir: {heat_src}")
+
+    # Install pip-only deps
+    _install_pip_deps(heat_src / 'requirements.txt')
+
     device = args.device if torch.cuda.is_available() else 'cpu'
-    print(f"Device: {device}")
 
-    net, dev = load_model(args.checkpoint, repo_dir, args.image_size, device)
-    if net is None:
-        print("\nCould not load model automatically.")
-        print("Please inspect the repo and report:")
-        print("  1. Which .py file defines the main model class")
-        print("  2. The class name")
-        print("  3. What checkpoint keys look like")
+    backbone, corner_model, edge_model = load_heat_model(
+        args.checkpoint, heat_src, device
+    )
+    if backbone is None:
+        print("\nCould not load model. Paste the output above and we'll fix it.")
         sys.exit(1)
 
+    # Run on N chips
     chips = sorted(Path(args.chips_dir).glob('*.png'))
     if args.n_chips > 0:
         chips = chips[:args.n_chips]
@@ -197,41 +318,46 @@ def main():
 
     results = []
     for chip_path in chips:
-        result = chip_to_tensor(chip_path, args.image_size)
-        if result is None:
+        tensor, h_orig, w_orig = chip_to_tensor(chip_path, args.image_size)
+        if tensor is None:
             continue
-        tensor, h_orig, w_orig = result
-        tensor = tensor.to(dev)
 
-        with torch.no_grad():
-            try:
-                output = net(tensor)
-            except Exception as e:
-                print(f"  {chip_path.name}: inference failed — {e}")
-                results.append({'chip': chip_path.name, 'error': str(e)})
-                continue
+        corner_out, edge_out = run_heat_inference(
+            backbone, corner_model, edge_model, tensor, torch.device(device)
+        )
 
-        polygons = decode_output(output, args.image_size, h_orig, w_orig)
-        entry = {'chip': chip_path.name, 'n_polygons': len(polygons), 'polygons': polygons}
+        if isinstance(edge_out, str):
+            print(f"  {chip_path.name}: ERROR — {edge_out}")
+            results.append({'chip': chip_path.name, 'error': edge_out})
+            continue
+
+        corners = decode_corners(corner_out, args.image_size, h_orig, w_orig)
+        entry = {
+            'chip':     chip_path.name,
+            'n_corners': len(corners),
+            'corners':  corners,
+            'raw_corner_shapes': (
+                [list(x.shape) for x in corner_out
+                 if hasattr(x, 'shape')]
+                if isinstance(corner_out, (list, tuple)) else []
+            ),
+        }
         results.append(entry)
-        print(f"  {chip_path.name}: {len(polygons)} polygons")
+        print(f"  {chip_path.name}: {len(corners)} corners predicted")
 
-    # Save results
+    # Save
     out_json = output_dir / 'heat_results.json'
     with open(out_json, 'w') as f:
         json.dump(results, f, indent=2)
-    print(f"\nResults saved to {out_json}")
 
-    # Summary
     ok = [r for r in results if 'error' not in r]
     print(f"\n{'='*50}")
-    print(f"Processed: {len(results)} chips")
-    print(f"Success:   {len(ok)} chips")
-    print(f"Avg polygons per chip: {sum(r['n_polygons'] for r in ok) / max(len(ok),1):.1f}")
-
-    if not ok:
-        print("\nNo successful inferences — model interface likely needs adjustment.")
-        print("Report the error messages above and the repo structure.")
+    print(f"Chips processed: {len(results)}, successful: {len(ok)}")
+    print(f"Avg corners/chip: {sum(r['n_corners'] for r in ok) / max(len(ok), 1):.1f}")
+    print(f"Results: {out_json}")
+    if ok:
+        print("\nSample output (first chip):")
+        print(json.dumps(ok[0], indent=2)[:800])
 
 
 if __name__ == '__main__':
