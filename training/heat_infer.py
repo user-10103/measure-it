@@ -203,20 +203,21 @@ def run_heat_inference(backbone, corner_model, edge_model, tensor, device):
     """
     import torch
     tensor = tensor.to(device)
+    import traceback as _tb
     with torch.no_grad():
         try:
-            # Standard HEAT forward: backbone → feature, corner prediction
-            features = backbone(tensor)
+            features   = backbone(tensor)
             corner_out = corner_model(features, tensor)
             edge_out   = edge_model(features, corner_out, tensor)
             return corner_out, edge_out
         except Exception as e:
-            print(f"  3-stage forward failed ({e}), trying direct call...")
+            print(f"  3-stage forward failed:\n{_tb.format_exc()}")
+            # Try passing the image directly to corner_model
             try:
                 out = corner_model(tensor)
                 return out, None
             except Exception as e2:
-                return None, str(e2)
+                return None, f"{type(e2).__name__}: {e2}"
 
 
 def decode_corners(corner_out, image_size: int, orig_h: int, orig_w: int):
@@ -353,4 +354,9 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    import traceback as _tb
+    try:
+        main()
+    except Exception:
+        _tb.print_exc()
+        sys.exit(1)
