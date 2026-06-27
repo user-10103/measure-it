@@ -130,41 +130,64 @@ def load_heat_model(checkpoint_path: str, heat_src: Path, device='cuda'):
     HeatEdge       = _import_class('models/edge_models.py', 'HeatEdge')
     print("Imported ResNetBackbone, HeatCorner, HeatEdge ✓")
 
-    # Print constructor signatures so we know how to call them
+    # Print constructor signatures (never let this hide errors)
+    import traceback as _tb
     for name, cls in [('ResNetBackbone', ResNetBackbone),
                       ('HeatCorner', HeatCorner),
                       ('HeatEdge', HeatEdge)]:
         try:
             sig = inspect.signature(cls.__init__)
             print(f"  {name}.__init__{sig}")
-        except Exception:
-            pass
+        except Exception as _e:
+            print(f"  {name}: could not read signature ({_e})")
 
     # Exact construction pattern from train.py lines 188-200
+    print("\n--- building backbone ---")
     backbone     = ResNetBackbone()
     strides      = backbone.strides
     num_channels = backbone.num_channels
     print(f"Backbone strides={strides}  num_channels={num_channels}")
 
-    corner_model = HeatCorner(
-        input_dim=128,
-        hidden_dim=256,
-        num_feature_levels=4,
-        backbone_strides=strides,
-        backbone_num_channels=num_channels,
-    )
-    edge_model = HeatEdge(
-        input_dim=128,
-        hidden_dim=256,
-        num_feature_levels=4,
-        backbone_strides=strides,
-        backbone_num_channels=num_channels,
-    )
+    print("--- building corner_model ---")
+    try:
+        corner_model = HeatCorner(
+            input_dim=128,
+            hidden_dim=256,
+            num_feature_levels=4,
+            backbone_strides=strides,
+            backbone_num_channels=num_channels,
+        )
+        print("HeatCorner OK ✓")
+    except Exception:
+        print("HeatCorner FAILED:")
+        _tb.print_exc()
+        return None, None, None
 
-    # Load state dicts — strip DDP 'module.' prefix
-    backbone.load_state_dict(_strip_ddp(ck['backbone']), strict=False)
-    corner_model.load_state_dict(_strip_ddp(ck['corner_model']), strict=False)
-    edge_model.load_state_dict(_strip_ddp(ck['edge_model']), strict=False)
+    print("--- building edge_model ---")
+    try:
+        edge_model = HeatEdge(
+            input_dim=128,
+            hidden_dim=256,
+            num_feature_levels=4,
+            backbone_strides=strides,
+            backbone_num_channels=num_channels,
+        )
+        print("HeatEdge OK ✓")
+    except Exception:
+        print("HeatEdge FAILED:")
+        _tb.print_exc()
+        return None, None, None
+
+    print("--- loading state dicts ---")
+    try:
+        backbone.load_state_dict(_strip_ddp(ck['backbone']), strict=False)
+        corner_model.load_state_dict(_strip_ddp(ck['corner_model']), strict=False)
+        edge_model.load_state_dict(_strip_ddp(ck['edge_model']), strict=False)
+        print("State dicts loaded ✓")
+    except Exception:
+        print("State dict loading FAILED:")
+        _tb.print_exc()
+        return None, None, None
 
     dev = torch.device(device if torch.cuda.is_available() else 'cpu')
     backbone     = backbone.to(dev).eval()
