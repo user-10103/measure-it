@@ -80,106 +80,86 @@ def _print_section(text: str, keyword: str, chars: int = 2000):
 
 # ── model loading ─────────────────────────────────────────────────────────────
 
+def _strip_ddp(state_dict: dict) -> dict:
+    """Remove 'module.' prefix added by DistributedDataParallel."""
+    out = {}
+    for k, v in state_dict.items():
+        out[k[len('module.'):] if k.startswith('module.') else k] = v
+    return out
+
+
 def load_heat_model(checkpoint_path: str, heat_src: Path, device='cuda'):
     """
     Load all three HEAT components using the checkpoint's own saved args.
 
-    HEAT checkpoints contain:
-      checkpoint['args']         — original argparse.Namespace
-      checkpoint['backbone']     — state_dict
-      checkpoint['corner_model'] — state_dict
-      checkpoint['edge_model']   — state_dict
+    HEAT checkpoints:
+      ck['args']         — original argparse.Namespace (has image_size, max_corner_num, …)
+      ck['backbone']     — DDP state_dict (keys prefixed with 'module.')
+      ck['corner_model'] — DDP state_dict
+      ck['edge_model']   — DDP state_dict
+
+    build_model() lives in arguments.py inside the heat-master directory.
     """
     import torch
+    import importlib.util
 
     print(f"\nLoading checkpoint: {checkpoint_path}")
     ck = _safe_load(checkpoint_path)
     print("Checkpoint keys:", list(ck.keys()))
 
-    # Recover original training args stored in checkpoint
-    ck_args = ck.get('args', None)
+    ck_args = ck.get('args')
     if ck_args is not None:
         print(f"Checkpoint args: {ck_args}")
     else:
-        print("WARNING: no 'args' in checkpoint — will attempt default config")
+        print("WARNING: no 'args' key in checkpoint")
 
-    # Add heat-master to sys.path
-    sys.path.insert(0, str(heat_src))
-    print(f"Added to sys.path: {heat_src}")
+    # The HEAT source must be in sys.path before any import
+    if str(heat_src) not in sys.path:
+        sys.path.insert(0, str(heat_src))
+    print(f"sys.path includes: {heat_src}")
 
-    # Try to import build_model from the repo
-    build_model_fn = None
-    for mod_name in ['models', 'model', 'heat', 'build']:
-        try:
-            mod = __import__(mod_name)
-            if hasattr(mod, 'build_model'):
-                build_model_fn = mod.build_model
-                print(f"Found build_model in module: {mod_name}")
-                break
-        except ImportError:
-            pass
-
-    if build_model_fn is None:
-        # Try importing directly from common file names
-        for fname in ['models/corner_models.py', 'models/edge_models.py',
-                      'models/__init__.py', 'model.py']:
-            fpath = heat_src / fname
-            if fpath.exists():
-                import importlib.util
-                spec = importlib.util.spec_from_file_location('heat_models', fpath)
-                mod  = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(mod)
-                if hasattr(mod, 'build_model'):
-                    build_model_fn = mod.build_model
-                    print(f"Found build_model in: {fname}")
-                    break
-
-    if build_model_fn is None:
-        # Last resort: look inside infer_TESTING.py for build_model
-        infer_py = heat_src / 'infer_TESTING.py'
-        if infer_py.exists():
-            import importlib.util
-            spec = importlib.util.spec_from_file_location('infer_testing', infer_py)
-            mod  = importlib.util.module_from_spec(spec)
-            try:
-                spec.loader.exec_module(mod)
-                if hasattr(mod, 'build_model'):
-                    build_model_fn = mod.build_model
-                    print("Found build_model in infer_TESTING.py")
-            except Exception as e:
-                print(f"Could not exec infer_TESTING.py: {e}")
-
-    if build_model_fn is None:
-        print("\nERROR: could not locate build_model. Printing repo structure:")
+    # build_model lives in arguments.py (confirmed)
+    arguments_py = heat_src / 'arguments.py'
+    if not arguments_py.exists():
+        print(f"ERROR: {arguments_py} not found. Repo structure:")
         for p in heat_src.rglob('*.py'):
             print(' ', p.relative_to(heat_src))
-        print("\nPrinting infer_TESTING.py build_model section:")
-        infer_py = heat_src / 'infer_TESTING.py'
-        if infer_py.exists():
-            _print_section(infer_py.read_text(), 'build_model')
         return None, None, None
 
-    # Build model using checkpoint args (or defaults)
+    spec = importlib.util.spec_from_file_location('heat_arguments', arguments_py)
+    args_mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(args_mod)
+
+    if not hasattr(args_mod, 'build_model'):
+        print(f"ERROR: build_model not found in arguments.py")
+        _print_section(arguments_py.read_text(), 'def ')
+        return None, None, None
+
+    print("Found build_model in arguments.py ✓")
+
+    # Build models using stored args
     try:
-        backbone, corner_model, edge_model = build_model_fn(ck_args)
-    except TypeError:
-        # Some versions take no args
-        backbone, corner_model, edge_model = build_model_fn()
+        backbone, corner_model, edge_model = args_mod.build_model(ck_args)
     except Exception as e:
-        print(f"build_model() failed: {e}")
-        return None, None, None
+        print(f"build_model(ck_args) failed: {e}")
+        print("Trying build_model() with no args...")
+        try:
+            backbone, corner_model, edge_model = args_mod.build_model()
+        except Exception as e2:
+            print(f"build_model() also failed: {e2}")
+            return None, None, None
 
-    # Load state dicts
-    backbone.load_state_dict(ck['backbone'], strict=False)
-    corner_model.load_state_dict(ck['corner_model'], strict=False)
-    edge_model.load_state_dict(ck['edge_model'], strict=False)
+    # Load state dicts — strip DDP 'module.' prefix
+    backbone.load_state_dict(_strip_ddp(ck['backbone']), strict=False)
+    corner_model.load_state_dict(_strip_ddp(ck['corner_model']), strict=False)
+    edge_model.load_state_dict(_strip_ddp(ck['edge_model']), strict=False)
 
     dev = torch.device(device if torch.cuda.is_available() else 'cpu')
-    backbone    = backbone.to(dev).eval()
+    backbone     = backbone.to(dev).eval()
     corner_model = corner_model.to(dev).eval()
     edge_model   = edge_model.to(dev).eval()
 
-    print(f"Loaded all three HEAT components on {dev}")
+    print(f"Loaded backbone + corner_model + edge_model on {dev} ✓")
     return backbone, corner_model, edge_model
 
 
