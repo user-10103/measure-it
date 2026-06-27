@@ -116,12 +116,23 @@ def main():
                     help="path to last.ckpt for resuming a previous run")
     ap.add_argument("--pretrain-weights", default=None,
                     help="path to a .pth to use as starting weights (not full resume)")
-    ap.add_argument("--model", default="preview",
-                    help="rfdetr seg variant; 'preview' = RFDETRSegPreview")
+    ap.add_argument("--model", default="large",
+                    help="rfdetr seg variant: preview | large | xlarge (default: large)")
     args = ap.parse_args()
 
-    from rfdetr import RFDETRSegPreview
-    model = RFDETRSegPreview(
+    _model_map = {
+        "preview": "RFDETRSegPreview",
+        "large":   "RFDETRSegLarge",
+        "xlarge":  "RFDETRSegXLarge",
+    }
+    _cls_name = _model_map.get(args.model.lower(), "RFDETRSegLarge")
+    import rfdetr as _rfdetr
+    if not hasattr(_rfdetr, _cls_name):
+        raise ValueError(f"rfdetr has no class {_cls_name}. "
+                         f"Run: pip install -U rfdetr  (need v1.4+)")
+    ModelCls = getattr(_rfdetr, _cls_name)
+    print(f"Using model class: {_cls_name}")
+    model = ModelCls(
         resolution=args.resolution,
         pretrain_weights=args.pretrain_weights,
     )

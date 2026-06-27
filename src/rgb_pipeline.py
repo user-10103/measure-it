@@ -231,6 +231,7 @@ def process_image_path(
     lon: Optional[float] = None,
     chip_bounds: Optional[tuple] = None,
     use_ms_footprint: bool = True,
+    sam_refiner=None,
 ) -> Dict:
     """Run the RGB pipeline on a chip image file using any RoofModelBackend.
 
@@ -288,6 +289,16 @@ def process_image_path(
                 logger.debug("No MS footprint within 60 m of %s — using model outline", address)
         except Exception as e:
             logger.warning("MS footprint lookup failed (%s) — falling back to model outline", e)
+
+    # Optional SAMRefiner pass — sharpens facet mask boundaries before
+    # polygon conversion, reducing plan-area error from sloppy mask edges.
+    if sam_refiner is not None:
+        try:
+            from src.roofs.sam_refiner import refine_prediction
+            prediction = refine_prediction(img_rgb, prediction, sam_refiner)
+            logger.info("SAMRefiner applied to %d facets", len(prediction.get("facets", [])))
+        except Exception as e:
+            logger.warning("SAMRefiner failed (%s) — using unrefined prediction", e)
 
     return process_chip_rgb(
         prediction,
