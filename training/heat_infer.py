@@ -90,64 +90,79 @@ def _strip_ddp(state_dict: dict) -> dict:
 
 def load_heat_model(checkpoint_path: str, heat_src: Path, device='cuda'):
     """
-    Load all three HEAT components using the checkpoint's own saved args.
+    Load all three HEAT components.
 
-    HEAT checkpoints:
-      ck['args']         — original argparse.Namespace (has image_size, max_corner_num, …)
-      ck['backbone']     — DDP state_dict (keys prefixed with 'module.')
-      ck['corner_model'] — DDP state_dict
-      ck['edge_model']   — DDP state_dict
+    Classes (confirmed from train.py):
+      models.resnet.ResNetBackbone   → ck['backbone']
+      models.corner_models.HeatCorner → ck['corner_model']
+      models.edge_models.HeatEdge    → ck['edge_model']
 
-    build_model() lives in arguments.py inside the heat-master directory.
+    All trained with DDP so state dict keys have 'module.' prefix — stripped here.
+    Constructor signatures are inferred by trying common patterns.
     """
     import torch
     import importlib.util
+    import inspect
 
     print(f"\nLoading checkpoint: {checkpoint_path}")
     ck = _safe_load(checkpoint_path)
     print("Checkpoint keys:", list(ck.keys()))
 
     ck_args = ck.get('args')
-    if ck_args is not None:
-        print(f"Checkpoint args: {ck_args}")
-    else:
-        print("WARNING: no 'args' key in checkpoint")
+    print(f"Checkpoint args: {ck_args}")
 
-    # The HEAT source must be in sys.path before any import
     if str(heat_src) not in sys.path:
         sys.path.insert(0, str(heat_src))
     print(f"sys.path includes: {heat_src}")
 
-    # build_model lives in arguments.py (confirmed)
-    arguments_py = heat_src / 'arguments.py'
-    if not arguments_py.exists():
-        print(f"ERROR: {arguments_py} not found. Repo structure:")
-        for p in heat_src.rglob('*.py'):
-            print(' ', p.relative_to(heat_src))
-        return None, None, None
+    def _import_class(module_file: str, class_name: str):
+        fpath = heat_src / module_file
+        if not fpath.exists():
+            raise ImportError(f"{fpath} not found")
+        spec = importlib.util.spec_from_file_location(class_name, fpath)
+        mod  = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return getattr(mod, class_name)
 
-    spec = importlib.util.spec_from_file_location('heat_arguments', arguments_py)
-    args_mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(args_mod)
+    # Import the three model classes directly
+    ResNetBackbone = _import_class('models/resnet.py', 'ResNetBackbone')
+    HeatCorner     = _import_class('models/corner_models.py', 'HeatCorner')
+    HeatEdge       = _import_class('models/edge_models.py', 'HeatEdge')
+    print("Imported ResNetBackbone, HeatCorner, HeatEdge ✓")
 
-    if not hasattr(args_mod, 'build_model'):
-        print(f"ERROR: build_model not found in arguments.py")
-        _print_section(arguments_py.read_text(), 'def ')
-        return None, None, None
-
-    print("Found build_model in arguments.py ✓")
-
-    # Build models using stored args
-    try:
-        backbone, corner_model, edge_model = args_mod.build_model(ck_args)
-    except Exception as e:
-        print(f"build_model(ck_args) failed: {e}")
-        print("Trying build_model() with no args...")
+    # Print constructor signatures so we know how to call them
+    for name, cls in [('ResNetBackbone', ResNetBackbone),
+                      ('HeatCorner', HeatCorner),
+                      ('HeatEdge', HeatEdge)]:
         try:
-            backbone, corner_model, edge_model = args_mod.build_model()
-        except Exception as e2:
-            print(f"build_model() also failed: {e2}")
-            return None, None, None
+            sig = inspect.signature(cls.__init__)
+            print(f"  {name}.__init__{sig}")
+        except Exception:
+            pass
+
+    def _try_init(cls, *positional_candidates, **kwargs):
+        """Try each set of positional args until one doesn't raise TypeError."""
+        for pos in positional_candidates:
+            try:
+                return cls(*pos, **kwargs)
+            except TypeError:
+                continue
+        raise RuntimeError(f"Could not instantiate {cls.__name__} with any arg pattern")
+
+    # Instantiate — try (args,), (), (args, other) patterns
+    backbone = _try_init(ResNetBackbone,
+                         (ck_args,),  # ResNetBackbone(args)
+                         ())          # ResNetBackbone()
+
+    corner_model = _try_init(HeatCorner,
+                              (ck_args,),           # HeatCorner(args)
+                              (ck_args, backbone),  # HeatCorner(args, backbone)
+                              ())                   # HeatCorner()
+
+    edge_model = _try_init(HeatEdge,
+                            (ck_args,),                      # HeatEdge(args)
+                            (ck_args, corner_model),         # HeatEdge(args, corner_model)
+                            (ck_args, backbone, corner_model)) # HeatEdge(args, bb, cm)
 
     # Load state dicts — strip DDP 'module.' prefix
     backbone.load_state_dict(_strip_ddp(ck['backbone']), strict=False)
