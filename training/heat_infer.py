@@ -1,27 +1,30 @@
 #!/usr/bin/env python3
 """
-Run HEAT (Hierarchical Edge Attention Transformer) inference on raw image chips.
+Run HEAT inference on raw NAIP chips and return roof plane polygons.
 
-Bypasses OutdoorBuildingDataset. Loads all three HEAT components
-(backbone + corner_model + edge_model) from the checkpoint's own saved `args`,
-then runs forward inference on a folder of PNG chips.
+Uses get_results() and get_pixel_features() imported directly from
+infer_TESTING.py — no reimplementation of the forward pass.
+
+Output per chip: list of polygons (each a list of [x,y] pixel coords),
+scaled to the original chip resolution.
 
 Usage:
     python training/heat_infer.py \
         --checkpoint /tmp/heat_ckpts/SO2m/checkpoint_best.pth \
         --chips-dir  training/naip_dataset/valid \
         --output     /tmp/heat_results \
-        --n-chips    10
+        --n-chips    10 \
+        --repo-dir   "/content/Automatic_Roof_Plane_Extraction"
 """
 
 import argparse
 import json
-import sys
 import subprocess
+import sys
 from pathlib import Path
 
 
-# ── helpers ───────────────────────────────────────────────────────────────────
+# ── safe torch.load ───────────────────────────────────────────────────────────
 
 def _safe_load(path: str, map_location='cpu') -> dict:
     import torch
@@ -36,253 +39,223 @@ def _safe_load(path: str, map_location='cpu') -> dict:
         return torch.load(path, map_location=map_location, weights_only=False)  # noqa: S614
 
 
-def _install_pip_deps(req_path: Path):
-    """Install only pip-installable lines from requirements.txt (skip conda lines)."""
-    if not req_path.exists():
-        return
-    lines = []
-    for raw in req_path.read_text().splitlines():
-        line = raw.strip()
-        if not line or line.startswith('#'):
-            continue
-        if line.startswith('conda') or line.startswith('--'):
-            print(f"  skip (non-pip): {line}")
-            continue
-        lines.append(line)
-    if lines:
-        subprocess.run(
-            [sys.executable, '-m', 'pip', 'install', '-q'] + lines,
-            check=False,
-        )
+def _strip_ddp(state_dict: dict) -> dict:
+    """Remove 'module.' prefix added by DistributedDataParallel."""
+    return {(k[len('module.'):] if k.startswith('module.') else k): v
+            for k, v in state_dict.items()}
 
+
+# ── HEAT repo setup ───────────────────────────────────────────────────────────
 
 def _find_heat_master(root: Path) -> Path:
-    """Walk repo root to find the heat-master source directory."""
-    # Direct path (user confirmed)
     candidate = root / '2.- TRAINING-TESTING' / 'heat-master'
     if candidate.exists():
         return candidate
-    # Fallback: find first dir containing infer_TESTING.py
     for p in root.rglob('infer_TESTING.py'):
         return p.parent
     return root
 
 
-def _print_section(text: str, keyword: str, chars: int = 2000):
-    """Print the section of a file around a keyword."""
-    idx = text.lower().find(keyword.lower())
-    if idx == -1:
-        print(f"  ('{keyword}' not found)")
+def _install_pip_deps(req_path: Path):
+    if not req_path.exists():
         return
-    start = max(0, idx - 100)
-    print(text[start: start + chars])
+    lines = [l.strip() for l in req_path.read_text().splitlines()
+             if l.strip() and not l.startswith('#')
+             and not l.startswith('conda') and not l.startswith('--')]
+    if lines:
+        subprocess.run([sys.executable, '-m', 'pip', 'install', '-q'] + lines,
+                       check=False)
+
+
+def setup_heat(repo_root: Path, device: str):
+    """Clone repo if needed, install deps, add to sys.path."""
+    if not repo_root.exists():
+        print("Cloning HEAT repo...")
+        subprocess.run(['git', 'clone', '--depth', '1',
+                        'https://github.com/carecamp93/Automatic_Roof_Plane_Extraction',
+                        str(repo_root)], check=True)
+
+    heat_src = _find_heat_master(repo_root)
+    print(f"HEAT source dir: {heat_src}")
+
+    _install_pip_deps(heat_src / 'requirements.txt')
+
+    if str(heat_src) not in sys.path:
+        sys.path.insert(0, str(heat_src))
+
+    return heat_src
 
 
 # ── model loading ─────────────────────────────────────────────────────────────
 
-def _strip_ddp(state_dict: dict) -> dict:
-    """Remove 'module.' prefix added by DistributedDataParallel."""
-    out = {}
-    for k, v in state_dict.items():
-        out[k[len('module.'):] if k.startswith('module.') else k] = v
-    return out
-
-
-def load_heat_model(checkpoint_path: str, heat_src: Path, device='cuda'):
-    """
-    Load all three HEAT components.
-
-    Classes (confirmed from train.py):
-      models.resnet.ResNetBackbone   → ck['backbone']
-      models.corner_models.HeatCorner → ck['corner_model']
-      models.edge_models.HeatEdge    → ck['edge_model']
-
-    All trained with DDP so state dict keys have 'module.' prefix — stripped here.
-    Constructor signatures are inferred by trying common patterns.
-    """
+def load_heat_model(checkpoint_path: str, heat_src: Path, device: str):
     import torch
     import importlib.util
-    import inspect
+    import traceback as _tb
 
     print(f"\nLoading checkpoint: {checkpoint_path}")
     ck = _safe_load(checkpoint_path)
-    print("Checkpoint keys:", list(ck.keys()))
-
     ck_args = ck.get('args')
-    print(f"Checkpoint args: {ck_args}")
-
-    if str(heat_src) not in sys.path:
-        sys.path.insert(0, str(heat_src))
-    print(f"sys.path includes: {heat_src}")
+    print(f"corner_to_edge_multiplier = {ck_args.corner_to_edge_multiplier}")
+    print(f"max_corner_num = {ck_args.max_corner_num}")
 
     def _import_class(module_file: str, class_name: str):
         fpath = heat_src / module_file
-        if not fpath.exists():
-            raise ImportError(f"{fpath} not found")
-        spec = importlib.util.spec_from_file_location(class_name, fpath)
-        mod  = importlib.util.module_from_spec(spec)
+        spec  = importlib.util.spec_from_file_location(class_name, fpath)
+        mod   = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         return getattr(mod, class_name)
 
-    # Import the three model classes directly
-    ResNetBackbone = _import_class('models/resnet.py', 'ResNetBackbone')
-    HeatCorner     = _import_class('models/corner_models.py', 'HeatCorner')
-    HeatEdge       = _import_class('models/edge_models.py', 'HeatEdge')
+    ResNetBackbone = _import_class('models/resnet.py',         'ResNetBackbone')
+    HeatCorner     = _import_class('models/corner_models.py',  'HeatCorner')
+    HeatEdge       = _import_class('models/edge_models.py',    'HeatEdge')
     print("Imported ResNetBackbone, HeatCorner, HeatEdge ✓")
 
-    # Print constructor signatures (never let this hide errors)
-    import traceback as _tb
-    for name, cls in [('ResNetBackbone', ResNetBackbone),
-                      ('HeatCorner', HeatCorner),
-                      ('HeatEdge', HeatEdge)]:
-        try:
-            sig = inspect.signature(cls.__init__)
-            print(f"  {name}.__init__{sig}")
-        except Exception as _e:
-            print(f"  {name}: could not read signature ({_e})")
-
-    # Exact construction pattern from train.py lines 188-200
-    print("\n--- building backbone ---")
+    # Exact pattern from train.py lines 188-200
     backbone     = ResNetBackbone()
     strides      = backbone.strides
     num_channels = backbone.num_channels
-    print(f"Backbone strides={strides}  num_channels={num_channels}")
+    print(f"Backbone: strides={strides}, num_channels={num_channels}")
 
-    print("--- building corner_model ---")
     try:
         corner_model = HeatCorner(
-            input_dim=128,
-            hidden_dim=256,
-            num_feature_levels=4,
-            backbone_strides=strides,
-            backbone_num_channels=num_channels,
+            input_dim=128, hidden_dim=256, num_feature_levels=4,
+            backbone_strides=strides, backbone_num_channels=num_channels,
         )
-        print("HeatCorner OK ✓")
+        print("HeatCorner ✓")
     except Exception:
-        print("HeatCorner FAILED:")
-        _tb.print_exc()
-        return None, None, None
+        print("HeatCorner FAILED:"); _tb.print_exc(); return None, None, None, None
 
-    print("--- building edge_model ---")
     try:
         edge_model = HeatEdge(
-            input_dim=128,
-            hidden_dim=256,
-            num_feature_levels=4,
-            backbone_strides=strides,
-            backbone_num_channels=num_channels,
+            input_dim=128, hidden_dim=256, num_feature_levels=4,
+            backbone_strides=strides, backbone_num_channels=num_channels,
         )
-        print("HeatEdge OK ✓")
+        print("HeatEdge ✓")
     except Exception:
-        print("HeatEdge FAILED:")
-        _tb.print_exc()
-        return None, None, None
+        print("HeatEdge FAILED:"); _tb.print_exc(); return None, None, None, None
 
-    print("--- loading state dicts ---")
     try:
         backbone.load_state_dict(_strip_ddp(ck['backbone']), strict=False)
         corner_model.load_state_dict(_strip_ddp(ck['corner_model']), strict=False)
         edge_model.load_state_dict(_strip_ddp(ck['edge_model']), strict=False)
         print("State dicts loaded ✓")
     except Exception:
-        print("State dict loading FAILED:")
-        _tb.print_exc()
-        return None, None, None
+        print("State dict loading FAILED:"); _tb.print_exc(); return None, None, None, None
 
-    dev = torch.device(device if torch.cuda.is_available() else 'cpu')
+    dev = torch.device(device if __import__('torch').cuda.is_available() else 'cpu')
     backbone     = backbone.to(dev).eval()
     corner_model = corner_model.to(dev).eval()
     edge_model   = edge_model.to(dev).eval()
 
-    print(f"Loaded backbone + corner_model + edge_model on {dev} ✓")
-    return backbone, corner_model, edge_model
+    print(f"All models on {dev} ✓")
+    return backbone, corner_model, edge_model, ck_args
 
 
-# ── inference ─────────────────────────────────────────────────────────────────
+# ── polygon assembly from planar graph ───────────────────────────────────────
 
-def chip_to_tensor(chip_path: Path, image_size: int = 256):
+def planar_graph_to_polygons(corners, edges, min_vertices: int = 3):
+    """
+    Convert HEAT planar graph (corners + edges) to face polygons.
+
+    Uses NetworkX to find minimal cycles in the undirected graph.
+    Each cycle with ≥ min_vertices corners becomes a roof face polygon.
+
+    corners: [N, 2] array of (x, y) pixel coords
+    edges:   [M, 2] array of (i, j) corner index pairs
+    Returns: list of polygons, each a list of [x, y] pairs
+    """
+    try:
+        import networkx as nx
+    except ImportError:
+        subprocess.run([sys.executable, '-m', 'pip', 'install', '-q', 'networkx'],
+                       check=False)
+        import networkx as nx
+
+    import numpy as np
+
+    if len(corners) < min_vertices or len(edges) == 0:
+        return []
+
+    G = nx.Graph()
+    G.add_nodes_from(range(len(corners)))
+    G.add_edges_from(edges.tolist() if hasattr(edges, 'tolist') else edges)
+
+    # Find minimal cycles (faces) via minimum cycle basis
+    try:
+        cycles = nx.minimum_cycle_basis(G)
+    except Exception:
+        # fallback: simple cycles
+        cycles = list(nx.simple_cycles(G))
+
+    polygons = []
+    for cycle in cycles:
+        if len(cycle) < min_vertices:
+            continue
+        pts = [[float(corners[i][0]), float(corners[i][1])] for i in cycle]
+        # Close the polygon
+        pts.append(pts[0])
+        polygons.append(pts)
+
+    return polygons
+
+
+# ── main inference ────────────────────────────────────────────────────────────
+
+def run_on_chip(chip_path: Path, backbone, corner_model, edge_model,
+                ck_args, get_results_fn, get_pixel_features_fn,
+                postprocess_fn, process_image_fn,
+                image_size: int = 256, infer_times: int = 3, device='cuda'):
+    import cv2
     import torch
     import numpy as np
-    import cv2
 
     bgr = cv2.imread(str(chip_path))
     if bgr is None:
-        return None, 0, 0
-    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-    h_orig, w_orig = rgb.shape[:2]
-    resized = cv2.resize(rgb, (image_size, image_size))
-    arr = resized.astype(np.float32) / 255.0
-    mean = np.array([0.485, 0.456, 0.406])
-    std  = np.array([0.229, 0.224, 0.225])
-    arr  = (arr - mean) / std
-    tensor = torch.from_numpy(arr.transpose(2, 0, 1)).float().unsqueeze(0)
-    return tensor, h_orig, w_orig
+        return None
 
+    h_orig, w_orig = bgr.shape[:2]
+    bgr_resized = cv2.resize(bgr, (image_size, image_size))
 
-def run_heat_inference(backbone, corner_model, edge_model, tensor, device):
-    """
-    Run the three-stage HEAT forward pass.
-    Returns raw outputs for inspection if we can't decode polygons automatically.
-    """
-    import torch
-    tensor = tensor.to(device)
-    import traceback as _tb
+    # process_image expects BGR (cv2 native, no RGB conversion — confirmed)
+    img_tensor = process_image_fn(bgr_resized).to(
+        torch.device(device if torch.cuda.is_available() else 'cpu'))
+
+    pixels, pixel_features = get_pixel_features_fn(image_size=image_size)
+    pixel_features = pixel_features.to(img_tensor.device)
+
     with torch.no_grad():
-        try:
-            features   = backbone(tensor)
-            corner_out = corner_model(features, tensor)
-            edge_out   = edge_model(features, corner_out, tensor)
-            return corner_out, edge_out
-        except Exception as e:
-            print(f"  3-stage forward failed:\n{_tb.format_exc()}")
-            # Try passing the image directly to corner_model
-            try:
-                out = corner_model(tensor)
-                return out, None
-            except Exception as e2:
-                return None, f"{type(e2).__name__}: {e2}"
+        pred_corners, pred_confs, pos_edges, edge_confs, c_heatmap = get_results_fn(
+            img_tensor, None,
+            backbone, corner_model, edge_model,
+            pixels, pixel_features, ck_args,
+            infer_times=infer_times,
+            corner_thresh=0.01,
+            image_size=image_size,
+        )
 
+    pred_corners, pred_confs, pos_edges = postprocess_fn(
+        pred_corners, pred_confs, pos_edges)
 
-def decode_corners(corner_out, image_size: int, orig_h: int, orig_w: int):
-    """Extract predicted corner coordinates from HEAT corner output."""
-    import torch
-    import numpy as np
+    # Scale corners from 256×256 to original chip resolution
+    scale_x = w_orig / image_size
+    scale_y = h_orig / image_size
+    corners_orig = np.stack([
+        pred_corners[:, 0] * scale_x,
+        pred_corners[:, 1] * scale_y,
+    ], axis=1) if len(pred_corners) > 0 else pred_corners
 
-    if corner_out is None:
-        return []
+    polygons = planar_graph_to_polygons(corners_orig, pos_edges)
 
-    corners = []
-    if isinstance(corner_out, (tuple, list)):
-        for item in corner_out:
-            if isinstance(item, torch.Tensor) and item.ndim >= 2:
-                arr = item[0].detach().cpu().numpy()
-                if arr.shape[-1] == 2:
-                    # [N, 2] normalised coords
-                    for pt in arr:
-                        x = float(pt[0]) * orig_w
-                        y = float(pt[1]) * orig_h
-                        if 0 <= x <= orig_w and 0 <= y <= orig_h:
-                            corners.append((x, y))
-                elif arr.ndim == 2 and arr.shape[0] == arr.shape[1]:
-                    # Heatmap [H, W] — extract local maxima
-                    from scipy.ndimage import maximum_filter
-                    hm = arr
-                    local_max = (hm == maximum_filter(hm, size=7)) & (hm > 0.3)
-                    ys, xs = np.where(local_max)
-                    for xi, yi in zip(xs, ys):
-                        cx = float(xi) / arr.shape[1] * orig_w
-                        cy = float(yi) / arr.shape[0] * orig_h
-                        corners.append((cx, cy))
-    elif isinstance(corner_out, torch.Tensor):
-        arr = corner_out[0].detach().cpu().numpy()
-        if arr.shape[-1] == 2:
-            for pt in arr:
-                corners.append((float(pt[0]) * orig_w, float(pt[1]) * orig_h))
+    return {
+        'n_corners':  len(pred_corners),
+        'n_edges':    len(pos_edges),
+        'n_polygons': len(polygons),
+        'corners':    corners_orig.tolist() if hasattr(corners_orig, 'tolist') else [],
+        'edges':      pos_edges.tolist()    if hasattr(pos_edges,    'tolist') else [],
+        'polygons':   polygons,
+    }
 
-    return corners
-
-
-# ── main ──────────────────────────────────────────────────────────────────────
 
 def main():
     ap = argparse.ArgumentParser()
@@ -290,90 +263,91 @@ def main():
     ap.add_argument('--chips-dir',   required=True)
     ap.add_argument('--output',      default='/tmp/heat_results')
     ap.add_argument('--image-size',  type=int, default=256)
+    ap.add_argument('--infer-times', type=int, default=3)
     ap.add_argument('--n-chips',     type=int, default=10)
     ap.add_argument('--repo-dir',    default='/content/Automatic_Roof_Plane_Extraction')
     ap.add_argument('--device',      default='cuda')
     args = ap.parse_args()
 
     import torch
+    import importlib.util
+    import traceback as _tb
 
     repo_root  = Path(args.repo_dir)
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Clone if needed
-    if not repo_root.exists():
-        print("Cloning HEAT repo...")
-        subprocess.run([
-            'git', 'clone', '--depth', '1',
-            'https://github.com/carecamp93/Automatic_Roof_Plane_Extraction',
-            str(repo_root),
-        ], check=True)
-
-    # Find heat-master subdirectory
-    heat_src = _find_heat_master(repo_root)
-    print(f"HEAT source dir: {heat_src}")
-
-    # Install pip-only deps
-    _install_pip_deps(heat_src / 'requirements.txt')
+    heat_src = setup_heat(repo_root, args.device)
 
     device = args.device if torch.cuda.is_available() else 'cpu'
+    backbone, corner_model, edge_model, ck_args = load_heat_model(
+        args.checkpoint, heat_src, device)
 
-    backbone, corner_model, edge_model = load_heat_model(
-        args.checkpoint, heat_src, device
-    )
     if backbone is None:
-        print("\nCould not load model. Paste the output above and we'll fix it.")
+        print("Model loading failed — see traceback above.")
         sys.exit(1)
 
-    # Run on N chips
+    # Import inference helpers directly from infer_TESTING.py
+    infer_py = heat_src / 'infer_TESTING.py'
+    spec = importlib.util.spec_from_file_location('heat_infer_testing', infer_py)
+    infer_mod = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(infer_mod)
+    except SystemExit:
+        pass  # infer_TESTING.py may call main() at module level
+
+    get_results_fn        = infer_mod.get_results
+    get_pixel_features_fn = infer_mod.get_pixel_features
+    postprocess_fn        = infer_mod.postprocess_preds
+    process_image_fn      = infer_mod.process_image
+    print("Imported inference helpers from infer_TESTING.py ✓")
+
     chips = sorted(Path(args.chips_dir).glob('*.png'))
     if args.n_chips > 0:
         chips = chips[:args.n_chips]
-    print(f"\nRunning inference on {len(chips)} chips...")
+    print(f"\nRunning on {len(chips)} chips (infer_times={args.infer_times})...")
 
     results = []
     for chip_path in chips:
-        tensor, h_orig, w_orig = chip_to_tensor(chip_path, args.image_size)
-        if tensor is None:
-            continue
+        try:
+            r = run_on_chip(
+                chip_path, backbone, corner_model, edge_model, ck_args,
+                get_results_fn, get_pixel_features_fn,
+                postprocess_fn, process_image_fn,
+                image_size=args.image_size,
+                infer_times=args.infer_times,
+                device=device,
+            )
+            if r is None:
+                print(f"  {chip_path.name}: could not read image")
+                continue
+            r['chip'] = chip_path.name
+            results.append(r)
+            print(f"  {chip_path.name}: {r['n_corners']} corners, "
+                  f"{r['n_edges']} edges, {r['n_polygons']} polygons")
+        except Exception:
+            print(f"  {chip_path.name}: FAILED")
+            _tb.print_exc()
+            results.append({'chip': chip_path.name,
+                             'error': _tb.format_exc()})
 
-        corner_out, edge_out = run_heat_inference(
-            backbone, corner_model, edge_model, tensor, torch.device(device)
-        )
-
-        if isinstance(edge_out, str):
-            print(f"  {chip_path.name}: ERROR — {edge_out}")
-            results.append({'chip': chip_path.name, 'error': edge_out})
-            continue
-
-        corners = decode_corners(corner_out, args.image_size, h_orig, w_orig)
-        entry = {
-            'chip':     chip_path.name,
-            'n_corners': len(corners),
-            'corners':  corners,
-            'raw_corner_shapes': (
-                [list(x.shape) for x in corner_out
-                 if hasattr(x, 'shape')]
-                if isinstance(corner_out, (list, tuple)) else []
-            ),
-        }
-        results.append(entry)
-        print(f"  {chip_path.name}: {len(corners)} corners predicted")
-
-    # Save
     out_json = output_dir / 'heat_results.json'
     with open(out_json, 'w') as f:
         json.dump(results, f, indent=2)
 
     ok = [r for r in results if 'error' not in r]
-    print(f"\n{'='*50}")
-    print(f"Chips processed: {len(results)}, successful: {len(ok)}")
-    print(f"Avg corners/chip: {sum(r['n_corners'] for r in ok) / max(len(ok), 1):.1f}")
-    print(f"Results: {out_json}")
+    print(f"\n{'='*60}")
+    print(f"Processed: {len(results)}  Success: {len(ok)}")
     if ok:
-        print("\nSample output (first chip):")
-        print(json.dumps(ok[0], indent=2)[:800])
+        avg_poly = sum(r['n_polygons'] for r in ok) / len(ok)
+        avg_corn = sum(r['n_corners']  for r in ok) / len(ok)
+        print(f"Avg corners/chip: {avg_corn:.1f}")
+        print(f"Avg polygons/chip: {avg_poly:.1f}")
+        print(f"\nSample (first chip):")
+        sample = {k: v for k, v in ok[0].items() if k != 'polygons'}
+        sample['first_polygon'] = ok[0]['polygons'][0] if ok[0]['polygons'] else []
+        print(json.dumps(sample, indent=2))
+    print(f"\nFull results → {out_json}")
 
 
 if __name__ == '__main__':
