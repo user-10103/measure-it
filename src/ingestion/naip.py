@@ -828,30 +828,44 @@ def get_naip_for_location(
         logger.error(error_msg)
         raise NAIPNotFoundError(error_msg)
 
-    # Find matching tile
+    # Find matching tile. When the COG header sweep fails (e.g. GDAL/curl
+    # version mismatch), find_tile_containing_point returns None — in that
+    # case fall back to trying ALL tiles in listing order rather than
+    # blindly picking tiles[0], which may not cover the target point.
     tile_key = find_tile_containing_point(tiles, lat, lon)
-    if not tile_key:
-        logger.warning(f"Point not in any tile bounds, using first tile as fallback")
-        tile_key = tiles[0]
+    ordered = [tile_key] + [t for t in tiles if t != tile_key] if tile_key else list(tiles)
 
-    # Clip. Prefer (1) an already-downloaded local tile, then (2) windowed
-    # reads straight from S3 — the tiles are ~600 MB COGs but the chip window
-    # is ~200x200 px, so range requests fetch only the needed blocks
-    # (seconds vs ~8 min for a full-tile download). Full download remains
-    # the fallback when the remote windowed read fails.
-    local_tile = DATA_CACHE_DIR / "naip" / Path(tile_key).name
-    if local_tile.exists():
-        return clip_naip_to_building(local_tile, building_polygon, output_dir)
+    last_err: Optional[Exception] = None
+    for candidate in ordered:
+        local_tile = DATA_CACHE_DIR / "naip" / Path(candidate).name
+        try:
+            # Prefer (1) cached local tile, (2) windowed S3 read, (3) full download.
+            if local_tile.exists():
+                return clip_naip_to_building(local_tile, building_polygon, output_dir)
 
-    try:
-        vsipath = f"/vsis3/{NAIP_S3_BUCKET}/{tile_key}"
-        aws_session = AWSSession(boto3.Session(), requester_pays=True)
-        with rasterio.Env(aws_session):
-            result = clip_naip_to_building(Path(vsipath), building_polygon, output_dir)
-        logger.info(f"Clipped via windowed S3 read (no tile download): {Path(tile_key).name}")
-        return result
-    except Exception as e:
-        logger.warning(f"Windowed S3 clip failed ({e}) — falling back to full tile download")
+            try:
+                vsipath = f"/vsis3/{NAIP_S3_BUCKET}/{candidate}"
+                aws_sess = AWSSession(boto3.Session(), requester_pays=True)
+                with rasterio.Env(aws_sess):
+                    result = clip_naip_to_building(Path(vsipath), building_polygon, output_dir)
+                logger.info(f"Clipped via windowed S3 read: {Path(candidate).name}")
+                return result
+            except NAIPClipError:
+                raise  # geometry outside bounds — skip to next candidate below
+            except Exception as e:
+                logger.warning(f"Windowed S3 clip failed ({e}) — falling back to full download")
 
-    naip_path = download_naip_tile(tile_key)
-    return clip_naip_to_building(naip_path, building_polygon, output_dir)
+            naip_path = download_naip_tile(candidate)
+            return clip_naip_to_building(naip_path, building_polygon, output_dir)
+
+        except NAIPClipError as e:
+            if "outside raster bounds" in str(e):
+                logger.warning(f"Tile {Path(candidate).name} does not cover point — trying next")
+                last_err = e
+                continue
+            raise
+
+    raise NAIPNotFoundError(
+        f"No NAIP tile in {resolved['prefix']} covers ({lat:.5f}, {lon:.5f}). "
+        f"Last error: {last_err}"
+    )
