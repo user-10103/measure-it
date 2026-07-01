@@ -67,23 +67,27 @@ def latlon_to_naip_quadrangle(lat: float, lon: float) -> str:
 # Pure logic functions (no I/O, no side effects)
 # ============================================================================
 
-def _prioritize_years(available_years: list, preferred_year: Optional[str] = None) -> list:
+def _prioritize_years(available_years: list, preferred_year=None) -> list:
     """
-    Sort years with preferred year first, then newest to oldest.
+    Sort years with preferred year(s) first, then newest to oldest.
 
     Args:
         available_years: List of year strings
-        preferred_year: Year to place first if present
+        preferred_year: Year string, int, or list of year strings/ints to try first
 
     Returns:
         Sorted list of years
     """
     prioritized = []
 
-    if preferred_year and preferred_year in available_years:
-        prioritized.append(preferred_year)
+    if preferred_year is not None:
+        candidates = preferred_year if isinstance(preferred_year, (list, tuple)) else [preferred_year]
+        for y in candidates:
+            y = str(y)
+            if y in available_years and y not in prioritized:
+                prioritized.append(y)
 
-    other_years = [y for y in available_years if y != preferred_year]
+    other_years = [y for y in available_years if y not in prioritized]
     prioritized.extend(sorted(other_years, reverse=True))
 
     return prioritized
@@ -799,10 +803,8 @@ def get_naip_for_location(
     if output_dir is None:
         output_dir = OUTPUT_DIR
 
-    # Normalize: S3 paths use lowercase state codes; year must be a string
+    # Normalize: S3 paths use lowercase state codes
     state = state.lower()
-    if preferred_year is not None:
-        preferred_year = str(preferred_year)
 
     # Get quadrangle
     quadrangle = latlon_to_naip_quadrangle(lat, lon)
