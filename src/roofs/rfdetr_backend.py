@@ -303,7 +303,10 @@ class RFDETRBackend:
         for i in facet_idx:
             poly = _mask_to_polygon(masks[i], scale_xy=scale_xy, epsilon_frac=self.mask_epsilon)
             if poly is not None:
-                facets.append({"polygon": poly})
+                facet: Dict[str, Any] = {"polygon": poly}
+                if confidence is not None:
+                    facet["confidence"] = float(confidence[i])
+                facets.append(facet)
 
         logger.debug(
             f"RF-DETR: chip {img_w}×{img_h}, masks {mask_w}×{mask_h}, "
