@@ -125,11 +125,14 @@ def _load_model(checkpoint_path: str) -> Any:
         sd = ck["state_dict"]
         stripped = {(k[len("model."):] if k.startswith("model.") else k): v
                     for k, v in sd.items()}
-        stripped.pop("_kp_active_mask", None)
     else:
         # .pth: either {'model': state_dict} wrapper or flat state dict
         raw = torch.load(checkpoint_path, map_location="cpu", weights_only=False)  # nosec
         stripped = raw.get("model", raw) if isinstance(raw, dict) else raw
+        if not isinstance(stripped, dict):
+            stripped = dict(stripped)
+    # Strip rfdetr-internal tracking key present in both .ckpt and .pth exports
+    stripped.pop("_kp_active_mask", None)
 
     # --- Detect num_classes from checkpoint ----------------------------------
     for _ce_key in ("class_embed.weight", "transformer.enc_out_class_embed.0.weight"):
