@@ -799,6 +799,11 @@ def get_naip_for_location(
     if output_dir is None:
         output_dir = OUTPUT_DIR
 
+    # Normalize: S3 paths use lowercase state codes; year must be a string
+    state = state.lower()
+    if preferred_year is not None:
+        preferred_year = str(preferred_year)
+
     # Get quadrangle
     quadrangle = latlon_to_naip_quadrangle(lat, lon)
     logger.info(f"NAIP quadrangle: {quadrangle} for state: {state}")

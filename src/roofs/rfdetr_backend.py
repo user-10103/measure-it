@@ -85,33 +85,90 @@ def _mask_to_polygon(
 
 
 def _load_model(checkpoint_path: str) -> Any:
-    """Load (and cache) an RF-DETR model from a checkpoint.
+    """Load (and cache) an RF-DETR segmentation model from a checkpoint.
 
-    Supports both:
-    - .pth exports (from rfdetr training) — loaded via from_checkpoint()
-    - .ckpt files (PyTorch Lightning) — loaded via RFDETRSegPreview(pretrain_weights=)
+    Supports Lightning .ckpt files and flat/wrapped .pth exports.
+
+    Loading notes (rfdetr 1.4.0.post0 + transformers 4.44):
+    - resolution=504: 504=21×24 satisfies the backbone divisibility assertion
+      (patch_size=12, num_windows=2) and matches the checkpoint's position
+      embeddings ([1, 1765, 384] = 42²+1 patches at 504px/12patch_size).
+    - Class heads must be patched from the COCO default (91 classes) to the
+      checkpoint's num_classes BEFORE load_state_dict, otherwise strict=True
+      raises a shape mismatch on class_embed and enc_out_class_embed.
+    - The Lightning state dict wraps all model keys under a 'model.' prefix;
+      strip it before loading into the bare LWDETR.
+    - rfdetr 1.4.0.post0's predict() resizes inputs to the constructor
+      resolution; the shape= kwarg is not honoured in this version.
     """
     key = str(Path(checkpoint_path).resolve())
     if key in _model_cache:
         return _model_cache[key]
 
     import warnings
-    warnings.filterwarnings("ignore", category=FutureWarning)
+    warnings.filterwarnings("ignore")
+
+    import torch
+    import torch.nn as nn
 
     # Compatibility shim: torch<2.5 lacks float8 types needed by transformers>=4.45
-    import torch as _torch
     for _fp8 in ["float8_e4m3fn","float8_e5m2","float8_e4m3fnuz","float8_e5m2fnuz","float8_e8m0fnu"]:
-        if not hasattr(_torch, _fp8):
-            setattr(_torch, _fp8, _torch.float16)
+        if not hasattr(torch, _fp8):
+            setattr(torch, _fp8, torch.float32)
 
     logger.info(f"Loading RF-DETR checkpoint: {checkpoint_path}")
+
+    # --- Build stripped state dict -------------------------------------------
     if checkpoint_path.endswith(".ckpt"):
-        # Lightning checkpoint — from_checkpoint() would raise KeyError: 'args'
-        from rfdetr import RFDETRSegPreview
-        model = RFDETRSegPreview(pretrain_weights=checkpoint_path, resolution=512)
+        # Lightning checkpoint: all model keys prefixed with 'model.'
+        ck = torch.load(checkpoint_path, map_location="cpu", weights_only=False)  # nosec
+        sd = ck["state_dict"]
+        stripped = {(k[len("model."):] if k.startswith("model.") else k): v
+                    for k, v in sd.items()}
+        stripped.pop("_kp_active_mask", None)
     else:
-        from rfdetr import from_checkpoint
-        model = from_checkpoint(checkpoint_path)
+        # .pth: either {'model': state_dict} wrapper or flat state dict
+        raw = torch.load(checkpoint_path, map_location="cpu", weights_only=False)  # nosec
+        stripped = raw.get("model", raw) if isinstance(raw, dict) else raw
+
+    # --- Detect num_classes from checkpoint ----------------------------------
+    for _ce_key in ("class_embed.weight", "transformer.enc_out_class_embed.0.weight"):
+        if _ce_key in stripped:
+            num_classes = stripped[_ce_key].shape[0]
+            break
+    else:
+        num_classes = 3  # fallback: 2 foreground + 1 no-object
+
+    logger.info(f"Checkpoint num_classes={num_classes}")
+
+    # --- Initialise model skeleton -------------------------------------------
+    from rfdetr import RFDETRSegLarge
+    model = RFDETRSegLarge(resolution=504)
+    inner = model.model.model  # LWDETR nn.Module
+
+    # Patch class heads from COCO default (91) to our num_classes
+    if inner.class_embed.out_features != num_classes:
+        n_enc = len(inner.transformer.enc_out_class_embed)
+        inner.class_embed = nn.Linear(256, num_classes)
+        inner.transformer.enc_out_class_embed = nn.ModuleList(
+            [nn.Linear(256, num_classes) for _ in range(n_enc)]
+        )
+        logger.info(f"Patched class heads: 91 → {num_classes}")
+
+    # --- Load weights (strict) -----------------------------------------------
+    result = inner.load_state_dict(stripped, strict=True)
+    if result.missing_keys or result.unexpected_keys:
+        logger.warning(
+            f"load_state_dict: missing={len(result.missing_keys)}, "
+            f"unexpected={len(result.unexpected_keys)}"
+        )
+    else:
+        logger.info("Weights loaded: missing=0, unexpected=0 ✓")
+
+    # Move to GPU if available
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    inner.to(device)
+    logger.info(f"Model on {device}")
 
     _model_cache[key] = model
     logger.info("RF-DETR model loaded and cached.")
@@ -148,15 +205,13 @@ class RFDETRBackend:
     def __init__(
         self,
         checkpoint_path: str,
-        threshold: float = 0.35,
-        resolution: int = 512,
-        infer_shape: int = 624,  # must be divisible by patch_size*num_windows (12*2=24)
-        mask_epsilon: float = 0.025  # locked: e/f<3.5 with margin; do not raise further,
+        threshold: float = 0.40,  # above black-image noise floor (0.364); real facets reach 0.7+
+        resolution: int = 504,    # informational only — actual resize is fixed at 504 by _load_model
+        mask_epsilon: float = 0.025  # locked: e/f<3.5 with margin; do not raise further
     ) -> None:
         self.checkpoint_path = str(checkpoint_path)
         self.threshold = threshold
         self.resolution = resolution
-        self.infer_shape = infer_shape
         self.mask_epsilon = mask_epsilon
         # Eagerly load so startup errors surface immediately, not at first call.
         self._model = _load_model(self.checkpoint_path)
@@ -185,8 +240,9 @@ class RFDETRBackend:
 
         img_h, img_w = image.shape[:2]
 
-        detections = self._model.predict(image, threshold=self.threshold,
-                                         shape=self.infer_shape)
+        # rfdetr 1.4.0.post0: predict() resizes to the constructor resolution (504);
+        # the shape= kwarg is not honoured in this version.
+        detections = self._model.predict(image, threshold=self.threshold)
 
         # sv.Detections attributes we use:
         #   .mask       (N, mask_H, mask_W) bool array, or None
@@ -263,7 +319,7 @@ class RFDETRBackend:
     def __repr__(self) -> str:
         return (
             f"RFDETRBackend(checkpoint={self.checkpoint_path!r}, "
-            f"threshold={self.threshold}, resolution={self.resolution})"
+            f"threshold={self.threshold})"
         )
 
 
@@ -282,7 +338,7 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Smoke-test RFDETRBackend on a chip.")
     ap.add_argument("checkpoint", help="Path to checkpoint_best_ema.pth")
     ap.add_argument("image",      help="Path to a chip PNG/JPG")
-    ap.add_argument("--threshold", type=float, default=0.35)
+    ap.add_argument("--threshold", type=float, default=0.40)
     args = ap.parse_args()
 
     backend = RFDETRBackend(args.checkpoint, threshold=args.threshold)
