@@ -726,11 +726,12 @@ def clip_naip_to_building(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Prepare geometry
+    # Prepare geometry — ensure WGS84 so centroid lon/lat are valid degrees
+    if building_polygon.crs is not None and building_polygon.crs.to_epsg() != 4326:
+        building_polygon = building_polygon.to_crs("EPSG:4326")
     if hasattr(building_polygon, 'union_all'):
         building_geom = building_polygon.union_all()
     else:
-        # Fallback for older geopandas versions
         building_geom = building_polygon.unary_union
 
     buffered_geom = _create_buffered_clip_geometry(building_geom, padding_meters)
