@@ -97,6 +97,10 @@ def chip_to_coco(out_dir: str, image_id: int, images_dir: str,
     if not facets:
         return None
 
+    # QUALITY-GATE: score this roof's labels (geometry only)
+    from training.label_quality import score_labels
+    quality = score_labels([f["polygon"] for f in facets], footprint)
+
     with rasterio.open(naip) as im:
         arr = im.read([1, 2, 3])
         ntf, ncrs, W, H = im.transform, im.crs, im.width, im.height
@@ -133,7 +137,7 @@ def chip_to_coco(out_dir: str, image_id: int, images_dir: str,
     if not anns:
         return None
     return {"image": {"id": image_id, "file_name": fn, "width": W, "height": H},
-            "annotations": anns, "facets": facets}
+            "annotations": anns, "facets": facets, "quality": quality}
 
 
 def qa_overlay(out_dir: str, images_dir: str, image: dict, anns: list, dst: str):
@@ -160,6 +164,8 @@ def main():
     ap.add_argument("--addresses", nargs="+", required=True)
     ap.add_argument("--state", default="fl")
     ap.add_argument("--qa", action="store_true", help="also write QA overlays")
+    ap.add_argument("--gate", action="store_true",
+                    help="only keep roofs whose labels pass the quality gate")
     args = ap.parse_args()
 
     from src.pipeline import process_address, setup_logging
@@ -174,6 +180,7 @@ def main():
             "categories": [{"id": 1, "name": "roof_polygon"},
                            {"id": FACET_CATEGORY_ID, "name": "facet"}]}
     ann_id = 1
+    n_scored = n_passed = 0
     for i, addr in enumerate(args.addresses, start=1):
         work = os.path.join(args.out, f"_work/{i:03d}")
         try:
@@ -181,8 +188,19 @@ def main():
                             fetch_lidar=True, output_dir=work, segment_method="ndsm")
             r = chip_to_coco(work, i, images_dir)
             if r is None:
-                print(f"[{i}] {addr[:40]:40} -> no labels (skip)")
+                print(f"[{i}] {addr[:38]:38} -> no labels (skip)")
                 continue
+            q = r.get("quality", {})
+            n_scored += 1
+            verdict = "PASS" if q.get("passed") else "REJECT"
+            if q.get("passed"):
+                n_passed += 1
+            reasons = "" if q.get("passed") else " " + ",".join(q.get("reasons", []))
+            print(f"[{i}] {addr[:38]:38} -> {len(r['annotations']):2d} facets  "
+                  f"cov={q.get('coverage','?')} v={q.get('avg_vertices','?')}  "
+                  f"{verdict}{reasons}")
+            if args.gate and not q.get("passed"):
+                continue                                   # drop low-quality roof
             coco["images"].append(r["image"])
             for a in r["annotations"]:
                 a["id"] = ann_id; ann_id += 1
@@ -190,14 +208,15 @@ def main():
             if args.qa:
                 qa_overlay(work, images_dir, r["image"], r["annotations"],
                            os.path.join(qa_dir, f"{i:06d}_qa.png"))
-            print(f"[{i}] {addr[:40]:40} -> {len(r['annotations'])} facet labels")
         except Exception as e:  # noqa: BLE001
-            print(f"[{i}] {addr[:40]:40} -> ERROR {str(e)[:60]}")
+            print(f"[{i}] {addr[:38]:38} -> ERROR {str(e)[:55]}")
 
     out_json = os.path.join(args.out, "annotations.coco.json")
     json.dump(coco, open(out_json, "w"))
-    print(f"\nDataset: {len(coco['images'])} images, "
-          f"{len(coco['annotations'])} facet labels -> {out_json}")
+    frac = (n_passed / n_scored * 100) if n_scored else 0.0
+    print(f"\nQuality gate: {n_passed}/{n_scored} roofs passed ({frac:.0f}%)")
+    print(f"Dataset ({'gated' if args.gate else 'ungated'}): "
+          f"{len(coco['images'])} images, {len(coco['annotations'])} labels -> {out_json}")
 
 
 if __name__ == "__main__":
