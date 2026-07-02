@@ -78,6 +78,35 @@ def model_facets_to_metric(pred: dict, transform, src_crs, dst_crs,
     return facets
 
 
+def preprocess_like_training(rgb: np.ndarray) -> np.ndarray:
+    """Apply the SAME chip preprocessing the model trained on (adresses/pipeline
+    preprocess): bilateral denoise -> unsharp mask -> per-channel percentile
+    contrast stretch. Feeding raw NAIP to a model trained on preprocessed chips
+    is a distribution shift that suppresses detections; this closes that gap.
+
+    Params match config.yaml: bilateral d=9 sigma=75/75, unsharp amount=1.5
+    kernel=5, contrast 2/98 percentiles. Returns uint8 HxWx3.
+    """
+    try:
+        import cv2
+    except Exception:                                  # pragma: no cover
+        return rgb
+    u8 = np.clip(rgb, 0, 255).astype(np.uint8)
+    den = cv2.bilateralFilter(u8, 9, 75, 75)
+    blur = cv2.GaussianBlur(den, (5, 5), 0)
+    sharp = cv2.addWeighted(den, 1.0 + 1.5, blur, -1.5, 0)
+    out = np.empty_like(sharp)
+    for c in range(3):
+        lo, hi = np.percentile(sharp[..., c], (2, 98))
+        if hi > lo:
+            out[..., c] = np.clip(
+                (sharp[..., c].astype(np.float32) - lo) * 255.0 / (hi - lo),
+                0, 255).astype(np.uint8)
+        else:
+            out[..., c] = sharp[..., c]
+    return out
+
+
 def assign_lidar_points(facets: List[Facet], lidar_points,
                         min_points: int = 3) -> List[Facet]:
     """Attach roof LiDAR points to each model facet (point-in-polygon), so the
@@ -106,8 +135,8 @@ def assign_lidar_points(facets: List[Facet], lidar_points,
 
 
 def segment_facets_model(naip_clipped_path, points_crs: str, checkpoint: str,
-                         lidar_points=None,
-                         threshold: float = 0.40) -> Optional[List[Facet]]:
+                         lidar_points=None, threshold: float = 0.40,
+                         preprocess: bool = True) -> Optional[List[Facet]]:
     """Run RF-DETR on the clipped NAIP chip, convert to metric facets, and
     attach LiDAR points to each (for the downstream plane fit).
 
@@ -132,6 +161,8 @@ def segment_facets_model(naip_clipped_path, points_crs: str, checkpoint: str,
         rgb = np.transpose(arr[:3], (1, 2, 0))
         if rgb.dtype != np.uint8:                     # NAIP is usually uint8 already
             rgb = np.clip(rgb, 0, 255).astype(np.uint8)
+        if preprocess:                                # match training distribution
+            rgb = preprocess_like_training(rgb)
 
         backend = RFDETRBackend(checkpoint, threshold=threshold)
         pred = backend.predict(rgb)

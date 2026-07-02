@@ -9,7 +9,9 @@ import numpy as np
 import pytest
 from affine import Affine
 
-from src.roofs.model_segment import model_facets_to_metric, assign_lidar_points
+from src.roofs.model_segment import (
+    model_facets_to_metric, assign_lidar_points, preprocess_like_training,
+)
 
 # 0.3 m/px NAIP-like transform: world_x = 356000 + 0.3*col, world_y = 3111500 - 0.3*row
 TF = Affine(0.3, 0, 356000.0, 0, -0.3, 3111500.0)
@@ -73,6 +75,24 @@ def test_assign_drops_facet_without_support():
     facets = model_facets_to_metric(_pred(ring), TF, CRS, CRS)
     kept = assign_lidar_points(facets, _points([(356020, 3111450, 19)]))  # all outside
     assert kept == []
+
+
+def test_preprocess_shape_and_dtype():
+    # a simple horizontal gradient chip
+    row = np.linspace(0, 255, 64, dtype=np.uint8)
+    img = np.repeat(row[None, :, None], 64, 0).repeat(3, 2)
+    out = preprocess_like_training(img)
+    assert out.shape == img.shape
+    assert out.dtype == np.uint8
+    assert out.min() >= 0 and out.max() <= 255
+
+
+def test_preprocess_contrast_stretches():
+    # a low-contrast chip should get its dynamic range expanded
+    img = np.full((32, 32, 3), 120, np.uint8)
+    img[8:24, 8:24] = 135                              # small bright square
+    out = preprocess_like_training(img)
+    assert out.max() - out.min() >= img.max() - img.min()
 
 
 def test_assign_none_points_noop():
