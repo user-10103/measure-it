@@ -73,11 +73,12 @@ def _metrics(results: dict, out_dir: str) -> dict:
     }
 
 
-def _run(address, lat, lon, state, out_dir, use_reconstruct):
+def _run(address, lat, lon, state, out_dir, use_reconstruct, model_ckpt=None):
     return process_address(
         address=address, lat=lat, lon=lon, state=state,
         fetch_naip=True, fetch_lidar=True, output_dir=out_dir,
         use_facet_reconstruct=use_reconstruct,
+        model_checkpoint=model_ckpt,
     )
 
 
@@ -90,16 +91,24 @@ def main():
     ap.add_argument("--outdir", type=str, default="output/_compare")
     ap.add_argument("--roofr-area-sqft", type=float, default=None,
                     help="reference area (e.g. from a Roofr report) for the ±4% gate")
+    ap.add_argument("--model-checkpoint", type=str, default=None,
+                    help="RF-DETR checkpoint; if set, RUN 2 uses model segmentation "
+                         "(model 2D facets + LiDAR planes) instead of the clean-facet path")
+    ap.add_argument("--reconstruct", action="store_true",
+                    help="apply facet reconstruction on RUN 2 (default off)")
     args = ap.parse_args()
     setup_logging("INFO")
 
     old_dir = os.path.join(args.outdir, "old")
     new_dir = os.path.join(args.outdir, "new")
 
-    print("\n### RUN 1/2 — legacy path (use_facet_reconstruct=False)")
+    print("\n### RUN 1/2 — baseline (classical segmentation, no model)")
     old = _metrics(_run(args.address, args.lat, args.lon, args.state, old_dir, False), old_dir)
-    print("### RUN 2/2 — clean-facet path (use_facet_reconstruct=True)")
-    new = _metrics(_run(args.address, args.lat, args.lon, args.state, new_dir, True), new_dir)
+    label2 = ("RF-DETR model segmentation" if args.model_checkpoint
+              else f"reconstruct={args.reconstruct}")
+    print(f"### RUN 2/2 — {label2}")
+    new = _metrics(_run(args.address, args.lat, args.lon, args.state, new_dir,
+                        args.reconstruct, model_ckpt=args.model_checkpoint), new_dir)
 
     def _row(label, o, n):
         print(f"  {label:<16} {str(o):>14}   {str(n):>14}")

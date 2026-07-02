@@ -89,7 +89,9 @@ def process_address(
     export_pdf: bool = True,
     export_dxf: bool = True,
     export_csv: bool = True,
-    use_facet_reconstruct: bool = False
+    use_facet_reconstruct: bool = False,
+    model_checkpoint: Optional[str] = None,
+    model_threshold: float = 0.40
 ) -> Dict:
     """
     Process a single address/location through the complete pipeline.
@@ -424,10 +426,34 @@ def process_address(
             except Exception as _e:
                 logger.debug(f"Could not save points cache: {_e}")
 
-            # Segment facets — try NAIP-guided first, fall back to k-means.
+            # Segment facets — RF-DETR model (if a checkpoint is given), then
+            # NAIP-guided, then k-means. The model supplies 2D facet shapes;
+            # LiDAR points are attached and real planes fit below (fusion).
             naip_seg_used = False
             naip_clipped_tif = naip_data.get("tif_path")
-            if naip_clipped_tif and ndsm_path and polygon_result.get("metadata", {}).get("points_crs"):
+            _pts_crs_seg = polygon_result.get("metadata", {}).get("points_crs")
+            if model_checkpoint and naip_clipped_tif and _pts_crs_seg:
+                logger.info("Attempting RF-DETR model segmentation…")
+                try:
+                    from src.roofs.model_segment import segment_facets_model
+                    _model_facets = segment_facets_model(
+                        naip_clipped_tif, _pts_crs_seg, model_checkpoint,
+                        lidar_points=points, threshold=model_threshold,
+                    )
+                    if _model_facets:
+                        facets = _model_facets
+                        naip_seg_used = True
+                        logger.info(
+                            "Model (RF-DETR) segmentation: %d facet(s) with "
+                            "LiDAR support — planes fit below", len(facets))
+                    else:
+                        logger.info("Model segmentation returned no facets — "
+                                    "falling back")
+                except Exception as _me:
+                    logger.warning(f"Model segmentation failed ({_me}) — fallback")
+
+            if not naip_seg_used and naip_clipped_tif and ndsm_path and \
+                    polygon_result.get("metadata", {}).get("points_crs"):
                 _pts_crs = polygon_result["metadata"]["points_crs"]
                 logger.info("Attempting NAIP-guided segmentation…")
                 try:
