@@ -46,12 +46,45 @@ def generate_candidates(points: np.ndarray, n_candidates: int = 40,
     return planes
 
 
-def _residuals(points: np.ndarray, planes: list) -> np.ndarray:
+def estimate_normals(points: np.ndarray, k: int = 12) -> np.ndarray:
+    """Per-point surface normals via local PCA (smallest-eigenvector of the
+    neighbourhood covariance), oriented upward. This is the ingredient Efficient
+    RANSAC (Schnabel 2007) adds over plain distance RANSAC — it lets us separate
+    spatially-adjacent facets that face different directions."""
+    from sklearn.neighbors import NearestNeighbors
+    xyz = np.column_stack([np.asarray(points["x"], float),
+                           np.asarray(points["y"], float),
+                           np.asarray(points["z"], float)])
+    kk = min(k + 1, len(xyz))
+    _, idx = NearestNeighbors(n_neighbors=kk).fit(xyz).kneighbors(xyz)
+    normals = np.zeros((len(xyz), 3))
+    for i in range(len(xyz)):
+        nbr = xyz[idx[i]]
+        c = nbr - nbr.mean(0)
+        w, v = np.linalg.eigh(c.T @ c)
+        n = v[:, 0]                                     # smallest eigenvalue -> normal
+        normals[i] = -n if n[2] < 0 else n             # orient up
+    return normals
+
+
+def _plane_normal(p) -> np.ndarray:
+    n = np.array([-p.a, -p.b, 1.0])
+    return n / (np.linalg.norm(n) + 1e-12)
+
+
+def _data_cost(points: np.ndarray, planes: list, normals: np.ndarray = None,
+               normal_weight: float = 0.5) -> np.ndarray:
+    """Data term = |vertical residual| + normal-disagreement penalty (Efficient-
+    RANSAC-style). Normal term separates facets by ORIENTATION, not just height."""
     x = np.asarray(points["x"], float); y = np.asarray(points["y"], float)
     z = np.asarray(points["z"], float)
     R = np.empty((len(points), len(planes)), dtype="float32")
     for j, p in enumerate(planes):
-        R[:, j] = np.abs(p.a * x + p.b * y + p.c - z)
+        dist = np.abs(p.a * x + p.b * y + p.c - z)
+        if normals is not None and normal_weight > 0:
+            agree = np.abs(normals @ _plane_normal(p))   # 1 = aligned, 0 = perp
+            dist = dist + normal_weight * (1.0 - agree)   # penalise misaligned normals
+        R[:, j] = dist
     return R
 
 
@@ -106,8 +139,12 @@ def segment_facets_pearl(points: np.ndarray, n_candidates: int = 40,
                          dist_thresh: float = 0.15, smooth: float = 0.4,
                          label_cost: float = 3.0, iters: int = 3,
                          min_inliers: int = 40, split_eps: float = 1.5,
+                         normal_weight: float = 0.5,
                          use_graphcut: bool = True) -> List[Facet]:
-    """Segment roof points into facets by PEARL energy minimization."""
+    """Segment roof points into facets by PEARL energy minimization.
+
+    Data term uses distance + normal-agreement (Efficient-RANSAC-style) so facets
+    are separated by ORIENTATION, not just height."""
     from sklearn.cluster import DBSCAN
     if points is None or len(points) < min_inliers:
         return []
@@ -115,8 +152,9 @@ def segment_facets_pearl(points: np.ndarray, n_candidates: int = 40,
     if not planes:
         return []
 
+    normals = estimate_normals(points)
     neigh = _knn_neighbors(points)
-    R = _residuals(points, planes)
+    R = _data_cost(points, planes, normals, normal_weight)
     labels = R.argmin(1)
     for _ in range(iters):
         if use_graphcut:
@@ -144,8 +182,8 @@ def segment_facets_pearl(points: np.ndarray, n_candidates: int = 40,
         if not new:
             break
         planes = new
-        # relabel to compact plane set + recompute residuals
-        R = _residuals(points, planes)
+        # relabel to compact plane set + recompute data cost (dist + normals)
+        R = _data_cost(points, planes, normals, normal_weight)
         labels = R.argmin(1)
 
     # build facets; spatially split each plane into connected roof parts
