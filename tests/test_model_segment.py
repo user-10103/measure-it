@@ -11,6 +11,7 @@ from affine import Affine
 
 from src.roofs.model_segment import (
     model_facets_to_metric, assign_lidar_points, preprocess_like_training,
+    upscale_esrgan,
 )
 
 # 0.3 m/px NAIP-like transform: world_x = 356000 + 0.3*col, world_y = 3111500 - 0.3*row
@@ -50,6 +51,25 @@ def test_reprojection_path_runs():
     ring = [[10, 10], [30, 10], [30, 30], [10, 30]]
     facets = model_facets_to_metric(_pred(ring), TF, CRS, "EPSG:26918")
     assert len(facets) == 1 and facets[0].polygon.is_valid
+
+
+def test_upscaled_polygon_maps_back_to_same_area():
+    # A facet detected on a x4-upscaled chip has 4x-larger pixel coords; dividing
+    # the transform by the upscale factor must map it back to the same metres.
+    from affine import Affine
+    ring_1x = [[10, 10], [20, 10], [20, 20], [10, 20]]
+    ring_4x = [[c * 4 for c in pt] for pt in ring_1x]
+    f1 = model_facets_to_metric(_pred(ring_1x), TF, CRS, CRS)
+    f4 = model_facets_to_metric(_pred(ring_4x), TF * Affine.scale(0.25, 0.25), CRS, CRS)
+    assert abs(f1[0].polygon.area - f4[0].polygon.area) < 0.1
+
+
+def test_upscale_esrgan_fallback_no_deps():
+    # realesrgan isn't installed locally -> must fall back to the original chip,
+    # not crash.
+    img = np.zeros((16, 16, 3), np.uint8)
+    out = upscale_esrgan(img)
+    assert out.shape == img.shape and out.dtype == np.uint8
 
 
 def _points(coords):

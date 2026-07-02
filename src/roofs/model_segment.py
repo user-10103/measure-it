@@ -133,6 +133,54 @@ def preprocess_like_training(bands_chw: np.ndarray,
     return np.stack([_u8(b[i]) for i in range(3)], axis=-1)
 
 
+_ESRGAN_UPSAMPLER = None
+_ESRGAN_URL = ("https://github.com/xinntao/Real-ESRGAN/releases/download/"
+               "v0.1.0/RealESRGAN_x4plus.pth")
+
+
+def _get_esrgan(tile: int = 256):
+    """Load & cache a RealESRGAN_x4plus upsampler matching the training config
+    (adresses/pipeline/upscale.py). Requires torch + basicsr + realesrgan."""
+    global _ESRGAN_UPSAMPLER
+    if _ESRGAN_UPSAMPLER is not None:
+        return _ESRGAN_UPSAMPLER
+    import os
+    from urllib.request import urlretrieve
+    import torch
+    from basicsr.archs.rrdbnet_arch import RRDBNet
+    from realesrgan import RealESRGANer
+
+    ckpt_dir = "/tmp/realesrgan_ckpts"
+    os.makedirs(ckpt_dir, exist_ok=True)
+    ckpt = os.path.join(ckpt_dir, "RealESRGAN_x4plus.pth")
+    if not os.path.exists(ckpt):
+        logger.info("Downloading RealESRGAN_x4plus checkpoint…")
+        urlretrieve(_ESRGAN_URL, ckpt)
+    model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23,
+                    num_grow_ch=32, scale=4)
+    on_cuda = torch.cuda.is_available()
+    _ESRGAN_UPSAMPLER = RealESRGANer(
+        scale=4, model_path=ckpt, model=model, tile=tile, tile_pad=10,
+        pre_pad=0, half=on_cuda,
+    )
+    return _ESRGAN_UPSAMPLER
+
+
+def upscale_esrgan(rgb: np.ndarray, scale: int = 4) -> np.ndarray:
+    """Real-ESRGAN x4 upscale, matching the training chip pipeline (the model
+    trained on ESRGAN-upscaled chips). Returns uint8 RGB. Falls back to the
+    ORIGINAL chip on any failure — but then detections won't match training, so
+    the failure is logged loudly."""
+    try:
+        up = _get_esrgan()
+        out, _ = up.enhance(rgb, outscale=scale)
+        return out
+    except Exception as e:  # noqa: BLE001
+        logger.warning("ESRGAN upscale unavailable (%s) — feeding un-upscaled "
+                       "chip; model input will NOT match training", e)
+        return rgb
+
+
 def assign_lidar_points(facets: List[Facet], lidar_points,
                         min_points: int = 3) -> List[Facet]:
     """Attach roof LiDAR points to each model facet (point-in-polygon), so the
@@ -162,7 +210,8 @@ def assign_lidar_points(facets: List[Facet], lidar_points,
 
 def segment_facets_model(naip_clipped_path, points_crs: str, checkpoint: str,
                          lidar_points=None, threshold: float = 0.40,
-                         preprocess: bool = True) -> Optional[List[Facet]]:
+                         preprocess: bool = True,
+                         upscale: bool = True) -> Optional[List[Facet]]:
     """Run RF-DETR on the clipped NAIP chip, convert to metric facets, and
     attach LiDAR points to each (for the downstream plane fit).
 
@@ -192,6 +241,17 @@ def segment_facets_model(naip_clipped_path, points_crs: str, checkpoint: str,
             rgb = np.transpose(arr[:3], (1, 2, 0))
             if rgb.dtype != np.uint8:
                 rgb = np.clip(rgb, 0, 255).astype(np.uint8)
+
+        # Real-ESRGAN x4 to match the training chip pipeline. The model then
+        # predicts in the UPSCALED pixel space, so divide the raster transform
+        # by the actual upscale factor before mapping polygons to world.
+        w0 = rgb.shape[1]
+        if upscale:
+            rgb = upscale_esrgan(rgb, scale=4)
+        eff_scale = rgb.shape[1] / float(w0)          # 1.0 if upscale was skipped
+        if eff_scale != 1.0:
+            from affine import Affine
+            transform = transform * Affine.scale(1.0 / eff_scale, 1.0 / eff_scale)
 
         backend = RFDETRBackend(checkpoint, threshold=threshold)
         pred = backend.predict(rgb)
