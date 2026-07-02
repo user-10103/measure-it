@@ -275,6 +275,18 @@ def arrangement_facets(outline: Polygon, facet_polygons, planes):
                 continue
             if not ci.buffer(0.5).intersects(cj):      # not adjacent -> no shared edge
                 continue
+            # Only cut between planes facing genuinely DIFFERENT directions.
+            # Two same-facing planes are fragments of one surface (or a shallow
+            # break); their intersection is a spurious line that, with noisy
+            # shallow fits, lands off-centre and slices the roof into strips.
+            gi = math.hypot(planes[i].a, planes[i].b)
+            gj = math.hypot(planes[j].a, planes[j].b)
+            if gi < 1e-4 or gj < 1e-4:
+                continue                               # ~flat facet: no ridge line
+            cosang = (planes[i].a * planes[j].a
+                      + planes[i].b * planes[j].b) / (gi * gj)
+            if cosang >= 0.5:                          # <60 deg apart -> same surface
+                continue
             seg = _plane_intersection_segment(planes[i], planes[j], outline)
             if seg is not None and not seg.is_empty:
                 cuts.append(seg)
