@@ -53,7 +53,47 @@ def chip_to_coco(out_dir: str, image_id: int, images_dir: str,
         z = nd.read(1).astype(float)
         ztf, zcrs = nd.transform, nd.crs
     z[~np.isfinite(z)] = 0.0
+
+    # CONFINE TO THE ROOF: mask the nDSM to the building footprint so we don't
+    # label trees / pool cages / driveways / yard (anything tall passes the
+    # >0.3m above-ground test otherwise). Footprint = roof_polygon.geojson.
+    footprint = None
+    fp_path = os.path.join(out_dir, "roof_polygon.geojson")
+    if os.path.exists(fp_path):
+        try:
+            import geopandas as gpd
+            from rasterio.features import geometry_mask
+            g = gpd.read_file(fp_path)
+            if zcrs is not None:
+                g = g.to_crs(zcrs)
+            footprint = (g.union_all() if hasattr(g, "union_all")
+                         else g.unary_union).buffer(1.0)   # +1 m for eave overhang
+            keep = geometry_mask([footprint.__geo_interface__], out_shape=z.shape,
+                                 transform=ztf, invert=True)
+            z = np.where(keep, z, 0.0)                      # zero out non-roof pixels
+        except Exception as _fe:
+            footprint = None                               # fall back to unmasked
+    else:
+        return None   # no footprint -> can't trust the labels; skip this roof
+
     facets = ndsm_facets(z, ztf, clean=True)
+    if footprint is not None:                              # belt: clip facets too
+        clipped = []
+        for f in facets:
+            try:
+                p = f["polygon"].intersection(footprint)
+                if p.is_empty or p.area < 1.0:
+                    continue
+                if p.geom_type != "Polygon":
+                    p = max((q for q in getattr(p, "geoms", []) if q.geom_type == "Polygon"),
+                            key=lambda q: q.area, default=None)
+                    if p is None:
+                        continue
+                f = dict(f); f["polygon"] = p
+            except Exception:
+                continue
+            clipped.append(f)
+        facets = clipped
     if not facets:
         return None
 

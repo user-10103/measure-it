@@ -26,6 +26,12 @@ def test_chip_to_coco_pixels(tmp_path):
     _write_tif(str(work / "naip.tif"), naip, tf, 3)   # same grid as nDSM
     json.dump({"naip": {"tif_path": str(work / "naip.tif")}},
               open(work / "results.json", "w"))
+    # footprint covering the roof (now required to confine facets to the roof)
+    import geopandas as gpd
+    from shapely.geometry import box
+    left, bottom = tf * (0, H); right, top = tf * (W, 0)
+    gpd.GeoDataFrame(geometry=[box(left, bottom, right, top)], crs="EPSG:26917") \
+        .to_file(str(work / "roof_polygon.geojson"), driver="GeoJSON")
 
     images_dir = tmp_path / "images"; images_dir.mkdir()
     r = chip_to_coco(str(work), 1, str(images_dir))
