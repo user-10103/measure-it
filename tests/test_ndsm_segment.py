@@ -8,7 +8,8 @@ from src.roofs.ndsm_segment import ndsm_facets, segment_by_gradient
 TF = Affine(0.5, 0, 356000, 0, -0.5, 3111500)   # 0.5 m/px
 
 
-def _hip(H=60, W=100, s=0.25):
+def _hip(H=80, W=80, s=0.25):
+    # square hip -> 4 equal facets facing N/E/S/W
     yy, xx = np.mgrid[0:H, 0:W]
     return s * np.minimum.reduce([xx, W - 1 - xx, yy, H - 1 - yy]).astype(float)
 
