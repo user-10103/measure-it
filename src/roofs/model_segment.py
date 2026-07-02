@@ -14,6 +14,7 @@ has no such deps and is unit-tested locally with a mock prediction.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import List, Optional
 
@@ -312,6 +313,25 @@ def segment_facets_model(naip_clipped_path, points_crs: str, checkpoint: str,
 
         backend = RFDETRBackend(checkpoint, threshold=threshold)
         pred = backend.predict(rgb)
+
+        # Diagnostics: what did the model actually see and detect? Raw count +
+        # confidences at the CURRENT threshold, plus the exact chip fed in.
+        _raw = pred.get("facets", []) or []
+        _confs = sorted((round(float(f.get("confidence", -1.0)), 3) for f in _raw),
+                        reverse=True)
+        logger.info("RF-DETR raw: %d detection(s) at thr=%.2f, chip=%dx%d, "
+                    "confidences=%s", len(_raw), threshold, rgb.shape[1],
+                    rgb.shape[0], _confs[:25])
+        _chip_dbg = os.environ.get("MEASURE_DUMP_MODEL_CHIP")
+        if _chip_dbg:
+            try:
+                from PIL import Image as _Im
+                _Im.fromarray(rgb).save(_chip_dbg)
+                logger.info("saved model input chip (%dx%d) -> %s",
+                            rgb.shape[1], rgb.shape[0], _chip_dbg)
+            except Exception as _ce:  # noqa: BLE001
+                logger.warning("chip dump failed: %s", _ce)
+
         facets = model_facets_to_metric(pred, transform, src_crs, points_crs)
         facets = assign_lidar_points(facets, lidar_points)
         logger.info("Model segmentation: %d facet(s) with LiDAR support "
