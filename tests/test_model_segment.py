@@ -78,21 +78,20 @@ def test_assign_drops_facet_without_support():
 
 
 def test_preprocess_shape_and_dtype():
-    # a simple horizontal gradient chip
-    row = np.linspace(0, 255, 64, dtype=np.uint8)
-    img = np.repeat(row[None, :, None], 64, 0).repeat(3, 2)
-    out = preprocess_like_training(img)
-    assert out.shape == img.shape
+    # (C, H, W) raw chip -> (H, W, 3) uint8 RGB. 4 bands exercises the NIR path.
+    bands = np.random.default_rng(0).integers(0, 256, size=(4, 64, 64), dtype=np.uint8)
+    out = preprocess_like_training(bands, dtype_max=255.0)
+    assert out.shape == (64, 64, 3)
     assert out.dtype == np.uint8
     assert out.min() >= 0 and out.max() <= 255
 
 
 def test_preprocess_contrast_stretches():
     # a low-contrast chip should get its dynamic range expanded
-    img = np.full((32, 32, 3), 120, np.uint8)
-    img[8:24, 8:24] = 135                              # small bright square
-    out = preprocess_like_training(img)
-    assert out.max() - out.min() >= img.max() - img.min()
+    bands = np.full((3, 32, 32), 120, np.uint8)
+    bands[:, 8:24, 8:24] = 135                          # small bright square
+    out = preprocess_like_training(bands, dtype_max=255.0)
+    assert out.max() - out.min() >= 15
 
 
 def test_assign_none_points_noop():

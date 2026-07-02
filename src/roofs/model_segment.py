@@ -78,33 +78,59 @@ def model_facets_to_metric(pred: dict, transform, src_crs, dst_crs,
     return facets
 
 
-def preprocess_like_training(rgb: np.ndarray) -> np.ndarray:
-    """Apply the SAME chip preprocessing the model trained on (adresses/pipeline
-    preprocess): bilateral denoise -> unsharp mask -> per-channel percentile
-    contrast stretch. Feeding raw NAIP to a model trained on preprocessed chips
-    is a distribution shift that suppresses detections; this closes that gap.
+def preprocess_like_training(bands_chw: np.ndarray,
+                             dtype_max: float = 255.0) -> np.ndarray:
+    """Exact replica of the training chip pipeline (adresses/pipeline
+    preprocess.process_chip): normalize to [0,1] -> per-band bilateral denoise
+    -> unsharp mask (RGB only) -> per-band percentile stretch (2/98) -> NIR
+    shadow lift. Matching the model's training distribution is essential — a
+    mismatched preprocessing shifts it the *other* way and suppresses detections.
 
-    Params match config.yaml: bilateral d=9 sigma=75/75, unsharp amount=1.5
-    kernel=5, contrast 2/98 percentiles. Returns uint8 HxWx3.
+    Parameters
+    ----------
+    bands_chw : (C, H, W) raw raster array (>=3 bands; band 4 = NIR used for the
+        shadow lift when present).
+    dtype_max : max value of the source dtype (255 for NAIP uint8).
+
+    Returns
+    -------
+    (H, W, 3) uint8 RGB, ready for RFDETRBackend.predict().
     """
     try:
         import cv2
     except Exception:                                  # pragma: no cover
-        return rgb
-    u8 = np.clip(rgb, 0, 255).astype(np.uint8)
-    den = cv2.bilateralFilter(u8, 9, 75, 75)
-    blur = cv2.GaussianBlur(den, (5, 5), 0)
-    sharp = cv2.addWeighted(den, 1.0 + 1.5, blur, -1.5, 0)
-    out = np.empty_like(sharp)
-    for c in range(3):
-        lo, hi = np.percentile(sharp[..., c], (2, 98))
+        return np.transpose(np.clip(bands_chw[:3], 0, 255).astype(np.uint8), (1, 2, 0))
+
+    b = bands_chw.astype(np.float32) / float(dtype_max)     # -> [0,1]
+
+    def _u8(x):
+        return np.clip(x * 255.0, 0, 255).astype(np.uint8)
+
+    def _f(u):
+        return u.astype(np.float32) / 255.0
+
+    # 1. bilateral denoise, per band
+    for i in range(b.shape[0]):
+        b[i] = _f(cv2.bilateralFilter(_u8(b[i]), 9, 75, 75))
+    # 2. unsharp mask, RGB only  (u*(1+amount) - blur*amount, amount=1.5, k=5)
+    for i in range(min(3, b.shape[0])):
+        u = _u8(b[i])
+        blur = cv2.GaussianBlur(u, (5, 5), 0)
+        b[i] = _f(cv2.addWeighted(u, 1.0 + 1.5, blur, -1.5, 0))
+    # 3. per-band percentile contrast stretch (2 / 98)
+    for i in range(b.shape[0]):
+        lo, hi = np.percentile(b[i], (2, 98))
         if hi > lo:
-            out[..., c] = np.clip(
-                (sharp[..., c].astype(np.float32) - lo) * 255.0 / (hi - lo),
-                0, 255).astype(np.uint8)
-        else:
-            out[..., c] = sharp[..., c]
-    return out
+            b[i] = np.clip((b[i] - lo) / (hi - lo), 0, 1)
+    # 4. NIR-guided shadow lift (gamma 0.5 where NIR < 0.3), RGB channels
+    if b.shape[0] >= 4:
+        mask = b[3] < 0.3
+        for i in range(3):
+            ch = b[i]
+            ch[mask] = np.power(ch[mask], 0.5)
+            b[i] = np.clip(ch, 0, 1)
+
+    return np.stack([_u8(b[i]) for i in range(3)], axis=-1)
 
 
 def assign_lidar_points(facets: List[Facet], lidar_points,
@@ -158,11 +184,14 @@ def segment_facets_model(naip_clipped_path, points_crs: str, checkpoint: str,
         if arr.shape[0] < 3:
             logger.warning("NAIP chip has <3 bands — cannot run model")
             return None
-        rgb = np.transpose(arr[:3], (1, 2, 0))
-        if rgb.dtype != np.uint8:                     # NAIP is usually uint8 already
-            rgb = np.clip(rgb, 0, 255).astype(np.uint8)
         if preprocess:                                # match training distribution
-            rgb = preprocess_like_training(rgb)
+            dmax = (np.iinfo(arr.dtype).max
+                    if np.issubdtype(arr.dtype, np.integer) else 1.0)
+            rgb = preprocess_like_training(arr, dtype_max=float(dmax))
+        else:
+            rgb = np.transpose(arr[:3], (1, 2, 0))
+            if rgb.dtype != np.uint8:
+                rgb = np.clip(rgb, 0, 255).astype(np.uint8)
 
         backend = RFDETRBackend(checkpoint, threshold=threshold)
         pred = backend.predict(rgb)
