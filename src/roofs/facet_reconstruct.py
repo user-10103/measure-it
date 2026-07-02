@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from shapely.geometry import Polygon, LineString
@@ -284,28 +285,20 @@ def arrangement_facets(outline: Polygon, facet_polygons, planes):
     if not cells:
         return None
 
-    # label each cell with the candidate facet it overlaps most
+    # Label each cell with the NEAREST candidate centroid. Overlap-area labeling
+    # is biased toward large sprawling k-means hulls (one big candidate wins
+    # every cell -> collapse to a single facet -> 0 edges). Centroid proximity
+    # keeps distinct planes on distinct sides of a ridge/hip cut.
     plane_by_id = {ids[k]: planes[k] for k in range(K)}
-    cand_by_id = {ids[k]: cands[k] for k in range(K)}
+    cand_centroids = {ids[k]: cands[k].centroid
+                      for k in range(K) if cands[k] is not None}
+    if not cand_centroids:
+        return None
     label = {}
     for cell in cells:
-        best_fid, best_area = None, 0.0
-        for k, cand in enumerate(cands):
-            if cand is None:
-                continue
-            try:
-                a = cell.intersection(cand).area
-            except Exception:
-                a = 0.0
-            if a > best_area:
-                best_area, best_fid = a, ids[k]
-        if best_fid is None:                           # cell overlaps no candidate
-            valid_ids = [fid for fid in ids if cand_by_id[fid] is not None]
-            if not valid_ids:
-                continue
-            best_fid = min(valid_ids,
-                           key=lambda fid: cell.centroid.distance(
-                               cand_by_id[fid].centroid))
+        rp = cell.representative_point()
+        best_fid = min(cand_centroids,
+                       key=lambda fid: rp.distance(cand_centroids[fid]))
         label.setdefault(best_fid, []).append(cell)
 
     # dissolve cells sharing a label -> one clean facet per plane
@@ -355,6 +348,27 @@ def reconstruct_facets(
     if not facet_polygons:
         return [], {}, planes_for_poly
 
+    # Debug hook: dump the real arrangement inputs (outline + candidate facets +
+    # planes) to a file so they can be replayed as a local fixture. Off unless
+    # MEASURE_DUMP_ARRANGEMENT names a path. No effect on behaviour.
+    _dump_path = os.environ.get("MEASURE_DUMP_ARRANGEMENT")
+    if _dump_path and outline_native is not None:
+        try:
+            import json as _json
+            with open(_dump_path, "w") as _fh:
+                _json.dump({
+                    "outline_wkt": _valid(outline_native).wkt,
+                    "facets": [[fid, (p.wkt if p is not None else None)]
+                               for fid, p in facet_polygons],
+                    "planes": [None if pl is None else
+                               {"a": pl.a, "b": pl.b, "c": pl.c,
+                                "inlier_count": getattr(pl, "inlier_count", 0)}
+                               for pl in (planes_for_poly or [])],
+                }, _fh)
+            logger.info("Dumped arrangement fixture -> %s", _dump_path)
+        except Exception as _de:  # noqa: BLE001
+            logger.warning("arrangement fixture dump failed: %s", _de)
+
     # Preferred: plane-intersection arrangement-and-label. Needs the outline and
     # per-facet planes with REAL intercepts (LiDAR fits). Produces clean shared
     # edges; falls through to partition+regularize on any failure.
@@ -363,10 +377,18 @@ def reconstruct_facets(
         try:
             res = arrangement_facets(_valid(outline_native), facet_polygons,
                                      planes_for_poly)
-            if res is not None and res[0]:
+            # Guard: reject a collapsed arrangement (fewer than 2 facets when the
+            # input clearly had multiple) — that yields 0 edges downstream. Fall
+            # back to partition+regularize instead.
+            if res is not None and res[0] and \
+                    (len(res[0]) >= 2 or len(facet_polygons) < 2):
                 logger.info("reconstruct_facets: arrangement-and-label -> "
                             "%d facet(s)", len(res[0]))
                 return res
+            if res is not None:
+                logger.warning("arrangement collapsed to %d facet(s) from %d "
+                               "candidates — partition fallback",
+                               len(res[0]), len(facet_polygons))
         except Exception as e:  # noqa: BLE001 - never fail the pipeline
             logger.warning("arrangement_facets failed (%s) — partition fallback", e)
 
