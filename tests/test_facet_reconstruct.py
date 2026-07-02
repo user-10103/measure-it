@@ -151,6 +151,23 @@ def test_no_outline_partitions_against_each_other(jagged_facets):
         assert p.is_valid and p.area > 0.5
 
 
+def test_no_multipolygon_output():
+    # Regression for the live-run crash: a facet that gets trimmed into two
+    # disjoint pieces (a MultiPolygon) must be coerced to a single Polygon, or
+    # PDF export (boundary.exterior) blows up.
+    outline = Polygon([(0, 0), (20, 0), (20, 10), (0, 10)])
+    bar = Polygon([(9, 0), (11, 0), (11, 10), (9, 10)])   # claimed first (hi prio)
+    full = Polygon([(0, 0), (20, 0), (20, 10), (0, 10)])  # trimmed -> L+R halves
+
+    class _P:
+        def __init__(self, n): self.inlier_count = n
+    facets, boundaries, _ = reconstruct_facets(
+        outline, [(1, bar), (2, full)], planes_for_poly=[_P(999), _P(10)])
+    for fid, poly in facets:
+        assert poly.geom_type == "Polygon", f"facet {fid} is {poly.geom_type}"
+        assert poly.is_valid and not poly.is_empty
+
+
 def test_regularize_facets_direct(footprint):
     jag = _jag(footprint, amp=0.2, n=4)
     out = regularize_facets([jag], footprint)

@@ -161,11 +161,13 @@ def regularize_facets(polys: Sequence[Polygon], footprint: Polygon,
     regularized = _straighten_each(polys, footprint, snap_m)
 
     # Clip to footprint so snapping can't push a facet outside the building.
+    # Coerce to a single Polygon — intersection can yield a MultiPolygon, which
+    # breaks downstream code that reads `.exterior` (e.g. PDF export).
     clipped: List[Polygon] = []
     for orig, reg in zip(polys, regularized):
         try:
-            c = reg.intersection(footprint)
-            clipped.append(c if (not c.is_empty and c.area > 0.01) else orig)
+            c = _keep_polygon(reg.intersection(footprint))
+            clipped.append(c if (c is not None and not c.is_empty and c.area > 0.01) else orig)
         except Exception:
             clipped.append(orig)
     regularized = clipped
@@ -183,7 +185,7 @@ def regularize_facets(polys: Sequence[Polygon], footprint: Polygon,
                 continue
             idx = min(range(len(regularized)),
                       key=lambda i: piece.centroid.distance(regularized[i].centroid))
-            regularized[idx] = regularized[idx].union(piece)
+            regularized[idx] = _keep_polygon(regularized[idx].union(piece)) or regularized[idx]
 
     # Overlap-trim: largest facets keep their full area; smaller facets are
     # trimmed away from already-claimed regions (no double-counted area).
@@ -194,14 +196,15 @@ def regularize_facets(polys: Sequence[Polygon], footprint: Polygon,
         p = regularized[i]
         if claimed is not None:
             try:
-                diff = p.difference(claimed)
-                p = diff if (not diff.is_empty and diff.area > 0.01) else p
+                diff = _keep_polygon(p.difference(claimed))
+                p = diff if (diff is not None and not diff.is_empty and diff.area > 0.01) else p
             except Exception:
                 pass
         trimmed[i] = p
         claimed = unary_union([x for x in trimmed if x is not None])
 
-    return [t if t is not None else o for t, o in zip(trimmed, polys)]
+    # Final coercion: never return a MultiPolygon (downstream reads .exterior).
+    return [_keep_polygon(t) if t is not None else o for t, o in zip(trimmed, polys)]
 
 
 def _keep_polygon(g) -> Polygon:
@@ -299,7 +302,9 @@ def reconstruct_facets(
 
     reg = regularize_facets([partitioned[i] for i in kept], tiling_target, snap_m)
 
-    out_facets = [(ids[i], reg[j]) for j, i in enumerate(kept)]
+    out_facets = [(ids[i], _keep_polygon(reg[j])) for j, i in enumerate(kept)]
+    out_facets = [(fid, p) for fid, p in out_facets
+                  if p is not None and not p.is_empty]
     out_boundaries = dict(out_facets)
     out_planes = ([planes_for_poly[i] for i in kept]
                   if (planes_for_poly and len(planes_for_poly) == len(polys))
