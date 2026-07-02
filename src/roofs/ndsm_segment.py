@@ -97,12 +97,133 @@ def _fit_plane(ndsm: np.ndarray, mask: np.ndarray, transform):
     return a, b, c, slope, aspect
 
 
+def _keep_polygon(g):
+    """Coerce a set-op result to its single largest Polygon component."""
+    if g is None or g.is_empty:
+        return g
+    if g.geom_type == "Polygon":
+        return g
+    polys = [p for p in getattr(g, "geoms", []) if p.geom_type == "Polygon"]
+    return max(polys, key=lambda p: p.area) if polys else None
+
+
+def _aspect_diff(a: float, b: float) -> float:
+    return abs(((a - b + 180.0) % 360.0) - 180.0)
+
+
+def _merge_coplanar_adjacent(facets: List[dict], aspect_tol: float = 25.0,
+                             slope_tol: float = 8.0, adj_len_m: float = 0.5) -> List[dict]:
+    """Union facets that are ADJACENT and share ~the same plane — i.e. one
+    physical facet that noise split into pieces. Keeps the largest piece's plane."""
+    from shapely.ops import unary_union
+    n = len(facets)
+    parent = list(range(n))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            fi, fj = facets[i], facets[j]
+            if _aspect_diff(fi["aspect_deg"], fj["aspect_deg"]) > aspect_tol:
+                continue
+            if abs(fi["slope_deg"] - fj["slope_deg"]) > slope_tol:
+                continue
+            try:
+                shared = fi["polygon"].boundary.intersection(
+                    fj["polygon"].boundary).length
+            except Exception:
+                shared = 0.0
+            if shared >= adj_len_m:
+                parent[find(i)] = find(j)
+
+    groups: dict = {}
+    for i in range(n):
+        groups.setdefault(find(i), []).append(i)
+    out: List[dict] = []
+    for members in groups.values():
+        if len(members) == 1:
+            out.append(facets[members[0]])
+            continue
+        merged = _keep_polygon(unary_union([facets[m]["polygon"] for m in members]))
+        if merged is None:
+            out.extend(facets[m] for m in members)
+            continue
+        big = max(members, key=lambda m: facets[m]["polygon"].area)
+        f = dict(facets[big])
+        f["polygon"] = merged
+        f["area_px"] = sum(facets[m]["area_px"] for m in members)
+        out.append(f)
+    return out
+
+
+def _merge_slivers(facets: List[dict], min_area_m2: float) -> List[dict]:
+    """Merge any facet below min_area_m2 into the neighbour it shares the most
+    boundary with (or drop it if it has no neighbour)."""
+    from shapely.ops import unary_union
+    facets = [dict(f) for f in facets]
+    while True:
+        small = [i for i, f in enumerate(facets) if f["polygon"].area < min_area_m2]
+        if not small or len(facets) <= 1:
+            break
+        i = min(small, key=lambda i: facets[i]["polygon"].area)
+        best_j, best_len = None, 0.0
+        for j in range(len(facets)):
+            if j == i:
+                continue
+            try:
+                s = facets[i]["polygon"].boundary.intersection(
+                    facets[j]["polygon"].boundary).length
+            except Exception:
+                s = 0.0
+            if s > best_len:
+                best_len, best_j = s, j
+        if best_j is None:
+            facets.pop(i)
+            continue
+        merged = _keep_polygon(unary_union([facets[best_j]["polygon"],
+                                            facets[i]["polygon"]]))
+        if merged is not None:
+            facets[best_j]["polygon"] = merged
+            facets[best_j]["area_px"] += facets[i]["area_px"]
+        facets.pop(i)
+    return facets
+
+
+def cleanup_facets(facets: List[dict], min_area_m2: float = 3.0,
+                   regularize: bool = True) -> List[dict]:
+    """Post-process raw nDSM facets: merge noise-split coplanar fragments, merge
+    remaining slivers, then straighten boundaries."""
+    if not facets:
+        return facets
+    facets = _merge_coplanar_adjacent(facets)
+    facets = _merge_slivers(facets, min_area_m2)
+    if regularize and facets:
+        try:
+            from shapely.ops import unary_union
+            from src.roofs.facet_reconstruct import regularize_facets
+            footprint = unary_union([f["polygon"] for f in facets])
+            reg = regularize_facets([f["polygon"] for f in facets], footprint)
+            for f, p in zip(facets, reg):
+                if p is not None and not p.is_empty and p.is_valid:
+                    f["polygon"] = p
+        except Exception as e:  # noqa: BLE001
+            logger.warning("regularize failed (%s) — keeping unregularized", e)
+    facets.sort(key=lambda f: -f["area_px"])
+    return facets
+
+
 def ndsm_facets(ndsm: np.ndarray, transform, simplify_m: float = 0.5,
+                clean: bool = True, min_area_m2: float = 3.0,
                 **seg_kw) -> List[dict]:
     """Extract clean facet polygons + planes from an nDSM raster.
 
     Returns a list of dicts: ``{polygon, a, b, c, slope_deg, aspect_deg,
-    area_px}`` with polygon in the raster's world CRS.
+    area_px}`` with polygon in the raster's world CRS. With ``clean=True`` the
+    raw regions are de-fragmented, de-slivered, and boundary-regularized.
     """
     from rasterio.features import shapes as rio_shapes
     from shapely.geometry import shape as shp_shape
@@ -125,7 +246,11 @@ def ndsm_facets(ndsm: np.ndarray, transform, simplify_m: float = 0.5,
                        "aspect_deg": round(aspect, 1),
                        "area_px": int(mask.sum())})
     facets.sort(key=lambda f: -f["area_px"])
-    logger.info("ndsm_facets: %d facet(s) from height surface", len(facets))
+    n_raw = len(facets)
+    if clean:
+        facets = cleanup_facets(facets, min_area_m2=min_area_m2)
+    logger.info("ndsm_facets: %d raw -> %d facet(s) from height surface",
+                n_raw, len(facets))
     return facets
 
 
