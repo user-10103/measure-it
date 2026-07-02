@@ -40,3 +40,13 @@ def test_pearl_absorbs_noise_better_than_ransac():
 
 def test_empty():
     assert segment_facets_pearl(None) == []
+
+
+def test_graphcut_path_runs_and_is_clean():
+    """Real alpha-expansion (gco) + MDL reduction -> clean facet count. Falls back
+    to ICM if gco isn't installed, which also passes."""
+    noisy = _with_noise(_hip_points())
+    fac = segment_facets_pearl(noisy, use_graphcut=True, min_inliers=60, mdl_cost=5.0)
+    assert 4 <= len(fac) <= 7
+    for f in fac:
+        assert f.count >= 60

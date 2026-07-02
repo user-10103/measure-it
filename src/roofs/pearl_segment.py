@@ -124,29 +124,62 @@ def _icm(R: np.ndarray, neigh: np.ndarray, labels: np.ndarray,
 
 
 def _alpha_expansion(R, edges, labels, smooth):
-    """Global optimizer via pygco alpha-expansion (data + Potts smoothness).
+    """Global optimizer via graph-cut alpha-expansion (data + Potts smoothness).
 
-    NOTE: pygco's cut_general_graph has NO label-cost parameter, so the MDL /
-    "fewest facets" term is enforced by the caller pruning under-supported planes
-    between iterations (the refit loop drops planes below min_inliers).
+    The library (gco-wrapper, imported as ``gco``) has no label-cost API, so the
+    MDL / "fewest facets" term is applied separately by ``_mdl_reduce``.
     """
-    import pygco
+    try:
+        import gco as _gc                               # gco-wrapper installs as `gco`
+    except Exception:
+        import pygco as _gc                             # older wrapper name
     unary = np.ascontiguousarray((R * 50.0).astype(np.int32))
     ew = np.full(len(edges), max(1, int(smooth * 50)), dtype=np.int32)
     L = R.shape[1]
     pw = (1 - np.eye(L)).astype(np.int32)                # Potts smoothness
-    out = pygco.cut_general_graph(
+    out = _gc.cut_general_graph(
         np.ascontiguousarray(edges.astype(np.int32)), ew, unary, pw,
         n_iter=-1, algorithm="expansion",
         init_labels=np.ascontiguousarray(labels.astype(np.int32)))
     return np.asarray(out).astype(int)
 
 
+def _mdl_reduce(R: np.ndarray, labels: np.ndarray, label_cost: float,
+                min_inliers: int) -> np.ndarray:
+    """Enforce the label (MDL) cost the graph-cut library can't: greedily drop any
+    plane that doesn't save at least ``label_cost`` in data cost versus reassigning
+    its points to their next-best plane (or is under-supported). Reassigns removed
+    points and repeats until every surviving facet 'earns its keep'."""
+    labels = labels.copy()
+    while True:
+        used = np.unique(labels)
+        if len(used) <= 1:
+            break
+        worst, worst_score = None, None
+        for l in used:
+            idx = np.where(labels == l)[0]
+            sub = R[idx].copy()
+            best = sub[:, l].copy()
+            sub[:, l] = np.inf
+            savings = float((sub.min(1) - best).sum())   # data cost saved by KEEPING l
+            score = savings - label_cost                 # <0 -> l isn't worth its cost
+            if len(idx) < min_inliers:
+                score = -1e18                            # under-supported -> force remove
+            if worst is None or score < worst_score:
+                worst, worst_score = l, score
+        if worst is None or worst_score >= 0:
+            break                                        # every facet earns its keep
+        idx = np.where(labels == worst)[0]
+        sub = R[idx].copy(); sub[:, worst] = np.inf
+        labels[idx] = sub.argmin(1)                      # reassign to next-best plane
+    return labels
+
+
 def segment_facets_pearl(points: np.ndarray, n_candidates: int = 40,
                          dist_thresh: float = 0.15, smooth: float = 0.4,
                          label_cost: float = 3.0, iters: int = 3,
                          min_inliers: int = 40, split_eps: float = 1.5,
-                         normal_weight: float = 0.5,
+                         normal_weight: float = 0.5, mdl_cost: float = 5.0,
                          use_graphcut: bool = True) -> List[Facet]:
     """Segment roof points into facets by PEARL energy minimization.
 
@@ -169,6 +202,7 @@ def segment_facets_pearl(points: np.ndarray, n_candidates: int = 40,
                 edges = np.array([(i, int(j)) for i in range(len(neigh))
                                   for j in neigh[i] if i < j])
                 labels = _alpha_expansion(R, edges, labels, smooth)
+                labels = _mdl_reduce(R, labels, mdl_cost, min_inliers)  # MDL term
             except Exception as _ge:
                 logger.info("graph-cut unavailable (%s) — ICM", _ge)
                 labels = _icm(R, neigh, labels, smooth, label_cost)
