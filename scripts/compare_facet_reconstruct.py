@@ -57,11 +57,18 @@ def _metrics(results: dict, out_dir: str) -> dict:
                or roof.get("plan_area_m2")
                or meas.get("plan_area_m2") or 0.0)
     edge_summary = roof.get("edges", {}) or {}
+    # prefer counts exposed in results; fall back to geojson feature counts
+    n_facets = roof.get("n_facets")
+    if n_facets is None:
+        n_facets = _facet_count(out_dir)
+    n_edges = roof.get("n_edges")
+    if n_edges is None:
+        n_edges = _edge_count(out_dir)
     return {
         "area_m2": float(area_m2),
         "area_sqft": float(area_m2) * M2_TO_SQFT,
-        "n_facets": _facet_count(out_dir),
-        "n_edges": _edge_count(out_dir),
+        "n_facets": n_facets,
+        "n_edges": n_edges,
         "edge_lengths_m": {k: round(v, 1) for k, v in edge_summary.items()},
     }
 

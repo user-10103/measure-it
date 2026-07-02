@@ -1069,6 +1069,8 @@ def process_address(
                 footprint_area
             )
             roof_metrics["edges"] = edge_summary
+            roof_metrics["n_edges"] = len(edges)
+            roof_metrics["n_facets"] = len(facet_polygons)
 
             logger.info(
                 f"Roof analysis complete: {len(facets)} facets, "

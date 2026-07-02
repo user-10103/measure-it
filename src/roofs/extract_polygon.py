@@ -9,7 +9,9 @@ import geopandas as gpd
 import numpy as np
 from shapely.geometry import Polygon
 
-from src.lidar.dataset_discovery import construct_ept_url, discover_lidar_dataset
+from src.lidar.dataset_discovery import (
+    construct_ept_url, discover_lidar_dataset, discover_ept_from_entwine,
+)
 from src.lidar.ept_client import get_ept_lidar_for_location
 from src.utils.projections import get_aeqd_crs
 
@@ -134,19 +136,27 @@ def get_roof_polygon(
     try:
         if ept_url is None:
             logger.info("Discovering LiDAR dataset for location")
-            dataset = discover_lidar_dataset(lat, lon)
+            dataset = None
+            try:
+                dataset = discover_lidar_dataset(lat, lon)
+            except Exception as _we:
+                # WESM.gpkg is a 2.8 GB local index and may be absent (e.g. in
+                # Colab). Don't fail — fall back to the entwine boundary index.
+                logger.warning(f"WESM discovery unavailable ({_we}); trying entwine")
 
-            if dataset is None:
-                logger.warning("No LiDAR dataset found in WESM spatial index")
-                raise RuntimeError("No LiDAR coverage available")
+            if dataset is not None:
+                logger.info(f"Found dataset: {dataset['workunit']}")
+                ept_url = construct_ept_url(dataset)
 
-            logger.info(f"Found dataset: {dataset['workunit']}")
-            ept_url = construct_ept_url(dataset)
+            if ept_url is None:
+                # usgs.entwine.io public boundary index — small auto-cached
+                # geojson, no WESM.gpkg and no AWS credentials required.
+                logger.info("Trying entwine EPT boundary index (no WESM needed)")
+                ept_url = discover_ept_from_entwine(lat, lon)
 
             if ept_url is None:
                 raise RuntimeError(
-                    f"No EPT data available for dataset {dataset['workunit']}. "
-                    f"This may be a legacy dataset not converted to EPT format."
+                    "No EPT LiDAR coverage found (WESM and entwine both empty)"
                 )
 
         # Refine polygon
