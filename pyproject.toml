@@ -74,6 +74,12 @@ test = [
     "pytest-cov>=4.1.0",
 ]
 
+# Clean-facet reconstruction (src/roofs/facet_reconstruct.py). Optional: the
+# module falls back to a built-in principal-axis regularizer when absent.
+facet = [
+    "buildingregulariser>=0.2.5",   # ArcGIS-style polygon regularization (MIT)
+]
+
 [project.scripts]
 measure-it = "src.pipeline:main"
 measure-it-healthcheck = "src.healthcheck:main"

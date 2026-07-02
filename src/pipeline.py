@@ -88,7 +88,8 @@ def process_address(
     segment_method: str = "kmeans",
     export_pdf: bool = True,
     export_dxf: bool = True,
-    export_csv: bool = True
+    export_csv: bool = True,
+    use_facet_reconstruct: bool = False
 ) -> Dict:
     """
     Process a single address/location through the complete pipeline.
@@ -580,7 +581,47 @@ def process_address(
             # claims first) so the set tiles the roof.
             facet_boundaries_by_id = {}
             outline_native = None
-            if facet_polygons:
+            _did_reconstruct = False
+
+            # Phase 2: clean-facet reconstruction — regularize candidate facets
+            # into straight-edged, footprint-tiling polygons. Gated behind
+            # use_facet_reconstruct; on any failure or empty result we fall
+            # through to the legacy partition block below (fully reversible).
+            if use_facet_reconstruct and facet_polygons:
+                try:
+                    from src.roofs.facet_reconstruct import reconstruct_facets
+                    _lidar_crs = polygon_result.get("metadata", {}).get("points_crs")
+                    _outline_native = None
+                    if _lidar_crs and final_polygon is not None:
+                        from pyproj import CRS as _CRS, Transformer as _Tr
+                        from shapely.ops import transform as _shp_tx
+                        _to_native = _Tr.from_crs(
+                            "EPSG:4326", _CRS.from_user_input(_lidar_crs), always_xy=True
+                        ).transform
+                        _outline_native = _shp_tx(_to_native, final_polygon)
+                    _rc_fp, _rc_fb, _rc_pfp = reconstruct_facets(
+                        _outline_native, facet_polygons, planes_for_poly
+                    )
+                    if _rc_fp:
+                        outline_native = _outline_native
+                        facet_polygons = _rc_fp
+                        facet_boundaries_by_id = _rc_fb
+                        planes_for_poly = _rc_pfp
+                        _keep_ids = {fid for fid, _ in facet_polygons}
+                        planes = [p for f, p in zip(facets, planes)
+                                  if f.facet_id in _keep_ids]
+                        facets = [f for f in facets if f.facet_id in _keep_ids]
+                        _did_reconstruct = True
+                        logger.info(
+                            "Facet reconstruction: %d clean facet(s) via "
+                            "reconstruct_facets", len(facet_polygons)
+                        )
+                except Exception as _re:
+                    logger.warning(
+                        f"facet_reconstruct failed ({_re}) — legacy partition block"
+                    )
+
+            if facet_polygons and not _did_reconstruct:
                 from shapely.geometry import Polygon as _Poly
 
                 def _valid(g):
@@ -991,15 +1032,24 @@ def process_address(
             # followed by merge_collinear_edges to collapse the tiling artefact
             # (LiDAR facet boundaries produce ~10× too many collinear sub-segments).
             if len(facet_polygons) > 1:
-                edges = classify_edges_from_facets(
-                    facet_polygons, planes_for_poly, outline=outline_native,
-                    # LiDAR planes carry real intercepts, so a height gap at a
-                    # junction marks a story step -> wall/step flashing. 1.0 m
-                    # separates true steps (2.5-3 m here) from ridge junctions
-                    # where two fits disagree by a few decimeters at 1 m LiDAR.
-                    step_height_m=1.0,
-                )
-                edges = merge_collinear_edges(edges)
+                if use_facet_reconstruct:
+                    # Phase 4: grid-snap for shared-boundary coincidence, then
+                    # classify + collinear-merge (all inside reconstruct_edges).
+                    from src.roofs.facet_reconstruct import reconstruct_edges
+                    edges = reconstruct_edges(
+                        facet_polygons, planes_for_poly,
+                        outline=outline_native, step_height_m=1.0,
+                    )
+                else:
+                    edges = classify_edges_from_facets(
+                        facet_polygons, planes_for_poly, outline=outline_native,
+                        # LiDAR planes carry real intercepts, so a height gap at a
+                        # junction marks a story step -> wall/step flashing. 1.0 m
+                        # separates true steps (2.5-3 m here) from ridge junctions
+                        # where two fits disagree by a few decimeters at 1 m LiDAR.
+                        step_height_m=1.0,
+                    )
+                    edges = merge_collinear_edges(edges)
                 edge_summary = compute_edge_lengths_by_type(edges)
                 logger.info(
                     f"Edge classification: {len(edges)} edges after merge "
