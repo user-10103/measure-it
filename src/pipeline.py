@@ -467,6 +467,26 @@ def process_address(
                 except Exception as _me:
                     logger.warning(f"Model segmentation failed ({_me}) — fallback")
 
+            # nDSM (height-surface) segmentation: cut facets on the real ridge/
+            # hip creases (clean boundaries), then attach LiDAR points for the
+            # per-facet plane. Opt-in via segment_method="ndsm".
+            if not naip_seg_used and segment_method == "ndsm" and ndsm_path and \
+                    _pts_crs_seg:
+                logger.info("Attempting nDSM (height-surface) segmentation…")
+                try:
+                    from src.roofs.ndsm_segment import segment_facets_ndsm
+                    _nd_facets = segment_facets_ndsm(
+                        ndsm_path, _pts_crs_seg, lidar_points=points)
+                    if _nd_facets:
+                        facets = _nd_facets
+                        naip_seg_used = True
+                        logger.info("nDSM segmentation: %d facet(s) with LiDAR "
+                                    "support", len(facets))
+                    else:
+                        logger.info("nDSM segmentation returned no facets — fallback")
+                except Exception as _nde:
+                    logger.warning(f"nDSM segmentation failed ({_nde}) — fallback")
+
             if not naip_seg_used and naip_clipped_tif and ndsm_path and \
                     polygon_result.get("metadata", {}).get("points_crs"):
                 _pts_crs = polygon_result["metadata"]["points_crs"]
@@ -492,7 +512,8 @@ def process_address(
                     logger.warning(f"NAIP segmentation failed ({_nse}) — using k-means fallback")
 
             if not naip_seg_used:
-                facets = segment_facets(points, method=segment_method)
+                _fm = "kmeans" if segment_method == "ndsm" else segment_method
+                facets = segment_facets(points, method=_fm)
                 logger.info(f"Segmented into {len(facets)} facet(s) using {segment_method}")
 
             # Fit planes to each facet

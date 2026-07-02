@@ -254,6 +254,54 @@ def ndsm_facets(ndsm: np.ndarray, transform, simplify_m: float = 0.5,
     return facets
 
 
+def segment_facets_ndsm(ndsm_path, points_crs: str, lidar_points=None,
+                        min_area_m2: float = 3.0, **seg_kw):
+    """Pipeline entry: extract clean facets from the nDSM raster and return
+    ``Facet`` objects (polygon in ``points_crs``) with LiDAR points attached, so
+    the downstream plane-fit + edge classification runs normally.
+
+    Fusion: the HEIGHT surface gives clean facet boundaries (on the real
+    creases); the raw LiDAR points give the accurate per-facet plane/pitch.
+    Returns None on failure so the pipeline falls back to k-means.
+    """
+    try:
+        import rasterio
+        from shapely.ops import transform as _shp_tx
+        from src.roofs.segment import Facet
+        from src.roofs.model_segment import assign_lidar_points
+    except Exception as e:  # noqa: BLE001
+        logger.warning("nDSM segmentation unavailable (%s) — fallback", e)
+        return None
+    try:
+        with rasterio.open(str(ndsm_path)) as src:
+            z = src.read(1).astype(float)
+            tf = src.transform
+            rcrs = src.crs
+        z[~np.isfinite(z)] = 0.0
+        fac_dicts = ndsm_facets(z, tf, clean=True, min_area_m2=min_area_m2, **seg_kw)
+        if not fac_dicts:
+            return None
+
+        reproj = None
+        if rcrs is not None and points_crs and str(rcrs) != str(points_crs):
+            from pyproj import CRS, Transformer
+            reproj = Transformer.from_crs(rcrs, CRS.from_user_input(points_crs),
+                                          always_xy=True).transform
+
+        facets = []
+        for i, fd in enumerate(fac_dicts, start=1):
+            poly = fd["polygon"]
+            if reproj is not None:
+                poly = _shp_tx(reproj, poly)
+            facets.append(Facet(facet_id=i, polygon=poly, label=i))
+        facets = assign_lidar_points(facets, lidar_points)
+        logger.info("nDSM segmentation: %d facet(s) with LiDAR support", len(facets))
+        return facets or None
+    except Exception as e:  # noqa: BLE001
+        logger.warning("nDSM segmentation failed (%s) — fallback", e)
+        return None
+
+
 def visualize(ndsm: np.ndarray, transform, out_png: str,
               facets: Optional[List[dict]] = None, title: str = "nDSM facets"):
     """Render the height heatmap with facet boundaries overlaid."""

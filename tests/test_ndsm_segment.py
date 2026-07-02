@@ -35,3 +35,30 @@ def test_flat_roof_one_region():
 
 def test_empty_ndsm():
     assert ndsm_facets(np.zeros((40, 40)), TF) == []
+
+
+def test_segment_facets_ndsm_end_to_end(tmp_path):
+    """Write a synthetic hip nDSM to a GeoTIFF, add LiDAR points, and confirm
+    segment_facets_ndsm returns Facet objects with polygons + attached points."""
+    import rasterio
+    from rasterio.transform import Affine as _A
+    from src.roofs.ndsm_segment import segment_facets_ndsm
+
+    z = _hip(80, 80, 0.25).astype("float32")
+    tf = _A(0.5, 0, 356000, 0, -0.5, 3111500)
+    p = tmp_path / "bldg_ndsm.tif"
+    with rasterio.open(p, "w", driver="GTiff", height=80, width=80, count=1,
+                       dtype="float32", crs="EPSG:26917", transform=tf) as dst:
+        dst.write(z, 1)
+
+    # LiDAR points over the roof (structured x/y/z)
+    yy, xx = np.mgrid[0:80:2, 0:80:2]
+    wx, wy = tf * (xx.ravel() + 0.5, yy.ravel() + 0.5)
+    pts = np.zeros(len(wx), dtype=[("x", "f8"), ("y", "f8"), ("z", "f8")])
+    pts["x"], pts["y"], pts["z"] = wx, wy, z[yy.ravel(), xx.ravel()]
+
+    facets = segment_facets_ndsm(str(p), "EPSG:26917", lidar_points=pts, min_region_px=60)
+    assert facets and len(facets) >= 4
+    for f in facets:
+        assert f.polygon is not None and f.polygon.is_valid
+        assert f.points is not None and f.count > 0
