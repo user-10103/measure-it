@@ -158,13 +158,25 @@ def _load_model(checkpoint_path: str) -> Any:
         )
         logger.info(f"Patched class heads: 91 → {num_classes}")
 
-    # --- Load weights (strict) -----------------------------------------------
-    result = inner.load_state_dict(stripped, strict=True)
-    if result.missing_keys or result.unexpected_keys:
+    # --- Load weights (tolerant) ---------------------------------------------
+    # strict=False so a checkpoint/rfdetr-version mismatch on a small number of
+    # non-critical buffers (e.g. _kp_active_mask, present in newer rfdetr model
+    # classes but absent from older exported checkpoints) does not abort the
+    # load. We log exactly which keys were tolerated so a REAL mismatch (many
+    # keys) is visible rather than silently loading a broken model.
+    result = inner.load_state_dict(stripped, strict=False)
+    n_miss, n_unexp = len(result.missing_keys), len(result.unexpected_keys)
+    if n_miss or n_unexp:
         logger.warning(
-            f"load_state_dict: missing={len(result.missing_keys)}, "
-            f"unexpected={len(result.unexpected_keys)}"
+            "load_state_dict (strict=False): missing=%d %s, unexpected=%d %s",
+            n_miss, list(result.missing_keys)[:6],
+            n_unexp, list(result.unexpected_keys)[:6],
         )
+        if n_miss > 5 or n_unexp > 5:
+            logger.warning(
+                "Many mismatched keys — checkpoint may not match this rfdetr "
+                "version (check patch_size/hidden_dim); predictions may be poor."
+            )
     else:
         logger.info("Weights loaded: missing=0, unexpected=0 ✓")
 
