@@ -9,9 +9,11 @@ import numpy as np
 import pytest
 from affine import Affine
 
+from shapely.geometry import Polygon, box
+from src.roofs.segment import Facet
 from src.roofs.model_segment import (
     model_facets_to_metric, assign_lidar_points, preprocess_like_training,
-    upscale_esrgan,
+    upscale_esrgan, gap_fill_facets,
 )
 
 # 0.3 m/px NAIP-like transform: world_x = 356000 + 0.3*col, world_y = 3111500 - 0.3*row
@@ -112,6 +114,46 @@ def test_preprocess_contrast_stretches():
     bands[:, 8:24, 8:24] = 135                          # small bright square
     out = preprocess_like_training(bands, dtype_max=255.0)
     assert out.max() - out.min() >= 15
+
+
+def _grid_points(x0, x1, y0, y1, n=30, z=20.0):
+    xs = np.linspace(x0, x1, n)
+    ys = np.linspace(y0, y1, n)
+    gx, gy = np.meshgrid(xs, ys)
+    gx, gy = gx.ravel(), gy.ravel()
+    arr = np.zeros(len(gx), dtype=[("x", "f8"), ("y", "f8"), ("z", "f8")])
+    arr["x"], arr["y"], arr["z"] = gx, gy, z + 0.1 * (gx - x0)
+    return arr
+
+
+def test_gap_fill_adds_facets_for_uncovered_region():
+    # Roof outline is a 40x20 rectangle; the model only covered the left half.
+    outline = box(0, 0, 40, 20)
+    model = [Facet(facet_id=1, polygon=box(0, 0, 20, 20))]
+    pts = _grid_points(0, 40, 0, 20, n=40)             # LiDAR over the whole roof
+    out = gap_fill_facets(model, outline, pts, min_gap_area_m2=10.0)
+    assert len(out) > len(model)                        # gap facets were added
+    # the added facets carry LiDAR points (so a plane can be fit downstream)
+    added = out[len(model):]
+    assert all(f.points is not None and f.count > 0 for f in added)
+    # ids don't collide with the model facet
+    assert len({f.facet_id for f in out}) == len(out)
+
+
+def test_gap_fill_noop_when_model_covers_roof():
+    outline = box(0, 0, 20, 20)
+    model = [Facet(facet_id=1, polygon=box(0, 0, 20, 20))]   # covers everything
+    pts = _grid_points(0, 20, 0, 20, n=20)
+    out = gap_fill_facets(model, outline, pts)
+    assert len(out) == len(model)                       # nothing to fill
+
+
+def test_gap_fill_noop_without_lidar_in_gap():
+    outline = box(0, 0, 40, 20)
+    model = [Facet(facet_id=1, polygon=box(0, 0, 20, 20))]
+    pts = _grid_points(0, 20, 0, 20, n=20)              # LiDAR only under the model
+    out = gap_fill_facets(model, outline, pts, min_points=10)
+    assert len(out) == len(model)                       # gap has no points -> skip
 
 
 def test_assign_none_points_noop():

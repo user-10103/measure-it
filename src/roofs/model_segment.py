@@ -208,6 +208,63 @@ def assign_lidar_points(facets: List[Facet], lidar_points,
     return kept
 
 
+def gap_fill_facets(model_facets: List[Facet], outline_native,
+                    lidar_points, min_gap_area_m2: float = 10.0,
+                    min_points: int = 10) -> List[Facet]:
+    """Phase C fusion: fill the part of the roof outline the model DIDN'T cover
+    with facets segmented from the LiDAR points there, so the facet set tiles the
+    full outline.
+
+    Why: a weak model (0.19 mAP) detects only some facets; if those few are then
+    stretched to fill the whole roof (the pipeline's remainder-absorption), their
+    boundaries distort and the perimeter mis-types (eave<->rake). Adding real
+    LiDAR facets for the uncovered region keeps the model's crisp interiors AND
+    a correct outline-following perimeter.
+
+    Returns model_facets + new LiDAR gap facets (ids renumbered to not collide).
+    """
+    from shapely.ops import unary_union
+    import shapely
+
+    valid = [f for f in model_facets
+             if f.polygon is not None and not f.polygon.is_empty]
+    if not valid or outline_native is None or outline_native.is_empty:
+        return model_facets
+    try:
+        covered = unary_union([f.polygon for f in valid]).intersection(outline_native)
+        gap = outline_native.difference(covered)
+    except Exception:
+        return model_facets
+    if gap.is_empty or gap.area < min_gap_area_m2:
+        logger.info("gap_fill: model covers the roof (uncovered %.1f m2) — no fill",
+                    0.0 if gap.is_empty else gap.area)
+        return model_facets
+    if lidar_points is None or len(lidar_points) == 0:
+        return model_facets
+
+    xs = np.asarray(lidar_points['x'], dtype="float64")
+    ys = np.asarray(lidar_points['y'], dtype="float64")
+    in_gap = shapely.contains_xy(gap, xs, ys)
+    if int(in_gap.sum()) < min_points:
+        logger.info("gap_fill: %.0f m2 uncovered but <%d LiDAR pts there — skip",
+                    gap.area, min_points)
+        return model_facets
+
+    from src.roofs.segment import segment_facets
+    gap_facets = segment_facets(lidar_points[in_gap], method="kmeans")
+    nid = max((f.facet_id for f in model_facets), default=0)
+    out = list(model_facets)
+    for f in gap_facets:
+        nid += 1
+        f.facet_id = nid
+        f.label = nid
+        out.append(f)
+    logger.info("gap_fill: %.0f m2 uncovered -> +%d LiDAR facet(s) (%d pts); "
+                "%d facet(s) total", gap.area, len(gap_facets),
+                int(in_gap.sum()), len(out))
+    return out
+
+
 def segment_facets_model(naip_clipped_path, points_crs: str, checkpoint: str,
                          lidar_points=None, threshold: float = 0.40,
                          preprocess: bool = True,

@@ -435,17 +435,32 @@ def process_address(
             if model_checkpoint and naip_clipped_tif and _pts_crs_seg:
                 logger.info("Attempting RF-DETR model segmentation…")
                 try:
-                    from src.roofs.model_segment import segment_facets_model
+                    from src.roofs.model_segment import (
+                        segment_facets_model, gap_fill_facets)
                     _model_facets = segment_facets_model(
                         naip_clipped_tif, _pts_crs_seg, model_checkpoint,
                         lidar_points=points, threshold=model_threshold,
                     )
                     if _model_facets:
-                        facets = _model_facets
+                        # Phase C fusion: fill the outline the (sparse) model
+                        # missed with LiDAR facets, so the set tiles the roof and
+                        # the perimeter (eave/rake) types correctly.
+                        _outline_seg = None
+                        try:
+                            from pyproj import (CRS as _CRS,
+                                                Transformer as _Tr)
+                            from shapely.ops import transform as _shp_tx
+                            _tf = _Tr.from_crs(
+                                "EPSG:4326", _CRS.from_user_input(_pts_crs_seg),
+                                always_xy=True).transform
+                            _outline_seg = _shp_tx(_tf, final_polygon)
+                        except Exception as _oe:
+                            logger.warning(f"gap-fill outline reproject failed ({_oe})")
+                        facets = gap_fill_facets(_model_facets, _outline_seg, points)
                         naip_seg_used = True
                         logger.info(
-                            "Model (RF-DETR) segmentation: %d facet(s) with "
-                            "LiDAR support — planes fit below", len(facets))
+                            "Model (RF-DETR) + LiDAR gap-fill: %d facet(s) — "
+                            "planes fit below", len(facets))
                     else:
                         logger.info("Model segmentation returned no facets — "
                                     "falling back")
