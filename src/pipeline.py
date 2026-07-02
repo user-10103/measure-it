@@ -1179,18 +1179,29 @@ def process_address(
                         "properties": {"kind": "outline"},
                     })
                 _fg_path = output_dir / "facets.geojson"
-                json.dump(
-                    {
-                        "type": "FeatureCollection",
-                        "features": _features,
-                        "properties": {
-                            "crs": polygon_result.get("metadata", {}).get("points_crs"),
-                            "qc_confidence": float(qc_result.confidence_score),
-                            "building_id": building_id,
-                        },
+                _pcrs = polygon_result.get("metadata", {}).get("points_crs")
+                _fg = {
+                    "type": "FeatureCollection",
+                    "features": _features,
+                    "properties": {
+                        "crs": _pcrs,      # legacy custom field (kept for back-compat)
+                        "qc_confidence": float(qc_result.confidence_score),
+                        "building_id": building_id,
                     },
-                    open(_fg_path, "w"),
-                )
+                }
+                # Standard GeoJSON named-CRS member so readers (geopandas/GDAL)
+                # don't default to WGS84 — coords are in the LiDAR UTM CRS, not
+                # lat/lon. Without this, overlays land off-frame (wrong SRID tag).
+                if _pcrs:
+                    try:
+                        from pyproj import CRS as _CRS
+                        _auth = _CRS.from_user_input(_pcrs).to_authority()
+                        if _auth:
+                            _fg["crs"] = {"type": "name", "properties": {
+                                "name": f"urn:ogc:def:crs:{_auth[0]}::{_auth[1]}"}}
+                    except Exception as _ce:
+                        logger.warning(f"facets.geojson CRS tag failed: {_ce}")
+                json.dump(_fg, open(_fg_path, "w"))
                 output_files["facets_geojson"] = str(_fg_path)
                 logger.info(f"Exported: {_fg_path}")
 
