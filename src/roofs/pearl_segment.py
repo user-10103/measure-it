@@ -123,16 +123,23 @@ def _icm(R: np.ndarray, neigh: np.ndarray, labels: np.ndarray,
     return labels
 
 
-def _alpha_expansion(R, edges, labels, smooth, label_cost):
-    """Optional higher-quality optimizer via pygco (alpha-expansion)."""
+def _alpha_expansion(R, edges, labels, smooth):
+    """Global optimizer via pygco alpha-expansion (data + Potts smoothness).
+
+    NOTE: pygco's cut_general_graph has NO label-cost parameter, so the MDL /
+    "fewest facets" term is enforced by the caller pruning under-supported planes
+    between iterations (the refit loop drops planes below min_inliers).
+    """
     import pygco
-    unary = (R * 50).astype(np.int32)
-    ew = np.full(len(edges), int(smooth * 50), dtype=np.int32)
+    unary = np.ascontiguousarray((R * 50.0).astype(np.int32))
+    ew = np.full(len(edges), max(1, int(smooth * 50)), dtype=np.int32)
     L = R.shape[1]
-    pw = (1 - np.eye(L)).astype(np.int32)
-    return pygco.cut_general_graph(edges.astype(np.int32), ew, unary, pw,
-                                   n_iter=-1, algorithm="expansion",
-                                   label_cost=int(label_cost)).astype(int)
+    pw = (1 - np.eye(L)).astype(np.int32)                # Potts smoothness
+    out = pygco.cut_general_graph(
+        np.ascontiguousarray(edges.astype(np.int32)), ew, unary, pw,
+        n_iter=-1, algorithm="expansion",
+        init_labels=np.ascontiguousarray(labels.astype(np.int32)))
+    return np.asarray(out).astype(int)
 
 
 def segment_facets_pearl(points: np.ndarray, n_candidates: int = 40,
@@ -161,8 +168,9 @@ def segment_facets_pearl(points: np.ndarray, n_candidates: int = 40,
             try:
                 edges = np.array([(i, int(j)) for i in range(len(neigh))
                                   for j in neigh[i] if i < j])
-                labels = _alpha_expansion(R, edges, labels, smooth, label_cost)
-            except Exception:
+                labels = _alpha_expansion(R, edges, labels, smooth)
+            except Exception as _ge:
+                logger.info("graph-cut unavailable (%s) — ICM", _ge)
                 labels = _icm(R, neigh, labels, smooth, label_cost)
         else:
             labels = _icm(R, neigh, labels, smooth, label_cost)
