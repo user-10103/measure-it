@@ -29,8 +29,8 @@ import logging
 import math
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from shapely.geometry import Polygon
-from shapely.ops import unary_union
+from shapely.geometry import Polygon, LineString
+from shapely.ops import unary_union, polygonize
 
 logger = logging.getLogger(__name__)
 
@@ -218,6 +218,109 @@ def _keep_polygon(g) -> Polygon:
     return max(polys, key=lambda p: p.area) if polys else g
 
 
+# ── plane-intersection arrangement-and-label (roofer/3DBAG pattern) ────────────
+
+def _plane_intersection_segment(pi, pj, outline: Polygon):
+    """The straight line where two planes meet, clipped to the outline.
+
+    Planes ``z = a·x + b·y + c`` meet where
+    ``(ai-aj)x + (bi-bj)y + (ci-cj) = 0`` — one straight line in the xy plane,
+    i.e. the physical ridge/hip/valley. Returns a LineString clipped to
+    ``outline`` or None if the planes are ~parallel. Requires REAL plane
+    intercepts (LiDAR fits); synthesized ``c=0`` planes give meaningless lines.
+    """
+    da, db, dc = pi.a - pj.a, pi.b - pj.b, pi.c - pj.c
+    n = math.hypot(da, db)
+    if n < 1e-9:
+        return None                                    # parallel: no edge line
+    cx, cy = outline.centroid.x, outline.centroid.y
+    t = (da * cx + db * cy + dc) / (n * n)             # foot of perp from centroid
+    px, py = cx - da * t, cy - db * t
+    ux, uy = -db / n, da / n                           # direction along the line
+    L = 2.0 * outline.length
+    seg = LineString([(px - ux * L, py - uy * L),
+                      (px + ux * L, py + uy * L)]).intersection(outline)
+    return seg if not seg.is_empty else None
+
+
+def arrangement_facets(outline: Polygon, facet_polygons, planes):
+    """Partition the outline by plane-intersection lines, then label each cell
+    with a plane (the roofer/3DBAG pattern).
+
+    Because adjacent cells are cut by the *same* line, neighbouring facets share
+    EXACT coincident edges by construction — so ridges/hips/valleys come out as
+    single straight edges instead of the fragmented per-facet copies that
+    independent regularization produces.
+
+    Returns ``(facet_polygons, boundaries_by_id, planes)`` or ``None`` to signal
+    the caller to fall back to the partition+regularize path.
+    """
+    if outline is None or not facet_polygons or planes is None:
+        return None
+    if len(planes) != len(facet_polygons):
+        return None
+
+    ids = [fid for fid, _ in facet_polygons]
+    cands = [_valid(p) for _, p in facet_polygons]
+    outline = _keep_polygon(outline.simplify(0.3)) or outline
+
+    # cut lines = plane-intersection lines between ADJACENT candidate pairs
+    cuts = []
+    K = len(planes)
+    for i in range(K):
+        for j in range(i + 1, K):
+            ci, cj = cands[i], cands[j]
+            if ci is None or cj is None:
+                continue
+            if not ci.buffer(0.5).intersects(cj):      # not adjacent -> no shared edge
+                continue
+            seg = _plane_intersection_segment(planes[i], planes[j], outline)
+            if seg is not None and not seg.is_empty:
+                cuts.append(seg)
+
+    merged = unary_union([outline.boundary] + cuts)
+    cells = [c for c in polygonize(merged)
+             if outline.contains(c.representative_point())]
+    if not cells:
+        return None
+
+    # label each cell with the candidate facet it overlaps most
+    plane_by_id = {ids[k]: planes[k] for k in range(K)}
+    cand_by_id = {ids[k]: cands[k] for k in range(K)}
+    label = {}
+    for cell in cells:
+        best_fid, best_area = None, 0.0
+        for k, cand in enumerate(cands):
+            if cand is None:
+                continue
+            try:
+                a = cell.intersection(cand).area
+            except Exception:
+                a = 0.0
+            if a > best_area:
+                best_area, best_fid = a, ids[k]
+        if best_fid is None:                           # cell overlaps no candidate
+            valid_ids = [fid for fid in ids if cand_by_id[fid] is not None]
+            if not valid_ids:
+                continue
+            best_fid = min(valid_ids,
+                           key=lambda fid: cell.centroid.distance(
+                               cand_by_id[fid].centroid))
+        label.setdefault(best_fid, []).append(cell)
+
+    # dissolve cells sharing a label -> one clean facet per plane
+    out_facets, out_planes = [], []
+    for fid, cell_list in label.items():
+        poly = _keep_polygon(unary_union(cell_list))
+        if poly is None or poly.is_empty or poly.area < 0.5:
+            continue
+        out_facets.append((fid, poly))
+        out_planes.append(plane_by_id[fid])
+    if not out_facets:
+        return None
+    return out_facets, dict(out_facets), out_planes
+
+
 # ── public entry point (mirrors pipeline.py:576-887 contract) ──────────────────
 
 def reconstruct_facets(
@@ -251,6 +354,21 @@ def reconstruct_facets(
     """
     if not facet_polygons:
         return [], {}, planes_for_poly
+
+    # Preferred: plane-intersection arrangement-and-label. Needs the outline and
+    # per-facet planes with REAL intercepts (LiDAR fits). Produces clean shared
+    # edges; falls through to partition+regularize on any failure.
+    if outline_native is not None and planes_for_poly and \
+            len(planes_for_poly) == len(facet_polygons):
+        try:
+            res = arrangement_facets(_valid(outline_native), facet_polygons,
+                                     planes_for_poly)
+            if res is not None and res[0]:
+                logger.info("reconstruct_facets: arrangement-and-label -> "
+                            "%d facet(s)", len(res[0]))
+                return res
+        except Exception as e:  # noqa: BLE001 - never fail the pipeline
+            logger.warning("arrangement_facets failed (%s) — partition fallback", e)
 
     ids = [fid for fid, _ in facet_polygons]
     polys = [_valid(p) for _, p in facet_polygons]

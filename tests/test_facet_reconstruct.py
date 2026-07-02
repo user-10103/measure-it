@@ -151,6 +151,31 @@ def test_no_outline_partitions_against_each_other(jagged_facets):
         assert p.is_valid and p.area > 0.5
 
 
+def test_arrangement_cleans_jagged_candidates():
+    # Real fix: even with JAGGED candidate facets, the plane-intersection line
+    # (ridge at x=10) re-splits the outline into two clean, tiling facets.
+    facets_in, planes, outline = _gable()
+    jagged = [(fid, _jag(p, amp=0.3, n=3)) for fid, p in facets_in]
+    facets, boundaries, out_planes = reconstruct_facets(outline, jagged, planes)
+    from shapely.ops import unary_union
+    assert len(facets) == 2 and len(out_planes) == 2
+    for _, p in facets:
+        assert p.geom_type == "Polygon" and p.is_valid
+    cov = unary_union([p for _, p in facets]).area / outline.area
+    assert cov > 0.98                                  # tiles the roof
+
+
+def test_arrangement_single_clean_ridge():
+    # The whole point: one straight ridge, shared exactly, even from jagged input.
+    facets_in, planes, outline = _gable()
+    jagged = [(fid, _jag(p, amp=0.3, n=3)) for fid, p in facets_in]
+    facets, _, out_planes = reconstruct_facets(outline, jagged, planes)
+    edges = reconstruct_edges(facets, out_planes, outline=outline)
+    ridges = [e for e in edges if e.edge_type == EdgeType.RIDGE]
+    assert len(ridges) == 1, [e.edge_type for e in edges]
+    assert abs(ridges[0].length_m - 10.0) < 1.5        # spans the roof depth
+
+
 def test_no_multipolygon_output():
     # Regression for the live-run crash: a facet that gets trimmed into two
     # disjoint pieces (a MultiPolygon) must be coerced to a single Polygon, or
