@@ -66,11 +66,16 @@ def prep_split(coco_json, images_dir, out_dir, concept):
         anns.append(a)
 
     used = {a["image_id"] for a in anns}
+    img_root = os.path.realpath(images_dir)
     imgs = []
     for im in d.get("images", []):
         if im["id"] not in used:
             continue
-        src = os.path.join(images_dir, im["file_name"])
+        # Resolve + contain: reject file_name that escapes images_dir via
+        # ../ or an absolute path (path-traversal from an untrusted COCO json).
+        src = os.path.realpath(os.path.join(images_dir, im["file_name"]))
+        if not (src == img_root or src.startswith(img_root + os.sep)):
+            continue
         if not os.path.exists(src):
             continue
         base = os.path.basename(im["file_name"])
