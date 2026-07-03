@@ -1133,6 +1133,13 @@ def process_address(
             roof_metrics["edges"] = edge_summary
             roof_metrics["n_edges"] = len(edges)
             roof_metrics["n_facets"] = len(facet_polygons)
+            # Standardized headline areas (always present under these names so
+            # downstream consumers/reports don't get None from a key mismatch).
+            # plan_area_m2   = flat footprint area (the ~86%-accurate deliverable)
+            # total_area_m2  = pitch-corrected roof SURFACE area (roofing headline)
+            roof_metrics["plan_area_m2"] = round(footprint_area, 2)
+            roof_metrics["total_area_m2"] = roof_metrics.get(
+                "total_surface_area_m2", 0.0)
 
             logger.info(
                 f"Roof analysis complete: {len(facets)} facets, "
@@ -1144,6 +1151,13 @@ def process_address(
             facet_metrics_dicts = []
             edge_dicts = []
             vegetation_pct = 0.0
+            # Preserve the plan (footprint) area even when facet analysis fails —
+            # it's the core deliverable and doesn't depend on facets/model.
+            roof_metrics = {
+                "plan_area_m2": round(footprint_area, 2),
+                "total_area_m2": None,     # needs facets (pitch) — unavailable here
+                "n_facets": 0, "n_edges": 0,
+            }
 
         # Step 9: QC and Export
         logger.info("\n[9/9] QUALITY CONTROL & EXPORT")
