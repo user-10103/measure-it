@@ -205,7 +205,10 @@ def masks_to_facets(
             continue
         facets.append(Facet(facet_id=new_id, points=None, label=int(fid), polygon=poly))
 
-    # 7. regularize (straight edges) — reuse the LiDAR-path regularizer
+    # 7. regularize (straight edges) — reuse the LiDAR-path regularizer.
+    # If the outline came in as a mask, derive its polygon so regularize still runs.
+    if regularize and outline_poly is None and omask is not None:
+        outline_poly = _region_to_polygon(omask, simplify_px)
     if regularize and outline_poly is not None and facets:
         try:
             from src.roofs.facet_reconstruct import regularize_facets
