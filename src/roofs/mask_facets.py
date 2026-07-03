@@ -120,6 +120,12 @@ def _region_to_polygon(mask: np.ndarray, simplify_px: float):
     return poly
 
 
+def outline_polygon(mask, simplify_px: float = 2.0):
+    """Largest polygon of a single boolean region (e.g. a SAM 'roof' mask), in
+    pixel coords. Public entry for the roof-outline path."""
+    return _region_to_polygon(np.asarray(mask, dtype=bool), simplify_px)
+
+
 def _outline_mask(outline, hw: Tuple[int, int]) -> Optional[np.ndarray]:
     """Rasterise a roof-outline polygon (pixel coords) to a bool mask, or pass a
     mask through unchanged. Returns None if no outline given."""
