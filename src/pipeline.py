@@ -432,6 +432,19 @@ def process_address(
             naip_seg_used = False
             naip_clipped_tif = naip_data.get("tif_path")
             _pts_crs_seg = polygon_result.get("metadata", {}).get("points_crs")
+            # Roof outline in the LiDAR (metric) CRS — used to clip/regularize
+            # LiDAR facets into clean geometry (gap-fill + fallback).
+            _outline_native = None
+            if _pts_crs_seg:
+                try:
+                    from pyproj import CRS as _CRS0, Transformer as _Tr0
+                    from shapely.ops import transform as _shp_tx0
+                    _tf0 = _Tr0.from_crs("EPSG:4326",
+                                         _CRS0.from_user_input(_pts_crs_seg),
+                                         always_xy=True).transform
+                    _outline_native = _shp_tx0(_tf0, final_polygon)
+                except Exception as _oe0:
+                    logger.warning(f"outline reproject failed ({_oe0})")
             if model_checkpoint and naip_clipped_tif and _pts_crs_seg:
                 logger.info("Attempting RF-DETR model segmentation…")
                 try:
@@ -445,18 +458,7 @@ def process_address(
                         # Phase C fusion: fill the outline the (sparse) model
                         # missed with LiDAR facets, so the set tiles the roof and
                         # the perimeter (eave/rake) types correctly.
-                        _outline_seg = None
-                        try:
-                            from pyproj import (CRS as _CRS,
-                                                Transformer as _Tr)
-                            from shapely.ops import transform as _shp_tx
-                            _tf = _Tr.from_crs(
-                                "EPSG:4326", _CRS.from_user_input(_pts_crs_seg),
-                                always_xy=True).transform
-                            _outline_seg = _shp_tx(_tf, final_polygon)
-                        except Exception as _oe:
-                            logger.warning(f"gap-fill outline reproject failed ({_oe})")
-                        facets = gap_fill_facets(_model_facets, _outline_seg, points)
+                        facets = gap_fill_facets(_model_facets, _outline_native, points)
                         naip_seg_used = True
                         logger.info(
                             "Model (RF-DETR) + LiDAR gap-fill: %d facet(s) — "
@@ -512,9 +514,22 @@ def process_address(
                     logger.warning(f"NAIP segmentation failed ({_nse}) — using k-means fallback")
 
             if not naip_seg_used:
-                _fm = "kmeans" if segment_method == "ndsm" else segment_method
-                facets = segment_facets(points, method=_fm)
-                logger.info(f"Segmented into {len(facets)} facet(s) using {segment_method}")
+                # No model/NAIP facets — segment the whole roof from LiDAR as clean
+                # GEOMETRIC polygons (CGAL region-grow+merge, RANSAC fallback), so
+                # even model-miss roofs (e.g. turret/OOD) get facets, not 0 or dots.
+                try:
+                    from src.roofs.cgal_segment import segment_facets_cgal
+                    facets = segment_facets_cgal(points, footprint=_outline_native)
+                    if facets:
+                        logger.info("LiDAR geometric segmentation: %d facet(s)",
+                                    len(facets))
+                    else:
+                        raise ValueError("no facets")
+                except Exception as _cse:
+                    _fm = "kmeans" if segment_method == "ndsm" else segment_method
+                    facets = segment_facets(points, method=_fm)
+                    logger.info("Segmented into %d facet(s) using %s (cgal fell "
+                                "back: %s)", len(facets), _fm, _cse)
 
             # Fit planes to each facet
             planes = []
@@ -527,7 +542,10 @@ def process_address(
                     # NAIP facets carry an accurate polygon boundary derived from
                     # imagery; use it directly instead of the inlier convex hull
                     # (which overcounts and can stray outside the roof outline).
-                    if naip_seg_used and facet.polygon is not None:
+                    if facet.polygon is not None:
+                        # Facet already carries a clean geometric polygon (from
+                        # imagery, or cgal_segment's regularized LiDAR facets) —
+                        # draw it, don't re-hull the points into a convex blob.
                         boundary = facet.polygon
                     else:
                         boundary = extract_inlier_boundary(facet.points, plane.inlier_mask)

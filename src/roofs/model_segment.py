@@ -251,8 +251,11 @@ def gap_fill_facets(model_facets: List[Facet], outline_native,
                     gap.area, min_points)
         return model_facets
 
-    from src.roofs.segment import segment_facets
-    gap_facets = segment_facets(lidar_points[in_gap], method="kmeans")
+    # Fill the gap with the BEST LiDAR method as clean GEOMETRIC polygons (clipped
+    # to the uncovered region), not k-means height-blobs.
+    from src.roofs.cgal_segment import segment_facets_cgal
+    gap_facets = segment_facets_cgal(lidar_points[in_gap], footprint=gap,
+                                     min_points=min_points)
     nid = max((f.facet_id for f in model_facets), default=0)
     out = list(model_facets)
     for f in gap_facets:
