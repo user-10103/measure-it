@@ -4,6 +4,10 @@ rfdetr==1.4.0.post0  # PINNED: the inference loader (src/roofs/rfdetr_backend.py
                      # the v8 checkpoints target this API. Newer rfdetr (1.5+..1.8)
                      # changed predict()/config -> "Key backend" error at inference.
                      # Train AND infer with the same pinned version.
+transformers==4.44.2 # PINNED: rfdetr 1.4.0.post0 leaves transformers unpinned;
+                     # transformers >=4.49 removed find_pruneable_heads_and_indices
+                     # from pytorch_utils -> model inference throws and silently
+                     # falls back to LiDAR. 4.44.2 still exports it.
 pycocotools
 boto3             # chip download from S3
 supervision       # used by rfdetr for COCO loading/eval
