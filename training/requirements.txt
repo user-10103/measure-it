@@ -1,6 +1,9 @@
 # RF-DETR-Seg fine-tune deps (RunPod). Torch+CUDA come from the RunPod base image
 # (use a PyTorch 2.x CUDA template); install the rest on top.
-rfdetr            # Apache-2.0; provides RFDETRSegPreview (DINOv2 backbone)
+rfdetr==1.4.0.post0  # PINNED: the inference loader (src/roofs/rfdetr_backend.py) and
+                     # the v8 checkpoints target this API. Newer rfdetr (1.5+..1.8)
+                     # changed predict()/config -> "Key backend" error at inference.
+                     # Train AND infer with the same pinned version.
 pycocotools
 boto3             # chip download from S3
 supervision       # used by rfdetr for COCO loading/eval

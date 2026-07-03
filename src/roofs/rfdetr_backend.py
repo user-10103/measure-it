@@ -145,6 +145,15 @@ def _load_model(checkpoint_path: str) -> Any:
     logger.info(f"Checkpoint num_classes={num_classes}")
 
     # --- Initialise model skeleton -------------------------------------------
+    import rfdetr
+    _EXPECTED_RFDETR = "1.4.0.post0"
+    _ver = getattr(rfdetr, "__version__", "unknown")
+    if _ver != _EXPECTED_RFDETR:
+        logger.warning(
+            "rfdetr version is %s but this loader + the v8 checkpoints target %s. "
+            "Newer rfdetr (1.5+) changed predict()/config and fails at inference "
+            "with 'Key backend'. Fix: pip install rfdetr==%s",
+            _ver, _EXPECTED_RFDETR, _EXPECTED_RFDETR)
     from rfdetr import RFDETRSegLarge
     model = RFDETRSegLarge(resolution=504)
     inner = model.model.model  # LWDETR nn.Module
