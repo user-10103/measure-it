@@ -1,0 +1,162 @@
+"""One call: user input (address / coords / maps link) -> the 6-page roof report.
+
+This is the deployment code path — the SAME one the Colab demo converged on,
+folded into the repo so AWS, Colab, and tests all run identical logic:
+
+    resolve_location -> building footprint -> NAIP tile (S3, requester-pays)
+    -> LOOSE roof chip (~18 m buffer; tight crops starve the facet model)
+    -> segment_roof_sam (zero-shot outline + fine-tuned facets,
+       score_thr=0.15, whole-roof-mask drop)
+    -> outline fallback (facet union) so eaves always exist
+    -> sam_roof_to_pdf -> the 6-page report (Roofr-style: cover / diagram /
+       lengths / areas / pitch / summary)
+
+The GPU predictors and the chip fetcher are injected, so everything below the
+model is unit-testable without a GPU or network.
+"""
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable, Dict, Optional, Tuple, Union
+
+import numpy as np
+
+from src.output.sam_report import facets_to_report_input
+from src.output.pdf_report import generate_report
+from src.roofs.sam_segment import segment_roof_sam
+from src.utils.resolve_location import resolve_location
+
+logger = logging.getLogger(__name__)
+
+# Colab-validated defaults (2026-07-04)
+CHIP_BUFFER_M = 18.0     # loose crop — the facet model needs context
+FOOTPRINT_BUFFER_M = 60  # building-selection search radius
+SCORE_THR = 0.15         # in-training checkpoint scores low; NMS dedupes
+
+
+def fetch_chip(lat: float, lon: float, state: str, out_dir: Path,
+               chip_buffer_m: float = CHIP_BUFFER_M):
+    """NAIP roof chip for a location -> (chip HxWx3 uint8, Affine, png_path)."""
+    import geopandas as gpd
+    import rasterio
+    from PIL import Image
+    from rasterio.mask import mask as rio_mask
+
+    from src.ingestion.naip import get_naip_for_location
+    from src.roofs.select_candidates import select_building
+
+    sel = select_building(lat, lon, buffer_meters=FOOTPRINT_BUFFER_M)
+    footprint = gpd.GeoDataFrame(geometry=[sel["selected"].geometry],
+                                 crs="EPSG:4326")
+    naip_tif, _, _ = get_naip_for_location(lat, lon, state.lower(), footprint,
+                                           output_dir=out_dir)
+    if not naip_tif:
+        raise RuntimeError(f"No NAIP imagery available near ({lat}, {lon})")
+    with rasterio.open(naip_tif) as src:
+        geom = footprint.to_crs(src.crs).geometry.iloc[0].buffer(chip_buffer_m)
+        arr, transform = rio_mask(src, [geom.__geo_interface__], crop=True,
+                                  filled=True)
+    chip = np.transpose(arr[:3], (1, 2, 0)).astype("uint8")
+    png = out_dir / "chip.png"
+    Image.fromarray(chip).save(png)
+    return chip, transform, str(png)
+
+
+def _fallback_outline(roof):
+    """Outline from the facet union when the zero-shot prompt missed — the
+    report then still gets a perimeter (eaves) and the facets tile something."""
+    from shapely.ops import unary_union
+    polys = [f.polygon for f in roof.facets
+             if f.polygon is not None and not f.polygon.is_empty]
+    if not polys:
+        return None
+    u = unary_union(polys)
+    if u.geom_type == "MultiPolygon":
+        u = max(u.geoms, key=lambda g: g.area)
+    return u if u.geom_type == "Polygon" and not u.is_empty else None
+
+
+@dataclass
+class ReportResult:
+    pdf_path: str
+    chip_path: str
+    lat: float
+    lon: float
+    location_source: str
+    num_facets: int
+    outline_found: bool          # zero-shot outline (False = facet-union fallback)
+    plan_area_m2: float
+    edge_totals_m: Dict[str, float] = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return {**self.__dict__}
+
+
+def generate_roof_report(
+    location: Union[str, Tuple[float, float]],
+    state: str,
+    predict_facets,
+    predict_outline=None,
+    out_dir: Union[str, Path] = "output/report",
+    label: Optional[str] = None,
+    chip_fetcher: Callable = fetch_chip,
+    score_thr: float = SCORE_THR,
+    chip_buffer_m: float = CHIP_BUFFER_M,
+) -> ReportResult:
+    """User input -> roof_report.pdf. The whole pipeline, one entry point.
+
+    Args:
+        location: anything a user types (address / "lat, lon" / maps link),
+            or an explicit (lat, lon) tuple.
+        state: 2-letter state for the NAIP archive (e.g. "FL").
+        predict_facets / predict_outline: from
+            ``sam3_predictors.load_sam3_predictors`` (or fakes in tests).
+        chip_fetcher: injected imagery step (network-free in tests).
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if isinstance(location, str):
+        loc = resolve_location(location)
+        lat, lon, source = loc["lat"], loc["lon"], loc["source"]
+        label = label or location
+    else:
+        lat, lon = float(location[0]), float(location[1])
+        source, label = "coordinates", label or f"{lat:.5f}, {lon:.5f}"
+
+    chip, transform, chip_png = chip_fetcher(lat, lon, state, out_dir,
+                                             chip_buffer_m=chip_buffer_m)
+
+    roof = segment_roof_sam(
+        predict_facets, chip, transform=transform,
+        predict_outline=predict_outline,
+        roof_concept="roof", facet_concept="roof facet",
+        score_thr=score_thr, iou_thr=0.5,
+    )
+    outline_found = roof.outline is not None
+    if not outline_found:
+        roof.outline = _fallback_outline(roof)
+        if roof.outline is not None:
+            logger.warning("zero-shot outline missed — using facet-union fallback")
+
+    report_input = facets_to_report_input(roof, label, aerial_image_path=chip_png)
+    pdf_path = out_dir / "roof_report.pdf"
+    generate_report(report_input, str(pdf_path))
+
+    edge_totals: Dict[str, float] = {}
+    for e in report_input["edges"]:
+        edge_totals[e["edge_type"]] = (
+            edge_totals.get(e["edge_type"], 0.0) + e["length_m"])
+    plan_area = sum(f["plan_area_m2"] for f in report_input["facets"])
+
+    logger.info("report: %s -> %d facet(s), outline=%s, %.1f m2 -> %s",
+                label, len(report_input["facets"]), outline_found,
+                plan_area, pdf_path)
+    return ReportResult(
+        pdf_path=str(pdf_path), chip_path=chip_png, lat=lat, lon=lon,
+        location_source=source, num_facets=len(report_input["facets"]),
+        outline_found=outline_found, plan_area_m2=plan_area,
+        edge_totals_m=edge_totals,
+    )
