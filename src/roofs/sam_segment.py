@@ -58,6 +58,7 @@ def segment_roof_sam(
     chip: np.ndarray,
     transform=None,
     *,
+    predict_outline: Optional[PredictFn] = None,
     roof_concept: str = "roof",
     facet_concept: str = "roof facet",
     score_thr: float = 0.65,
@@ -71,9 +72,13 @@ def segment_roof_sam(
     """Run SAM 3 for roof outline + facet polygons.
 
     Args:
-        predict_masks: ``(chip, concept) -> (masks[N,H,W] bool, scores[N])``.
+        predict_masks: FACET predictor ``(chip, concept) -> (masks[N,H,W] bool,
+            scores[N])`` — use the FINE-TUNED SAM 3 here.
         chip: H x W x 3 image.
         transform: optional rasterio ``Affine`` -> output in world CRS (metric).
+        predict_outline: optional separate predictor for the roof OUTLINE — pass
+            ZERO-SHOT (base) SAM 3 here. If None, the facet predictor is used for
+            the outline too (single-model mode).
         roof_concept / facet_concept: the two text prompts.
         score_thr / iou_thr / min_area_frac / simplify_px / regularize / snap_px:
             forwarded to ``masks_to_facets`` for the facet partition.
@@ -82,11 +87,16 @@ def segment_roof_sam(
         ``SamRoof`` with ``outline`` (Polygon), ``facets`` (List[Facet]),
         ``label_map`` (pixel partition), ``georeferenced``.
     """
-    # 1. roof outline — top-scoring "roof" mask
+    # 1. roof outline — top-scoring "roof" mask.
+    # Use predict_outline if given (the design: ZERO-SHOT base SAM 3 for the
+    # outline, which it nails, and the fine-tuned model for facets only —
+    # fine-tuning on facets can drift the "roof" concept). Falls back to the
+    # facet predictor when a separate outline model isn't supplied.
+    _outline_predict = predict_outline or predict_masks
     roof_mask = None
     outline_px = None
     try:
-        r_masks, r_scores = predict_masks(chip, roof_concept)
+        r_masks, r_scores = _outline_predict(chip, roof_concept)
         r_masks = np.asarray([np.asarray(m, bool) for m in r_masks])
         if len(r_masks):
             roof_mask = r_masks[int(np.argmax(np.asarray(r_scores)))]

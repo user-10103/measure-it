@@ -67,6 +67,30 @@ def test_georeference_scales_coords():
     assert 60.0 < res.outline.area < 130.0
 
 
+def test_separate_outline_and_facet_predictors():
+    # zero-shot model handles "roof" (outline); fine-tuned handles "roof facet"
+    h = w = 60
+    roof = _rect(h, w, 10, 50, 10, 50)
+    f1 = _rect(h, w, 10, 30, 10, 50)
+    f2 = _rect(h, w, 30, 50, 10, 50)
+    chip = np.zeros((h, w, 3), np.uint8)
+    calls = {"outline": [], "facet": []}
+
+    def outline_predict(chip, concept):      # the "zero-shot" model
+        calls["outline"].append(concept)
+        return np.asarray([roof]), np.asarray([0.95])
+
+    def facet_predict(chip, concept):        # the "fine-tuned" model
+        calls["facet"].append(concept)
+        return np.asarray([f1, f2]), np.asarray([0.9, 0.9])
+
+    res = segment_roof_sam(facet_predict, chip, predict_outline=outline_predict,
+                           regularize=False, min_area_frac=0.0)
+    assert calls["outline"] == ["roof"]          # outline model got ONLY the roof prompt
+    assert calls["facet"] == ["roof facet"]       # facet model got ONLY the facet prompt
+    assert res.outline is not None and len(res.facets) == 2
+
+
 def test_no_roof_mask_still_returns_facets():
     # roof prompt yields nothing -> no outline, but facets still produced (unclipped)
     h = w = 60
