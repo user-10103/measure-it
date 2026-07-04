@@ -50,9 +50,15 @@ def prep_split(coco_json, images_dir, out_dir, concept):
     if not facet_ids:                               # no explicit facet class -> keep all
         facet_ids = {c["id"] for c in cats}
 
+    # FAIL LOUD if pycocotools is missing: a broken import here is what silently
+    # dropped EVERY mask in the original prep run and produced box-only data that
+    # trained the mask losses to NaN. Never let that be silent again.
+    from pycocotools import mask as _mu
     dims = {im["id"]: (im.get("height"), im.get("width")) for im in d.get("images", [])}
     anns = []
     dropped = 0
+    seg_src = 0   # annotations that carried a source mask
+    seg_ok = 0    # ... that successfully converted to RLE
     for a in d.get("annotations", []):
         if a["category_id"] not in facet_ids:
             continue
@@ -66,18 +72,26 @@ def prep_split(coco_json, images_dir, out_dir, concept):
         a = dict(a); a["category_id"] = 1
         h, w = dims.get(a["image_id"], (None, None))
         if a.get("segmentation") is not None and h and w:
-            try:
-                a["segmentation"] = _to_rle(a["segmentation"], h, w)
-                a["iscrowd"] = 0
-                from pycocotools import mask as _mu   # drop empty masks too
-                if _mu.area(a["segmentation"]) < 1:
-                    dropped += 1
-                    continue
-            except Exception:
-                a.pop("segmentation", None)
+            seg_src += 1
+            # NO bare except: a conversion failure must surface, never silently
+            # yield a mask-less annotation (the epoch-9 NaN root cause).
+            a["segmentation"] = _to_rle(a["segmentation"], h, w)
+            a["iscrowd"] = 0
+            if _mu.area(a["segmentation"]) < 1:   # empty mask -> 0/0 dice -> NaN
+                dropped += 1
+                continue
+            seg_ok += 1
         anns.append(a)
+    # Hard guard: a segmentation-bearing source that yields zero masks is the
+    # silent-drop failure. Refuse to write box-only data that NaNs the mask loss.
+    if seg_src > 0 and seg_ok == 0:
+        raise RuntimeError(
+            f"{coco_json}: {seg_src} source masks but 0 converted to RLE — "
+            "pycocotools/_to_rle broken in this env; refusing to write mask-less data")
     if dropped:
         print(f"  dropped {dropped} degenerate annotation(s) (zero-area bbox / empty mask)")
+    if seg_src:
+        print(f"  converted {seg_ok}/{seg_src} source masks -> RLE")
 
     used = {a["image_id"] for a in anns}
     img_root = os.path.realpath(images_dir)
