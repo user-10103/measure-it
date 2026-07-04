@@ -148,6 +148,7 @@ def masks_to_facets(
     score_thr: float = 0.65,
     iou_thr: float = 0.5,
     min_area_frac: float = 0.004,
+    max_area_frac: float = 0.9,
     simplify_px: float = 2.0,
     fill_to_outline: bool = True,
     regularize: bool = True,
@@ -187,6 +188,21 @@ def masks_to_facets(
         return [], np.zeros(hw, np.int32)
     masks, scores = masks[keep0], scores[keep0]
 
+    # rasterise the outline once (used by the area filters + clipping below)
+    omask = _outline_mask(outline, hw)
+    roof_px = float(omask.sum()) if omask is not None else float(hw[0] * hw[1])
+
+    # 1b. drop whole-roof masks. SAM often emits a mask spanning (nearly) the
+    # entire roof alongside the individual facets; in the score-argmax partition
+    # that super-mask swallows every facet, collapsing the roof to one region.
+    # Remove masks larger than max_area_frac of the roof — but never all of them
+    # (a genuinely single-facet roof keeps its one mask).
+    if max_area_frac and roof_px > 0 and len(masks) > 1:
+        areas = masks.reshape(len(masks), -1).sum(axis=1).astype(float)
+        small = areas <= max_area_frac * roof_px
+        if small.any():
+            masks, scores = masks[small], scores[small]
+
     # 2. mask-NMS
     kept = _nms(masks, scores, iou_thr)
 
@@ -194,7 +210,6 @@ def masks_to_facets(
     lbl = _partition(masks, kept, hw)
 
     # 4. clip to roof outline (drop off-roof spillover)
-    omask = _outline_mask(outline, hw)
     if omask is not None:
         lbl[~omask] = 0
 

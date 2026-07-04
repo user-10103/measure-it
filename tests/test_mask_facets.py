@@ -101,3 +101,28 @@ def test_empty_and_all_below_threshold():
     m = np.zeros((16, 16), bool); m[2:6, 2:6] = True
     facets, _ = masks_to_facets([m], [0.1], score_thr=0.65)
     assert facets == []
+
+
+def test_whole_roof_mask_does_not_swallow_facets():
+    # SAM emits a whole-roof mask (top score) alongside the real facets; it must
+    # not collapse them into one region (the report "1 facet" bug).
+    from shapely.geometry import box
+    h = w = 100
+    roof = box(20, 20, 80, 80)
+    whole = _rect(h, w, 20, 80, 20, 80)                       # spans the roof
+    quads = [_rect(h, w, 20, 50, 20, 50), _rect(h, w, 20, 50, 50, 80),
+             _rect(h, w, 50, 80, 20, 50), _rect(h, w, 50, 80, 50, 80)]
+    facets, _ = masks_to_facets([whole] + quads, [0.92, 0.7, 0.68, 0.66, 0.64],
+                                outline=roof, score_thr=0.15, regularize=False)
+    assert len(facets) == 4                                   # not 1
+
+
+def test_single_facet_roof_survives_area_filter():
+    # a roof whose only mask spans the whole roof must keep its one facet, not 0
+    from shapely.geometry import box
+    h = w = 60
+    roof = box(10, 10, 50, 50)
+    whole = _rect(h, w, 10, 50, 10, 50)
+    facets, _ = masks_to_facets([whole], [0.9], outline=roof,
+                                score_thr=0.15, regularize=False)
+    assert len(facets) == 1

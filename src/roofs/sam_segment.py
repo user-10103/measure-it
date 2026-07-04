@@ -64,6 +64,7 @@ def segment_roof_sam(
     score_thr: float = 0.65,
     iou_thr: float = 0.5,
     min_area_frac: float = 0.004,
+    max_area_frac: float = 0.9,
     simplify_px: float = 2.0,
     fill_to_outline: bool = True,
     regularize: bool = True,
@@ -109,8 +110,8 @@ def segment_roof_sam(
     facets, lbl = masks_to_facets(
         f_masks, f_scores, outline=roof_mask,
         score_thr=score_thr, iou_thr=iou_thr, min_area_frac=min_area_frac,
-        simplify_px=simplify_px, fill_to_outline=fill_to_outline,
-        regularize=regularize, snap_px=snap_px,
+        max_area_frac=max_area_frac, simplify_px=simplify_px,
+        fill_to_outline=fill_to_outline, regularize=regularize, snap_px=snap_px,
     )
 
     # 3. georeference (pixel -> world) if a transform is supplied
