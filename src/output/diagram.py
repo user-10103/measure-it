@@ -19,7 +19,14 @@ logger = logging.getLogger(__name__)
 
 PITCHED_FILL = (212, 226, 245)
 FLAT_FILL = (242, 242, 242)
+# distinct per-facet fills (pastel tab20 — light enough to keep dark labels legible)
+FACET_PALETTE = [
+    (174, 199, 232), (255, 187, 120), (152, 223, 138), (255, 152, 150),
+    (197, 176, 213), (247, 182, 210), (219, 219, 141), (158, 218, 229),
+    (196, 176, 148), (206, 219, 156), (240, 190, 130), (180, 205, 230),
+]
 OUTLINE = (70, 110, 165)
+ROOF_OUTLINE = (25, 55, 110)      # zero-shot roof outline -> bold boundary over the facets
 REVIEW_OUTLINE = (230, 140, 30)   # steep/uncertain facet -> verify in oblique
 LABEL_RGB = (40, 40, 40)
 
@@ -42,6 +49,8 @@ def _bounds(report_input: dict) -> Optional[Tuple[float, float, float, float]]:
     for e in report_input.get("edges", []):
         for x, y in e.get("geometry_xy", []):
             xs.append(x); ys.append(y)
+    for x, y in report_input.get("outline_xy", []):
+        xs.append(x); ys.append(y)
     if not xs:
         return None
     return min(xs), min(ys), max(xs), max(ys)
@@ -76,15 +85,21 @@ def render_diagram(report_input: dict, mode: str = "plain",
     tx = _make_transform(bounds, size, margin)
     f_small, f_lab = _font(11), _font(13)
 
-    # facets
-    for f in report_input.get("facets", []):
+    # facets — each one its own colour (like the model overlay); flat stays grey
+    for i, f in enumerate(report_input.get("facets", [])):
         poly = f.get("polygon_xy", [])
         if len(poly) < 3:
             continue
         pts = [tx(x, y) for x, y in poly]
-        fill = FLAT_FILL if f.get("is_flat") else PITCHED_FILL
+        fill = FLAT_FILL if f.get("is_flat") else FACET_PALETTE[i % len(FACET_PALETTE)]
         edge = REVIEW_OUTLINE if f.get("needs_review") else OUTLINE
         draw.polygon(pts, fill=fill, outline=edge)
+
+    # zero-shot roof outline — bold boundary drawn over the facet fills
+    outline_xy = report_input.get("outline_xy", [])
+    if len(outline_xy) >= 3:
+        opts = [tx(x, y) for x, y in outline_xy]
+        draw.line(opts + [opts[0]], fill=ROOF_OUTLINE, width=4)
 
     # edges (colored in length mode, otherwise the facet outlines carry the shape)
     for e in report_input.get("edges", []):

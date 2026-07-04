@@ -58,9 +58,11 @@ def facets_to_report_input(sam_roof, address: str,
     # (facet-to-facet) edges can't be typed as ridge/hip/valley without pitch, so
     # we omit them rather than mislabel. They return with the LiDAR path.
     edges: List[dict] = []
+    outline_xy: List[list] = []
     outline = _largest(getattr(sam_roof, "outline", None))
     if outline is not None:
         ring = list(outline.exterior.coords)
+        outline_xy = [list(pt) for pt in ring]
         for (x0, y0), (x1, y1) in zip(ring[:-1], ring[1:]):
             length = math.hypot(x1 - x0, y1 - y0)
             if length <= 0:
@@ -75,6 +77,7 @@ def facets_to_report_input(sam_roof, address: str,
         "address": address,
         "facets": facets,
         "edges": edges,
+        "outline_xy": outline_xy,      # zero-shot roof outline -> bold boundary in the diagram
         "aerial_image_path": aerial_image_path,
     }
 
