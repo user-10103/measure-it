@@ -31,10 +31,7 @@ FUSED_NEW = (
 MATCH_OLD = "    i, j = linear_sum_assignment(cost)"
 MATCH_NEW = (
     "    if not np.all(np.isfinite(cost)):\n"
-    "        import logging as _lg\n"
-    "        _lg.getLogger(__name__).warning(\n"
-    '            "matcher: %d non-finite cost entries -> 1e9",\n'
-    "            int((~np.isfinite(cost)).sum()))\n"
+    '        print(f"[matcher] {int((~np.isfinite(cost)).sum())} non-finite cost entries -> 1e9", flush=True)\n'
     "        cost = np.nan_to_num(cost, nan=1e9, posinf=1e9, neginf=1e9)\n"
     "    i, j = linear_sum_assignment(cost)"
 )
