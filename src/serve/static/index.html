@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>measure-it — Roof Report</title>
+<style>
+  :root{
+    --navy:#1c3a5e; --amber:#c07f1e; --teal:#2a8f8b;
+    --bg:#f6f4ef; --panel:#fff; --ink:#1a2230; --muted:#5c6572; --line:#e4ded3;
+    --err:#b3372c;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:"Segoe UI",-apple-system,Roboto,Helvetica,Arial,sans-serif;line-height:1.55}
+  .wrap{max-width:640px;margin:0 auto;padding:48px 20px 64px}
+  header{margin-bottom:28px}
+  .brand{font-size:.78rem;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--amber)}
+  h1{font-size:1.7rem;margin:.2em 0 .1em;color:var(--navy)}
+  .sub{color:var(--muted);margin:0}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+    padding:22px;box-shadow:0 1px 2px rgba(20,30,45,.05),0 8px 24px rgba(20,30,45,.05)}
+  .tabs{display:flex;gap:8px;margin-bottom:16px}
+  .tab{flex:1;padding:8px 0;text-align:center;border:1px solid var(--line);border-radius:8px;
+    background:none;font:inherit;font-weight:600;color:var(--muted);cursor:pointer}
+  .tab.on{border-color:var(--navy);color:var(--navy);background:#eef3f9}
+  label{display:block;font-size:.85rem;font-weight:600;margin:12px 0 4px}
+  input[type=text],select{width:100%;padding:10px 12px;font:inherit;border:1px solid var(--line);
+    border-radius:8px;background:#fcfbf8}
+  input:focus,select:focus{outline:2px solid var(--navy);outline-offset:1px}
+  .row{display:flex;gap:12px}.row>div{flex:1}.row>div.narrow{flex:0 0 110px}
+  .hint{font-size:.8rem;color:var(--muted);margin-top:4px}
+  .drop{border:2px dashed var(--line);border-radius:10px;padding:26px;text-align:center;
+    color:var(--muted);cursor:pointer;margin-top:12px}
+  .drop.on{border-color:var(--teal);color:var(--teal)}
+  button.go{width:100%;margin-top:18px;padding:13px;font:inherit;font-size:1.05rem;font-weight:700;
+    color:#fff;background:var(--navy);border:0;border-radius:9px;cursor:pointer}
+  button.go:disabled{opacity:.55;cursor:wait}
+  .status{margin-top:14px;font-size:.92rem;color:var(--teal);min-height:1.4em}
+  .status.err{color:var(--err)}
+  .result{margin-top:22px;display:none}
+  .result img{width:100%;border-radius:10px;border:1px solid var(--line)}
+  .stats{display:flex;gap:10px;margin:14px 0;text-align:center}
+  .stat{flex:1;background:#f4f7fa;border-radius:9px;padding:10px 6px}
+  .stat b{display:block;font-size:1.25rem;color:var(--navy);font-variant-numeric:tabular-nums}
+  .stat span{font-size:.74rem;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+  .edges{font-size:.88rem;color:var(--muted);margin:6px 0 14px}
+  a.dl{display:block;text-align:center;padding:12px;background:var(--amber);color:#fff;
+    font-weight:700;border-radius:9px;text-decoration:none}
+  a.dl.off{display:none}
+  .note{font-size:.8rem;color:var(--muted);margin-top:10px}
+  footer{margin-top:26px;font-size:.78rem;color:var(--muted);text-align:center}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand">measure-it</div>
+    <h1>Roof Measurement Report</h1>
+    <p class="sub">Type an address — get the full roof report in about a minute.</p>
+  </header>
+
+  <div class="card">
+    <div class="tabs">
+      <button class="tab on" id="tabAddr" type="button">By address</button>
+      <button class="tab" id="tabImg" type="button">Upload an image</button>
+    </div>
+
+    <div id="paneAddr">
+      <label for="loc">Address or coordinates</label>
+      <input type="text" id="loc" placeholder="909 Spring Island Way, Melbourne, FL"
+             autocomplete="street-address">
+      <div class="hint">Tip: you can also paste coordinates from Google Maps
+        (right-click the roof → click the numbers).</div>
+      <div class="row">
+        <div class="narrow">
+          <label for="state">State</label>
+          <select id="state">
+            <option>FL</option><option>AL</option><option>GA</option><option>TX</option>
+            <option>CA</option><option>NC</option><option>SC</option><option>TN</option>
+            <option>VA</option><option>AZ</option><option>CO</option><option>WA</option>
+          </select>
+        </div><div></div>
+      </div>
+    </div>
+
+    <div id="paneImg" style="display:none">
+      <div class="drop" id="drop">Drop an aerial roof photo here, or click to choose
+        <input type="file" id="file" accept="image/*" hidden>
+      </div>
+      <div class="hint" id="fileName"></div>
+      <label for="scale">Meters per pixel <span style="font-weight:400;color:var(--muted)">(optional — enables measured square feet)</span></label>
+      <input type="text" id="scale" placeholder="e.g. 0.6 — leave blank if unknown">
+    </div>
+
+    <button class="go" id="go" type="button">Generate report</button>
+    <div class="status" id="status"></div>
+
+    <div class="result" id="result">
+      <img id="preview" alt="Roof facet preview">
+      <div class="stats">
+        <div class="stat"><b id="sFacets">–</b><span>facets</span></div>
+        <div class="stat"><b id="sArea">–</b><span id="sAreaLbl">sq ft</span></div>
+        <div class="stat"><b id="sSquares">–</b><span>squares</span></div>
+      </div>
+      <div class="edges" id="edges"></div>
+      <a class="dl off" id="dl" href="#" target="_blank">Download the report (PDF)</a>
+      <div class="note" id="note"></div>
+    </div>
+  </div>
+
+  <footer>measure-it · automated roof measurement · pitch via LiDAR coming online</footer>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let mode = 'addr', file = null;
+
+$('tabAddr').onclick = () => setMode('addr');
+$('tabImg').onclick  = () => setMode('img');
+function setMode(m){ mode = m;
+  $('tabAddr').classList.toggle('on', m==='addr');
+  $('tabImg').classList.toggle('on', m==='img');
+  $('paneAddr').style.display = m==='addr' ? '' : 'none';
+  $('paneImg').style.display  = m==='img'  ? '' : 'none';
+}
+const drop = $('drop');
+drop.onclick = () => $('file').click();
+$('file').onchange = e => pick(e.target.files[0]);
+drop.ondragover = e => { e.preventDefault(); drop.classList.add('on'); };
+drop.ondragleave = () => drop.classList.remove('on');
+drop.ondrop = e => { e.preventDefault(); drop.classList.remove('on'); pick(e.dataTransfer.files[0]); };
+function pick(f){ file = f; $('fileName').textContent = f ? `Selected: ${f.name}` : ''; }
+
+const STEPS = ['Locating the roof…','Fetching the aerial image…',
+               'Detecting facets…','Measuring…','Building your report…'];
+let tick = null;
+function progress(on){
+  clearInterval(tick);
+  if(!on){ return; }
+  let i = 0; $('status').className = 'status'; $('status').textContent = STEPS[0];
+  tick = setInterval(() => { i = Math.min(i+1, STEPS.length-1);
+                             $('status').textContent = STEPS[i]; }, 9000);
+}
+
+$('go').onclick = async () => {
+  $('result').style.display = 'none'; $('go').disabled = true; progress(true);
+  try {
+    let resp;
+    if (mode === 'addr') {
+      const location = $('loc').value.trim();
+      if (!location) throw new Error('Please enter an address or coordinates.');
+      resp = await fetch('/api/report', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({location, state: $('state').value})
+      });
+    } else {
+      if (!file) throw new Error('Please choose an image first.');
+      const fd = new FormData();
+      fd.append('file', file);
+      const s = $('scale').value.trim();
+      if (s) fd.append('scale_m_per_px', s);
+      resp = await fetch('/api/report/image', {method: 'POST', body: fd});
+    }
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || 'Something went wrong.');
+    show(data);
+  } catch (e) {
+    $('status').className = 'status err';
+    $('status').textContent = e.message;
+  } finally {
+    clearInterval(tick); $('go').disabled = false;
+  }
+};
+
+function show(d){
+  $('status').textContent = '';
+  $('preview').src = d.preview_url + '?t=' + Date.now();
+  $('sFacets').textContent = d.num_facets;
+  if (d.units_measured) {
+    $('sArea').textContent = d.plan_area_sqft.toLocaleString();
+    $('sAreaLbl').textContent = 'sq ft (plan)';
+    $('sSquares').textContent = d.squares;
+  } else {
+    $('sArea').textContent = '—'; $('sAreaLbl').textContent = 'no scale';
+    $('sSquares').textContent = '—';
+  }
+  const names = {eave:'Eaves', ridge:'Ridges', hip:'Hips', valley:'Valleys'};
+  const parts = Object.entries(d.edge_totals_ft || {})
+    .map(([k,v]) => `${names[k]||k}: ${d.units_measured ? v.toLocaleString()+' ft' : '—'}`);
+  $('edges').textContent = parts.join('   ·   ');
+  const dl = $('dl');
+  if (d.pdf_url) { dl.href = d.pdf_url; dl.classList.remove('off'); }
+  else dl.classList.add('off');
+  $('note').textContent = d.units_measured
+    ? (d.num_pitched ? '' :
+       'Pitch shows as “unspecified” in this report — LiDAR pitch measurement is coming online.')
+    : 'This image has no map scale, so sizes are relative. Use an address (or provide meters-per-pixel) for measured square feet.';
+  $('result').style.display = 'block';
+}
+</script>
+</body>
+</html>

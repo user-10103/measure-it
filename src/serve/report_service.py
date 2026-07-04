@@ -80,7 +80,7 @@ def _fallback_outline(roof):
 
 @dataclass
 class ReportResult:
-    pdf_path: str
+    pdf_path: Optional[str]      # None for scale-less image uploads (no honest sqft)
     chip_path: str
     lat: float
     lon: float
@@ -176,4 +176,71 @@ def generate_roof_report(
         edge_totals_m=edge_totals,
         num_pitched=sum(1 for f in report_input["facets"]
                         if f.get("pitch_string")),
+    )
+
+
+def generate_report_from_image(
+    chip: np.ndarray,
+    predict_facets,
+    predict_outline=None,
+    out_dir: Union[str, Path] = "output/report",
+    label: str = "uploaded roof",
+    scale_m_per_px: Optional[float] = None,
+    score_thr: float = SCORE_THR,
+) -> ReportResult:
+    """User-uploaded aerial image -> report. Honest-units rule:
+
+    * ``scale_m_per_px`` given (e.g. a GeoTIFF's resolution) -> real metric
+      areas -> the full 6-page PDF.
+    * no scale -> a plain JPG has no ground truth for square feet, so we return
+      the facet overlay + counts (pdf_path=None) instead of fabricating units.
+      The address path is the measured product.
+    """
+    from affine import Affine
+    from PIL import Image
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    chip_png = out_dir / "chip.png"
+    Image.fromarray(chip).save(chip_png)
+
+    transform = (Affine(scale_m_per_px, 0, 0, 0, -scale_m_per_px, 0)
+                 if scale_m_per_px else None)
+    roof = segment_roof_sam(
+        predict_facets, chip, transform=transform,
+        predict_outline=predict_outline,
+        roof_concept="roof", facet_concept="roof facet",
+        score_thr=score_thr, iou_thr=0.5,
+    )
+    outline_found = roof.outline is not None
+    if not outline_found:
+        roof.outline = _fallback_outline(roof)
+
+    # facet overlay preview (pixel space) for the result card
+    overlay_png = str(out_dir / "facets.png")
+    if roof.label_map is not None:
+        from src.roofs.mask_facets import render_facets
+        px_facets = roof.facets if transform is None else []
+        render_facets(chip, px_facets, roof.label_map, out_path=overlay_png,
+                      title=label)
+    else:
+        overlay_png = str(chip_png)
+
+    report_input = facets_to_report_input(roof, label,
+                                          aerial_image_path=str(chip_png))
+    pdf_path: Optional[str] = None
+    if scale_m_per_px:                      # metric -> honest sqft -> full PDF
+        pdf_path = str(out_dir / "roof_report.pdf")
+        generate_report(report_input, pdf_path)
+
+    edge_totals: Dict[str, float] = {}
+    for e in report_input["edges"]:
+        edge_totals[e["edge_type"]] = (
+            edge_totals.get(e["edge_type"], 0.0) + e["length_m"])
+    return ReportResult(
+        pdf_path=pdf_path, chip_path=overlay_png, lat=0.0, lon=0.0,
+        location_source="image", num_facets=len(report_input["facets"]),
+        outline_found=outline_found,
+        plan_area_m2=sum(f["plan_area_m2"] for f in report_input["facets"]),
+        edge_totals_m=edge_totals,
     )
