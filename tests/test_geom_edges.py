@@ -24,8 +24,8 @@ def test_valley_from_reflex_corner():
     outline = Polygon([(0, 0), (40, 0), (40, 20), (20, 20), (20, 40), (0, 40)])
     f1 = Polygon([(0, 0), (40, 0), (40, 20), (20, 20), (0, 20)])
     f2 = Polygon([(0, 20), (20, 20), (20, 40), (0, 40)])
-    types = [e["edge_type"] for e in edges_from_outline_and_facets(outline, f1_f2 := [f1, f2])]
-    assert "valley" in types
+    edges = edges_from_outline_and_facets(outline, [f1, f2])
+    assert "valley" in [e["edge_type"] for e in edges]
 
 
 def test_all_edges_have_length_and_geometry():
