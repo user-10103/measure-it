@@ -1,0 +1,81 @@
+"""Fusion is read-only annotation: known synthetic slopes -> exact pitch."""
+import math
+
+import numpy as np
+import pytest
+from shapely.geometry import box
+
+from src.roofs.fuse_sam_lidar import annotate_facets_with_lidar, fuse_into_report_input
+from src.roofs.segment import Facet
+
+
+def _grid_points(poly, z_fn, step=0.5):
+    minx, miny, maxx, maxy = poly.bounds
+    xs, ys = np.meshgrid(np.arange(minx + 0.25, maxx, step),
+                         np.arange(miny + 0.25, maxy, step))
+    x, y = xs.ravel(), ys.ravel()
+    return np.column_stack([x, y, z_fn(x, y)])
+
+
+def test_six_twelve_pitch_recovered_exactly():
+    # z = 0.5*x  -> gradient 0.5 -> rise 6 per 12 run -> "6:12", slope 26.57 deg
+    f = Facet(facet_id=1, polygon=box(0, 0, 10, 10))
+    pts = _grid_points(f.polygon, lambda x, y: 0.5 * x)
+    ann = annotate_facets_with_lidar([f], pts)
+    a = ann[1]
+    assert a["pitch_string"] == "6:12"
+    assert abs(a["slope_deg"] - math.degrees(math.atan(0.5))) < 0.5
+    # sloped area = plan / cos(theta): 100 / cos(26.57deg) ~ 111.8
+    assert abs(a["surface_area_m2"] - 100.0 / math.cos(math.atan(0.5))) < 1.0
+    assert not a["is_flat"]
+
+
+def test_flat_roof_detected():
+    f = Facet(facet_id=1, polygon=box(0, 0, 10, 10))
+    pts = _grid_points(f.polygon, lambda x, y: np.full_like(x, 5.0))
+    a = annotate_facets_with_lidar([f], pts)[1]
+    assert a["is_flat"]
+    assert abs(a["surface_area_m2"] - 100.0) < 0.5      # flat: sloped == plan
+
+
+def test_two_facets_annotated_independently():
+    f1 = Facet(facet_id=1, polygon=box(0, 0, 10, 10))     # 6:12
+    f2 = Facet(facet_id=2, polygon=box(20, 0, 30, 10))    # flat
+    pts = np.vstack([
+        _grid_points(f1.polygon, lambda x, y: 0.5 * x),
+        _grid_points(f2.polygon, lambda x, y: np.full_like(x, 3.0)),
+    ])
+    ann = annotate_facets_with_lidar([f1, f2], pts)
+    assert ann[1]["pitch_string"] == "6:12" and not ann[1]["is_flat"]
+    assert ann[2]["is_flat"]
+
+
+def test_too_few_points_stays_unspecified():
+    f = Facet(facet_id=1, polygon=box(0, 0, 10, 10))
+    pts = np.array([[1.0, 1.0, 0.0], [2.0, 2.0, 1.0], [3.0, 1.0, 0.5]])
+    assert annotate_facets_with_lidar([f], pts) == {}    # absent, not wrong
+
+
+def test_fusion_never_touches_geometry():
+    f = Facet(facet_id=1, polygon=box(0, 0, 10, 10))
+    pts = _grid_points(f.polygon, lambda x, y: 0.5 * x)
+    before = list(f.polygon.exterior.coords)
+    annotate_facets_with_lidar([f], pts)
+    assert list(f.polygon.exterior.coords) == before     # frozen shapes
+
+
+def test_fuse_into_report_input_fills_only_annotated():
+    ri = {"facets": [
+        {"facet_id": 1, "polygon_xy": [[0, 0]], "plan_area_m2": 100.0,
+         "pitch_string": None, "slope_deg": None, "aspect_bin": None,
+         "is_flat": False, "surface_area_m2": None},
+        {"facet_id": 2, "polygon_xy": [[5, 5]], "plan_area_m2": 50.0,
+         "pitch_string": None, "slope_deg": None, "aspect_bin": None,
+         "is_flat": False, "surface_area_m2": None},
+    ]}
+    ann = {1: {"pitch_string": "6:12", "slope_deg": 26.57, "aspect_bin": "E",
+               "is_flat": False, "surface_area_m2": 111.8}}
+    out = fuse_into_report_input(ri, ann)
+    assert out["facets"][0]["pitch_string"] == "6:12"
+    assert out["facets"][0]["polygon_xy"] == [[0, 0]]     # geometry untouched
+    assert out["facets"][1]["pitch_string"] is None       # stays unspecified

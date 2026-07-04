@@ -68,8 +68,14 @@ Either way: nobody ever types a token into a prompt in production.
 
 ## Honest gaps (say them to the client, don't hide them)
 
-- **Pitch** shows "unspecified" and areas are PLAN areas until the LiDAR fusion
-  lands (the Holland Ln benchmark's pitch page needs it).
-- **Eave vs rake** can't be split without slope direction — LiDAR again.
+- **Pitch fusion is BUILT but needs the point feed.** `roofs/fuse_sam_lidar.py`
+  annotates the frozen SAM facets with pitch / sloped area / is_flat (read-only
+  — shapes never change), and `generate_roof_report(..., lidar_points=...)`
+  renders it. Remaining wiring: fetch the roof point cloud (USGS EPT, the
+  original pipeline's `extract_points` path) inside the service and pass it in.
+  Where LiDAR is missing, the report degrades to pitch "unspecified"/plan areas.
+- **Eave vs rake** still merged — the relabel needs per-facet slope direction
+  (the planes from the same fusion) via `edges.classify_edges_from_facets`;
+  note that path has 6 pre-existing test failures (RAKE detection) to fix first.
 - Facet quality reflects the in-training checkpoint; it improves with the
   dataset growth toward ~5,000 labeled roofs.

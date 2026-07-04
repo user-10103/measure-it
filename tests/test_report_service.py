@@ -76,6 +76,31 @@ def test_outline_fallback_from_facet_union(tmp_path):
         assert fh.read(5) == b"%PDF-"
 
 
+def test_lidar_fusion_adds_pitch(tmp_path):
+    # LiDAR grid over the roof in the fake chip's WORLD CRS (0.6 m/px,
+    # origin 500000/3100000, y down); z = 0.5*(x-x0) -> every facet "6:12"
+    xs, ys = np.meshgrid(np.arange(500010.0, 500050.0, 0.5),
+                         np.arange(3099950.0, 3099990.0, 0.5))
+    x, y = xs.ravel(), ys.ravel()
+    pts = np.column_stack([x, y, 0.5 * (x - 500000.0)])
+    res = generate_roof_report(
+        (28.0303, -80.69809), "FL", fake_facets, fake_outline,
+        out_dir=tmp_path, chip_fetcher=fake_chip, lidar_points=pts,
+    )
+    assert res.num_facets == 4
+    assert res.num_pitched == 4                       # every facet got a pitch
+    with open(res.pdf_path, "rb") as fh:
+        assert fh.read(5) == b"%PDF-"
+
+
+def test_without_lidar_num_pitched_zero(tmp_path):
+    res = generate_roof_report(
+        (28.0303, -80.69809), "FL", fake_facets, fake_outline,
+        out_dir=tmp_path, chip_fetcher=fake_chip,
+    )
+    assert res.num_pitched == 0                       # imagery-only floor
+
+
 def test_no_facets_still_produces_pdf(tmp_path):
     res = generate_roof_report(
         (28.0, -80.7), "FL", no_outline, no_outline,

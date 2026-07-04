@@ -89,6 +89,7 @@ class ReportResult:
     outline_found: bool          # zero-shot outline (False = facet-union fallback)
     plan_area_m2: float
     edge_totals_m: Dict[str, float] = field(default_factory=dict)
+    num_pitched: int = 0         # facets with LiDAR pitch (0 = imagery-only report)
 
     def to_dict(self) -> dict:
         return {**self.__dict__}
@@ -104,6 +105,7 @@ def generate_roof_report(
     chip_fetcher: Callable = fetch_chip,
     score_thr: float = SCORE_THR,
     chip_buffer_m: float = CHIP_BUFFER_M,
+    lidar_points=None,
 ) -> ReportResult:
     """User input -> roof_report.pdf. The whole pipeline, one entry point.
 
@@ -114,6 +116,10 @@ def generate_roof_report(
         predict_facets / predict_outline: from
             ``sam3_predictors.load_sam3_predictors`` (or fakes in tests).
         chip_fetcher: injected imagery step (network-free in tests).
+        lidar_points: optional roof point cloud (x,y,z struct or (N,3)) in the
+            chip's world CRS — enables per-facet pitch + true sloped area via
+            read-only fusion (facet shapes are never modified). Without it the
+            report shows pitch "unspecified" (plan areas).
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -142,6 +148,15 @@ def generate_roof_report(
             logger.warning("zero-shot outline missed — using facet-union fallback")
 
     report_input = facets_to_report_input(roof, label, aerial_image_path=chip_png)
+
+    # optional LiDAR fusion: read-only pitch/sloped-area annotation — facet
+    # geometry is frozen by this point ("SAM for shape, LiDAR for pitch")
+    if lidar_points is not None and roof.facets:
+        from src.roofs.fuse_sam_lidar import (
+            annotate_facets_with_lidar, fuse_into_report_input)
+        annotations = annotate_facets_with_lidar(roof.facets, lidar_points)
+        fuse_into_report_input(report_input, annotations)
+
     pdf_path = out_dir / "roof_report.pdf"
     generate_report(report_input, str(pdf_path))
 
@@ -159,4 +174,6 @@ def generate_roof_report(
         location_source=source, num_facets=len(report_input["facets"]),
         outline_found=outline_found, plan_area_m2=plan_area,
         edge_totals_m=edge_totals,
+        num_pitched=sum(1 for f in report_input["facets"]
+                        if f.get("pitch_string")),
     )
