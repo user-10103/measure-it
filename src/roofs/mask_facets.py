@@ -149,6 +149,7 @@ def masks_to_facets(
     iou_thr: float = 0.5,
     min_area_frac: float = 0.004,
     simplify_px: float = 2.0,
+    fill_to_outline: bool = True,
     regularize: bool = True,
     snap_px: float = 3.0,
 ) -> Tuple[List[Facet], np.ndarray]:
@@ -196,6 +197,22 @@ def masks_to_facets(
     omask = _outline_mask(outline, hw)
     if omask is not None:
         lbl[~omask] = 0
+
+    # 4b. tile the outline: fill unclaimed interior with the nearest facet
+    # (constrained Voronoi) so facets partition the roof with no gaps. Requires
+    # an outline (the tiling target) and at least one facet to expand from.
+    if fill_to_outline and omask is not None and (lbl > 0).any():
+        holes = omask & (lbl == 0)
+        if holes.any():
+            try:
+                from scipy.ndimage import distance_transform_edt
+                # for each pixel, index of the nearest non-background (facet) pixel
+                inds = distance_transform_edt(lbl == 0, return_distances=False,
+                                              return_indices=True)
+                nearest = lbl[tuple(inds)]
+                lbl = np.where(holes, nearest, lbl)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("outline tiling fill skipped (%s)", e)
 
     # 5. drop tiny facets
     roof_px = float(omask.sum()) if omask is not None else float(hw[0] * hw[1])

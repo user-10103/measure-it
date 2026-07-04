@@ -67,6 +67,35 @@ def test_min_area_filters_specks():
     assert len(facets) == 1
 
 
+def test_fill_tiles_the_outline():
+    # facets with an interior gap get filled to partition the whole outline
+    from shapely.geometry import box
+    h = w = 80
+    roof = box(20, 20, 60, 60)                 # 40x40 outline
+    top = _rect(h, w, 20, 35, 20, 60)          # leaves rows ~35..45 unclaimed
+    bot = _rect(h, w, 45, 60, 20, 60)
+    facets, lbl = masks_to_facets([top, bot], [0.9, 0.85], outline=roof,
+                                  fill_to_outline=True, regularize=False, min_area_frac=0.0)
+    assert len(facets) == 2
+    # facets tile the outline: union ~ outline area, and no interior hole
+    union = facets[0].polygon.union(facets[1].polygon).area
+    assert union > 0.95 * roof.area
+    assert (lbl[22:58, 22:58] > 0).all()       # interior fully labelled
+    # per-facet areas sum to ~roof area (the internal-consistency guarantee)
+    assert abs(sum(f.polygon.area for f in facets) - roof.area) < 0.1 * roof.area
+
+
+def test_fill_off_leaves_gap():
+    from shapely.geometry import box
+    h = w = 80
+    roof = box(20, 20, 60, 60)
+    top = _rect(h, w, 20, 35, 20, 60)
+    bot = _rect(h, w, 45, 60, 20, 60)
+    _, lbl = masks_to_facets([top, bot], [0.9, 0.85], outline=roof,
+                             fill_to_outline=False, regularize=False, min_area_frac=0.0)
+    assert (lbl[37:43, 25:55] == 0).any()      # middle strip stays unclaimed
+
+
 def test_empty_and_all_below_threshold():
     assert masks_to_facets([], [])[0] == []
     m = np.zeros((16, 16), bool); m[2:6, 2:6] = True
