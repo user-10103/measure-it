@@ -52,8 +52,16 @@ def prep_split(coco_json, images_dir, out_dir, concept):
 
     dims = {im["id"]: (im.get("height"), im.get("width")) for im in d.get("images", [])}
     anns = []
+    dropped = 0
     for a in d.get("annotations", []):
         if a["category_id"] not in facet_ids:
+            continue
+        # Drop degenerate annotations (zero-area bbox). A zero-area target box
+        # yields NaN in the Hungarian giou cost and crashes the matcher mid-train
+        # (scipy: "matrix contains invalid numeric entries"). Filter at the source.
+        bx = a.get("bbox")
+        if bx is not None and (bx[2] <= 1 or bx[3] <= 1):
+            dropped += 1
             continue
         a = dict(a); a["category_id"] = 1
         h, w = dims.get(a["image_id"], (None, None))
@@ -61,9 +69,15 @@ def prep_split(coco_json, images_dir, out_dir, concept):
             try:
                 a["segmentation"] = _to_rle(a["segmentation"], h, w)
                 a["iscrowd"] = 0
+                from pycocotools import mask as _mu   # drop empty masks too
+                if _mu.area(a["segmentation"]) < 1:
+                    dropped += 1
+                    continue
             except Exception:
                 a.pop("segmentation", None)
         anns.append(a)
+    if dropped:
+        print(f"  dropped {dropped} degenerate annotation(s) (zero-area bbox / empty mask)")
 
     used = {a["image_id"] for a in anns}
     img_root = os.path.realpath(images_dir)
