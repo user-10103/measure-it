@@ -15,10 +15,10 @@ pitch arrive when the LiDAR plane fit is wired in — they slot into the same
 """
 from __future__ import annotations
 
-import math
 from typing import List, Optional
 
 from src.output.pdf_report import generate_report
+from src.roofs.geom_edges import edges_from_outline_and_facets
 
 
 def _largest(poly):
@@ -38,10 +38,12 @@ def facets_to_report_input(sam_roof, address: str,
     metric; in pixel space they're pixel units (fine for a visual demo).
     """
     facets: List[dict] = []
+    facet_polys = []
     for f in getattr(sam_roof, "facets", []):
         poly = _largest(getattr(f, "polygon", None))
         if poly is None or poly.is_empty:
             continue
+        facet_polys.append(poly)
         facets.append({
             "facet_id": f.facet_id,
             "polygon_xy": [list(pt) for pt in poly.exterior.coords],
@@ -54,24 +56,12 @@ def facets_to_report_input(sam_roof, address: str,
             "needs_review": bool(getattr(f, "needs_review", False)),
         })
 
-    # Edges: without planes we can only trust the roof outline -> eaves. Internal
-    # (facet-to-facet) edges can't be typed as ridge/hip/valley without pitch, so
-    # we omit them rather than mislabel. They return with the LiDAR path.
-    edges: List[dict] = []
-    outline_xy: List[list] = []
+    # Edges: build the typed edge graph geometrically from the outline + facet
+    # partition (perimeter -> eaves; internal seams -> ridge/hip/valley by corner
+    # convexity). Exact eave-vs-rake split + pitch arrive with the LiDAR path.
     outline = _largest(getattr(sam_roof, "outline", None))
-    if outline is not None:
-        ring = list(outline.exterior.coords)
-        outline_xy = [list(pt) for pt in ring]
-        for (x0, y0), (x1, y1) in zip(ring[:-1], ring[1:]):
-            length = math.hypot(x1 - x0, y1 - y0)
-            if length <= 0:
-                continue
-            edges.append({
-                "edge_type": "eave",
-                "length_m": float(length),
-                "geometry_xy": [[x0, y0], [x1, y1]],
-            })
+    outline_xy = [list(pt) for pt in outline.exterior.coords] if outline is not None else []
+    edges = edges_from_outline_and_facets(outline, facet_polys)
 
     return {
         "address": address,

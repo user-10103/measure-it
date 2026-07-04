@@ -31,9 +31,12 @@ def test_report_input_shape():
         assert k in f
     assert f["plan_area_m2"] > 0
     assert len(f["polygon_xy"]) >= 4                 # closed ring
-    # outline -> eave edges with real lengths + geometry
-    assert len(ri["edges"]) == 4
-    assert all(e["edge_type"] == "eave" and e["length_m"] > 0 for e in ri["edges"])
+    # outline + facet seams -> typed edge graph (eaves + internal ridge/hip)
+    assert len(ri["edges"]) >= 4
+    types = {e["edge_type"] for e in ri["edges"]}
+    assert "eave" in types and (types & {"ridge", "hip", "valley"})
+    assert all(e["length_m"] > 0 for e in ri["edges"])
+    assert ri["outline_xy"]                           # bold outline present
 
 
 def test_generates_a_pdf(tmp_path):
