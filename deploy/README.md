@@ -29,5 +29,8 @@ Open `http://<instance-public-ip>:8000/` — that's the shareable page
 (the security group currently allows only the team's IP; widen deliberately
 when the client should have the link).
 
-Smoke test: type `909 Spring Island Way, Melbourne, FL` (state FL) → expect a
-multi-facet report with the colored diagram + typed edge lengths.
+Smoke test: type `28.0303, -80.69809` (state FL — 909 Spring Island Way) →
+expect a multi-facet report with the colored diagram, typed edge lengths
+(eaves/rakes/hips/ridge), and `num_pitched > 0` (LiDAR pitch is on by default
+via MEASURE_IT_LIDAR=1 — it degrades to "unspecified" where coverage is
+missing, never fails the report).

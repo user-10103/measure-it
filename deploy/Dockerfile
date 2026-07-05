@@ -13,7 +13,8 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     HF_HOME=/opt/models/hf \
     MEASURE_IT_CKPT=/opt/models/sam3_roof_ft.pt \
-    MEASURE_IT_OUTPUT=/data/jobs
+    MEASURE_IT_OUTPUT=/data/jobs \
+    MEASURE_IT_LIDAR=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git curl unzip ca-certificates \
