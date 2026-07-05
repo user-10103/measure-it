@@ -214,6 +214,66 @@ def merge_coplanar_facets(
     return merged, True
 
 
+def absorb_unannotated_orphans(
+    facets: List,
+    annotations: Dict[int, dict],
+    max_frac: float = 0.05,
+    touch_tol: float = 0.5,
+):
+    """Absorb SMALL unverifiable facets into their touching annotated neighbor.
+
+    A facet with no LiDAR annotation (too few points — shadow slivers, canopy
+    gaps, tiling spillover) can't be measured OR merged by evidence, and its
+    seams pollute the edge graph ('unspecified' footage). If it's small
+    (< max_frac of the roof) and touches an annotated facet, fold it into the
+    neighbor sharing the longest boundary. LARGE unannotated facets are kept —
+    deleting significant area would be dishonest. Returns (facets, changed).
+    """
+    from shapely.ops import unary_union
+
+    from src.roofs.segment import Facet
+
+    total = sum(f.polygon.area for f in facets
+                if f.polygon is not None and not f.polygon.is_empty)
+    if total <= 0:
+        return list(facets), False
+    orphans = [f for f in facets if f.facet_id not in annotations
+               and f.polygon is not None and not f.polygon.is_empty
+               and f.polygon.area < max_frac * total]
+    if not orphans:
+        return list(facets), False
+
+    keep = {f.facet_id: f.polygon for f in facets
+            if f not in orphans and f.polygon is not None}
+    absorbed = 0
+    for o in orphans:
+        best_id, best_len = None, 0.0
+        for fid, poly in keep.items():
+            if fid not in annotations:
+                continue
+            if o.polygon.distance(poly) > touch_tol:
+                continue
+            shared = o.polygon.buffer(touch_tol).intersection(poly).area
+            if shared > best_len:
+                best_id, best_len = fid, shared
+        if best_id is None:
+            keep[o.facet_id] = o.polygon        # nothing to join — keep it
+            continue
+        merged = unary_union([keep[best_id].buffer(0.05),
+                              o.polygon.buffer(0.05)]).buffer(-0.05)
+        if merged.geom_type == "MultiPolygon":
+            merged = max(merged.geoms, key=lambda g: g.area)
+        keep[best_id] = merged
+        absorbed += 1
+    if not absorbed:
+        return list(facets), False
+    out = [Facet(facet_id=i, points=None, label=i, polygon=p)
+           for i, (fid, p) in enumerate(sorted(keep.items()), start=1)]
+    logger.info("absorbed %d unverifiable orphan facet(s) into neighbors",
+                absorbed)
+    return out, True
+
+
 def fuse_into_report_input(report_input: dict,
                            annotations: Dict[int, dict]) -> dict:
     """Fill the pitch fields sam_report left as None. Geometry untouched:

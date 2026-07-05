@@ -37,6 +37,13 @@ from src.utils.resolve_location import LocationError, suggest_addresses
 
 logger = logging.getLogger(__name__)
 
+# surface the pipeline's INFO diagnostics (eave levels, anchor overrides,
+# healed-pixel counts, EPT stats) in the server log
+if not logging.getLogger().handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(name)s: %(message)s", datefmt="%H:%M:%S")
+
 STATIC_DIR = Path(__file__).parent / "static"
 JOBS_ROOT = Path(os.getenv("MEASURE_IT_OUTPUT", "output/api_jobs"))
 

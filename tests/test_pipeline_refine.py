@@ -90,6 +90,27 @@ def test_pitched_pitched_valley_stays_valley():
     assert edges[0]["edge_type"] == "valley"
 
 
+# ── orphan absorption ────────────────────────────────────────────────────────
+def test_small_orphan_absorbed_into_neighbor():
+    from src.roofs.fuse_sam_lidar import absorb_unannotated_orphans
+    big = Facet(facet_id=1, polygon=box(0, 0, 20, 10))          # annotated
+    sliver = Facet(facet_id=2, polygon=box(20, 0, 20.8, 10))    # 4% sliver, no ann
+    ann = {1: {"is_flat": False}}
+    out, changed = absorb_unannotated_orphans([big, sliver], ann)
+    assert changed and len(out) == 1
+    # area conserved into the neighbor
+    assert abs(out[0].polygon.area - (200.0 + 8.0)) < 1.5
+
+
+def test_large_orphan_kept():
+    from src.roofs.fuse_sam_lidar import absorb_unannotated_orphans
+    big = Facet(facet_id=1, polygon=box(0, 0, 20, 10))          # annotated
+    huge = Facet(facet_id=2, polygon=box(20, 0, 40, 10))        # 50%, no ann
+    ann = {1: {"is_flat": False}}
+    out, changed = absorb_unannotated_orphans([big, huge], ann)
+    assert not changed and len(out) == 2                        # honesty: keep it
+
+
 # ── aspect-based internal classification ────────────────────────────────────
 def _ann(fid_aspect_flat):
     return {fid: {"aspect_deg": a, "is_flat": fl}

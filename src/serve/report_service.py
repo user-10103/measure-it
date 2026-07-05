@@ -204,9 +204,12 @@ def generate_roof_report(
         # merge facets LiDAR proves are one plane (fixes model over-
         # segmentation; area-conserving; off via MEASURE_IT_PLANE_MERGE=0)
         if _os.getenv("MEASURE_IT_PLANE_MERGE", "1") == "1":
+            from src.roofs.fuse_sam_lidar import absorb_unannotated_orphans
             merged, changed = merge_coplanar_facets(
                 roof.facets, lidar_points, annotations)
-            if changed:
+            # small facets with no LiDAR evidence join their measured neighbor
+            merged, absorbed = absorb_unannotated_orphans(merged, annotations)
+            if changed or absorbed:
                 roof.facets = merged
                 annotations = annotate_facets_with_lidar(merged, lidar_points,
                                               ground_z=ground_z)
