@@ -50,10 +50,14 @@ def _xyz(points) -> np.ndarray:
     return arr[:, :3]
 
 
+TWO_STORY_MIN_EAVE_M = 5.0     # eave above ~5 m of ground = second story
+
+
 def annotate_facets_with_lidar(
     facets: List,
     points,
     min_points: int = MIN_FACET_POINTS,
+    ground_z: Optional[float] = None,
 ) -> Dict[int, dict]:
     """Per-facet pitch annotation. Returns {facet_id: annotation} — facets that
     can't be annotated are simply absent (they keep "unspecified" downstream).
@@ -61,6 +65,9 @@ def annotate_facets_with_lidar(
     Args:
         facets: SAM facets (``.facet_id``, ``.polygon`` in the points' CRS).
         points: LiDAR roof points, structured (x,y,z) or (N,3).
+        ground_z: optional ground elevation (m, same datum as the points).
+            When given, each facet gets ``eave_height_m`` (5th-percentile roof
+            z minus ground) and ``is_two_story``.
     """
     from shapely import contains_xy
 
@@ -98,6 +105,11 @@ def annotate_facets_with_lidar(
             "n_points": n,
             "residual_m": float(plane.residual_median),
         }
+        if ground_z is not None:
+            # eave = the facet's low edge; 5th percentile rides over outliers
+            eave = float(np.percentile(xyz[inside, 2], 5)) - float(ground_z)
+            out[f.facet_id]["eave_height_m"] = eave
+            out[f.facet_id]["is_two_story"] = bool(eave >= TWO_STORY_MIN_EAVE_M)
     logger.info("LiDAR annotated %d/%d facet(s)", len(out), len(facets))
     return out
 
@@ -198,4 +210,7 @@ def fuse_into_report_input(report_input: dict,
         f["aspect_bin"] = ann["aspect_bin"]
         f["is_flat"] = ann["is_flat"]
         f["surface_area_m2"] = ann["surface_area_m2"]
+        if "is_two_story" in ann:
+            f["two_story"] = ann["is_two_story"]
+            f["eave_height_m"] = ann["eave_height_m"]
     return report_input

@@ -78,17 +78,23 @@ def fetch_roof_points(
     ept_url: Optional[str] = None,
     buffer_m: float = 3.0,
     max_nodes: int = MAX_NODES,
-) -> Optional[np.ndarray]:
+    with_ground: bool = False,
+):
     """Roof point cloud for a building -> (N, 3) xyz in ``target_crs``.
 
     Args:
         footprint_wgs84: shapely Polygon of the building (EPSG:4326).
         target_crs: CRS the SAM facets live in (the NAIP chip CRS).
         ept_url: EPT root URL; discovered via the entwine index when None.
+        with_ground: also return the median GROUND elevation (class-2 points
+            near the building) -> returns (points, ground_z | None). Enables
+            building-height / two-story detection downstream.
 
     Returns None when there is no coverage (callers degrade to the
     imagery-only report — pitch "unspecified").
     """
+    def _nothing():
+        return (None, None) if with_ground else None
     from pyproj import CRS, Transformer
     from shapely import contains_xy
     from shapely.ops import transform as shp_transform
@@ -98,13 +104,13 @@ def fetch_roof_points(
         ept_url = discover_ept_from_entwine(lat, lon)
         if ept_url is None:
             logger.info("no EPT LiDAR coverage at (%.5f, %.5f)", lat, lon)
-            return None
+            return _nothing()
     base = ept_url[: ept_url.rfind("/")] if ept_url.endswith("ept.json") else ept_url.rstrip("/")
 
     header = _get(f"{base}/ept.json").json()
     if header.get("dataType") not in (None, "laszip", "binary"):
         logger.warning("unsupported EPT dataType %r", header.get("dataType"))
-        return None
+        return _nothing()
     srs = header.get("srs", {})
     if srs.get("authority") == "EPSG" and srs.get("horizontal"):
         crs_ept = CRS.from_epsg(int(srs["horizontal"]))
@@ -112,7 +118,7 @@ def fetch_roof_points(
         crs_ept = CRS.from_wkt(srs["wkt"])
     else:
         logger.warning("EPT header has no usable SRS")
-        return None
+        return _nothing()
     root_bounds = header["bounds"]                       # cubic
 
     # footprint -> EPT CRS; buffer in native units
@@ -124,7 +130,7 @@ def fetch_roof_points(
     keys = _walk_hierarchy(base, root_bounds, qbox, max_nodes)
     if not keys:
         logger.info("EPT: no octree nodes intersect the footprint")
-        return None
+        return _nothing()
     logger.info("EPT: reading %d node(s) from %s", len(keys), base)
 
     import laspy
@@ -146,9 +152,15 @@ def fetch_roof_points(
         cls.append(np.asarray(c, int)[keep] if c is not None
                    else np.zeros(int(keep.sum()), int))
     if not xs:
-        return None
+        return _nothing()
     x = np.concatenate(xs); y = np.concatenate(ys)
     z = np.concatenate(zs); c = np.concatenate(cls)
+
+    # GROUND elevation first (class 2 near the building) — building height
+    ground_z = None
+    if with_ground and (c == 2).any():
+        gz = z[c == 2]
+        ground_z = float(np.median(gz))
 
     # drop ground/vegetation/noise when the dataset is classified at all
     if (c > 0).any():
@@ -159,13 +171,16 @@ def fetch_roof_points(
     inside = contains_xy(fp_ept, x, y)
     x, y, z = x[inside], y[inside], z[inside]
     if len(x) == 0:
-        return None
+        return _nothing()
     if unit != 1.0:                     # e.g. US-feet state plane: z follows xy
         z = z * unit
+        if ground_z is not None:
+            ground_z = ground_z * unit
         logger.info("EPT native units factor %.4f applied to z", unit)
     to_target = Transformer.from_crs(crs_ept, CRS.from_user_input(target_crs),
                                      always_xy=True).transform
     tx, ty = to_target(x, y)
     pts = np.column_stack([tx, ty, z])
-    logger.info("EPT: %d roof point(s) for the footprint", len(pts))
-    return pts
+    logger.info("EPT: %d roof point(s) for the footprint%s", len(pts),
+                f", ground z={ground_z:.1f} m" if ground_z is not None else "")
+    return (pts, ground_z) if with_ground else pts

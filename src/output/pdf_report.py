@@ -179,7 +179,7 @@ def _area_totals(c, W, H, model: ReportModel):
     left = [("Total roof area", f"{int(round(model.total_area_sqft))} sqft"),
             ("Pitched roof area", f"{int(round(model.pitched_area_sqft))} sqft"),
             ("Flat roof area", f"{int(round(model.flat_area_sqft))} sqft"),
-            ("Two story area", "0 sqft"),
+            ("Two story area", f"{int(round(model.two_story_area_sqft))} sqft"),
             ("Two layer area", "0 sqft")]
     _kv_lines(c, 54, H - 120, left)
     right = [("Predominant pitch", _pitch_slash(model.predominant_pitch)),

@@ -173,14 +173,23 @@ def generate_roof_report(
     import os as _os
     if use_lidar is None:
         use_lidar = _os.getenv("MEASURE_IT_LIDAR", "0") == "1"
+    ground_z = None
     if (lidar_points is None and use_lidar and roof.facets
             and meta.get("crs") and meta.get("footprint_wgs84") is not None):
         try:
             from src.lidar.ept_fetch import fetch_roof_points
-            lidar_points = fetch_roof_points(
-                lat, lon, meta["footprint_wgs84"], meta["crs"])
+            lidar_points, ground_z = fetch_roof_points(
+                lat, lon, meta["footprint_wgs84"], meta["crs"],
+                with_ground=True)
         except Exception as e:  # noqa: BLE001 — LiDAR is additive, never fatal
             logger.warning("LiDAR fetch failed (%s) — imagery-only report", e)
+        if lidar_points is not None and ground_z is None:
+            # no class-2 points in the tiles -> OpenTopography DTM fallback
+            try:
+                from src.lidar.opentopo import get_ground_elevation
+                ground_z = get_ground_elevation(lat, lon)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("OT ground fallback failed (%s)", e)
 
     # LiDAR fusion: annotate -> evidence-based coplanar merge -> pitch fields
     # -> edge refinements (rakes, flashing, true 3D lengths)
@@ -191,7 +200,8 @@ def generate_roof_report(
         from src.roofs.geom_edges import (
             apply_3d_edge_lengths, relabel_flat_junction_flashing,
             relabel_rakes)
-        annotations = annotate_facets_with_lidar(roof.facets, lidar_points)
+        annotations = annotate_facets_with_lidar(roof.facets, lidar_points,
+                                          ground_z=ground_z)
         # merge facets LiDAR proves are one plane (fixes model over-
         # segmentation; area-conserving; off via MEASURE_IT_PLANE_MERGE=0)
         if _os.getenv("MEASURE_IT_PLANE_MERGE", "1") == "1":
@@ -199,7 +209,8 @@ def generate_roof_report(
                 roof.facets, lidar_points, annotations)
             if changed:
                 roof.facets = merged
-                annotations = annotate_facets_with_lidar(merged, lidar_points)
+                annotations = annotate_facets_with_lidar(merged, lidar_points,
+                                              ground_z=ground_z)
                 report_input = facets_to_report_input(
                     roof, label, aerial_image_path=chip_png)
         fuse_into_report_input(report_input, annotations)

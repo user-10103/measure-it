@@ -115,7 +115,8 @@ def test_use_lidar_autofetch(tmp_path, monkeypatch):
         xs, ys = np.meshgrid(np.arange(500010.0, 500050.0, 0.5),
                              np.arange(3099950.0, 3099990.0, 0.5))
         x, y = xs.ravel(), ys.ravel()
-        return np.column_stack([x, y, 0.5 * (x - 500000.0)])
+        pts = np.column_stack([x, y, 0.5 * (x - 500000.0)])
+        return (pts, None) if kw.get("with_ground") else pts
 
     import src.lidar.ept_fetch as ef
     monkeypatch.setattr(ef, "fetch_roof_points", fake_fetch)

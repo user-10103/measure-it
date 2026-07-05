@@ -42,6 +42,7 @@ class ReportModel:
     pitch_breakdown: Dict[str, Dict[str, float]]  # pitch -> {area_sqft, squares}
     waste_table: List[Dict[str, float]]         # [{pct, area_sqft, squares}]
     facet_rows: List[Dict] = field(default_factory=list)
+    two_story_area_sqft: float = 0.0
 
     def to_dict(self) -> dict:
         return {
@@ -66,7 +67,7 @@ def build_report_model(report_input: dict) -> ReportModel:
     edges = report_input.get("edges", [])
 
     # facet areas -> imperial + pitched/flat split + per-pitch aggregation
-    total = pitched = flat = unspecified = 0.0
+    total = pitched = flat = unspecified = two_story = 0.0
     pitch_area: Dict[str, float] = defaultdict(float)
     facet_rows = []
     for f in facets:
@@ -78,6 +79,8 @@ def build_report_model(report_input: dict) -> ReportModel:
             flat += sqft
         else:
             pitched += sqft
+        if f.get("two_story"):
+            two_story += sqft
         if pitch == "unspecified":
             unspecified += sqft
         pitch_area[pitch] += sqft
@@ -116,6 +119,7 @@ def build_report_model(report_input: dict) -> ReportModel:
         unspecified_pitch_area_sqft=unspecified, num_needs_review=num_needs_review,
         edge_totals_ft=edge_ft, edge_totals_ftin=edge_ftin,
         pitch_breakdown=pitch_breakdown, waste_table=waste, facet_rows=facet_rows,
+        two_story_area_sqft=round(two_story, 1),
     )
     logger.info("Report model: %.0f sqft, %d facets, predominant %s",
                 total, len(facets), predominant_pitch)
