@@ -30,11 +30,15 @@ RUN git clone --depth 1 https://github.com/facebookresearch/sam3.git /opt/sam3 \
 WORKDIR /opt/measure-it
 COPY pyproject.toml ./
 COPY src ./src
+# "numpy<2" pinned in the SAME command: sam3 requires numpy<2, and without the
+# pin this install bumps numpy to 2.x and silently breaks sam3 (seen in Colab)
 RUN pip install \
+        "numpy<2" \
         fastapi "uvicorn[standard]" python-multipart \
         rasterio geopandas shapely pyproj affine \
         boto3 requests reportlab scipy scikit-image scikit-learn \
-        pillow matplotlib "laspy[lazrs]"
+        pillow matplotlib "laspy[lazrs]" \
+    && python -c "import sam3, numpy; print('sam3 OK, numpy', numpy.__version__)"
 
 EXPOSE 8000
 COPY deploy/entrypoint.sh /entrypoint.sh
