@@ -103,22 +103,48 @@ def cast_shadows(dsm: np.ndarray, res_m: float, az_deg: float, el_deg: float,
 
 
 # ── fit the sun from the image itself ────────────────────────────────────────
+def _eval_pixels(dsm: np.ndarray, chip_rgb: np.ndarray):
+    """Where shadow evidence is trustworthy: valid image (not the black
+    crop border) AND near-ground surfaces (lawns/driveways). Tree crowns are
+    dark whether sunlit or not, and the black corners are dark by
+    construction — neither may vote."""
+    valid = chip_rgb.sum(axis=2) > 15
+    ground = float(np.percentile(dsm[np.isfinite(dsm)], 10))
+    low = dsm < ground + 2.0
+    ev = valid & low
+    gray = chip_rgb.astype(float).mean(axis=2)
+    g = gray[ev]
+    if g.size:
+        gray = (gray - g.min()) / (float(np.ptp(g)) + 1e-6)
+    dark = 1.0 - np.clip(gray, 0, 1)
+    return ev, dark
+
+
+def _despeckle(mask: np.ndarray) -> np.ndarray:
+    try:
+        from scipy.ndimage import binary_opening
+        return binary_opening(mask, iterations=1)
+    except Exception:  # noqa: BLE001
+        return mask
+
+
 def fit_sun(dsm: np.ndarray, chip_rgb: np.ndarray, res_m: float,
-            az_step: float = 15.0, els=(25.0, 40.0, 55.0, 70.0)):
-    """Solve (azimuth, elevation) by maximizing dark-pixel agreement.
+            az_step: float = 15.0, els=(25.0, 35.0, 45.0, 60.0)):
+    """Solve (azimuth, elevation) by maximizing dark-pixel agreement on
+    TRUSTWORTHY pixels only (valid image, near-ground — see _eval_pixels).
 
     Returns (az, el, score, mask). Score = mean darkness inside the predicted
     mask minus outside (higher = better; ~0 = no shadow signal)."""
-    gray = chip_rgb.astype(float).mean(axis=2)
-    gray = (gray - gray.min()) / (np.ptp(gray) + 1e-6)
-    dark = 1.0 - gray
+    ev, dark = _eval_pixels(dsm, chip_rgb)
     best = (None, None, -np.inf, None)
     for el in els:
         for az in np.arange(0.0, 360.0, az_step):
-            m = cast_shadows(dsm, res_m, float(az), float(el))
-            if m.sum() < 50 or m.mean() > 0.8:
+            m = _despeckle(cast_shadows(dsm, res_m, float(az), float(el)))
+            inside = m & ev
+            outside = ~m & ev
+            if inside.sum() < 50 or outside.sum() < 50 or m.mean() > 0.8:
                 continue
-            score = float(dark[m].mean() - dark[~m].mean())
+            score = float(dark[inside].mean() - dark[outside].mean())
             if score > best[2]:
                 best = (float(az), float(el), score, m)
     if best[0] is not None:
@@ -139,11 +165,11 @@ def predicted_shadow_mask(chip_rgb: np.ndarray, transform, scene_points: np.ndar
     dsm = build_dsm(scene_points, transform, chip_rgb.shape[:2])
     if when_utc is not None and lat is not None:
         az, el = sun_position(lat, lon, when_utc)
-        mask = cast_shadows(dsm, res, az, el)
-        gray = chip_rgb.astype(float).mean(axis=2)
-        gray = (gray - gray.min()) / (np.ptp(gray) + 1e-6)
-        score = float((1 - gray)[mask].mean() - (1 - gray)[~mask].mean()) \
-            if mask.any() and (~mask).any() else 0.0
+        mask = _despeckle(cast_shadows(dsm, res, az, el))
+        ev, dark = _eval_pixels(dsm, chip_rgb)
+        inside, outside = mask & ev, ~mask & ev
+        score = float(dark[inside].mean() - dark[outside].mean()) \
+            if inside.any() and outside.any() else 0.0
         return mask, {"az": az, "el": el, "score": score, "source": "timestamp"}
     az, el, score, mask = fit_sun(dsm, chip_rgb, res)
     return mask, {"az": az, "el": el, "score": score, "source": "fitted"}
