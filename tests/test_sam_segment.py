@@ -117,6 +117,45 @@ def test_anchor_picks_target_roof_not_neighbor():
     assert res2.outline.bounds[3] <= 35        # top band
 
 
+def test_shadow_bite_healed_by_footprint_union():
+    # tree shadow eats a notch out of the roof mask (the Holland Ln sawtooth);
+    # the footprint union must restore the true extent
+    h = w = 100
+    roof_bitten = _rect(h, w, 20, 80, 20, 80)
+    roof_bitten[60:80, 35:55] = False               # the shadow bite
+    footprint = _rect(h, w, 25, 78, 25, 78)         # covers the bitten area
+    facet = _rect(h, w, 20, 80, 20, 80)
+    chip = np.zeros((h, w, 3), np.uint8)
+
+    res = segment_roof_sam(_fake_predictor(roof_bitten, [facet]), chip,
+                           anchor_mask=footprint, regularize=False,
+                           min_area_frac=0.0)
+    healed_area = res.outline.area
+    res_no = segment_roof_sam(_fake_predictor(roof_bitten, [facet]), chip,
+                              anchor_mask=footprint, expand_to_anchor=False,
+                              regularize=False, min_area_frac=0.0)
+    assert healed_area > res_no.outline.area + 300   # the bite came back
+    # the healed area is tiled by facets (sum ~= outline)
+    assert sum(f.polygon.area for f in res.facets) > 0.95 * healed_area
+
+
+def test_footprint_alone_when_roof_prompt_empty():
+    # zero-shot finds nothing -> the footprint becomes the outline
+    h = w = 60
+    footprint = _rect(h, w, 15, 45, 10, 50)
+    facet = _rect(h, w, 15, 45, 10, 50)
+
+    def predict(chip, concept):
+        if concept == "roof":
+            return np.zeros((0, h, w), bool), np.zeros((0,))
+        return np.asarray([facet]), np.asarray([0.9])
+
+    res = segment_roof_sam(predict, np.zeros((h, w, 3), np.uint8),
+                           anchor_mask=footprint, regularize=False,
+                           min_area_frac=0.0)
+    assert res.outline is not None and res.outline.area > 1000
+
+
 def test_anchor_ignored_when_nothing_covers_it():
     # anchor off in the weeds -> fall back to top score, don't return nothing
     h = w = 60

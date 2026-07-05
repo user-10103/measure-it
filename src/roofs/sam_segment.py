@@ -60,6 +60,7 @@ def segment_roof_sam(
     *,
     predict_outline: Optional[PredictFn] = None,
     anchor_mask: Optional[np.ndarray] = None,
+    expand_to_anchor: bool = True,
     roof_concept: str = "roof",
     facet_concept: str = "roof facet",
     score_thr: float = 0.65,
@@ -85,6 +86,12 @@ def segment_roof_sam(
             (pixel space). On a loose crop several roofs are visible and the
             top-scoring "roof" mask can be a NEIGHBOR's — the anchor picks the
             roof mask that actually covers the target instead.
+        expand_to_anchor: union the chosen roof mask with the footprint. Tree
+            and self-shadows erode the imagery mask (sawtooth eaves, missing
+            wings — observed on the Holland Ln benchmark); the footprint is
+            shadow-immune, so the union restores the true building extent.
+            When the roof prompt finds nothing at all, the footprint alone
+            becomes the outline.
         roof_concept / facet_concept: the two text prompts.
         score_thr / iou_thr / min_area_frac / simplify_px / regularize / snap_px:
             forwarded to ``masks_to_facets`` for the facet partition.
@@ -126,9 +133,25 @@ def segment_roof_sam(
                         "no roof mask covers the target footprint (best "
                         "%.0f%%) — falling back to top score", 100 * cover.max())
             roof_mask = r_masks[idx]
-            outline_px = outline_polygon(roof_mask, simplify_px)
     except Exception as e:  # noqa: BLE001
         logger.warning("SAM roof-outline prompt failed (%s)", e)
+
+    # heal shadow erosion: the footprint can't be fooled by tree/self-shadow,
+    # so the outline is the union of what the model saw and what the footprint
+    # guarantees. No roof mask at all -> the footprint alone is the outline.
+    if expand_to_anchor and anchor_mask is not None and anchor_mask.any():
+        anchor = np.asarray(anchor_mask, bool)
+        if roof_mask is not None:
+            healed = int((anchor & ~roof_mask).sum())
+            if healed:
+                logger.info("outline expanded to footprint: +%d px healed "
+                            "(shadow/occlusion)", healed)
+            roof_mask = roof_mask | anchor
+        else:
+            logger.info("no roof mask — using the footprint as the outline")
+            roof_mask = anchor
+    if roof_mask is not None:
+        outline_px = outline_polygon(roof_mask, simplify_px)
 
     # 2. facets — "roof facet" masks -> clean partition, clipped to the outline
     f_masks, f_scores = predict_masks(chip, facet_concept)
