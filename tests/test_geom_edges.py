@@ -39,3 +39,17 @@ def test_all_edges_have_length_and_geometry():
 
 def test_no_outline_no_edges():
     assert edges_from_outline_and_facets(None, []) == []
+
+
+def test_corner_to_corner_seam_keeps_its_ridge():
+    # Two big facets whose shared seam runs corner-to-corner (hip+ridge+hip in
+    # one path — common when raster partitions absorb the small end triangles).
+    # The middle run must still classify as RIDGE, not be lumped into hip.
+    outline = box(0, 0, 40, 20)
+    front = Polygon([(0, 0), (40, 0), (30, 10), (10, 10)])
+    back = Polygon([(0, 0), (10, 10), (30, 10), (40, 0), (40, 20), (0, 20)])
+    totals = {}
+    for e in edges_from_outline_and_facets(outline, [front, back]):
+        totals[e["edge_type"]] = totals.get(e["edge_type"], 0.0) + e["length_m"]
+    assert abs(totals.get("ridge", 0.0) - 20.0) < 1.0     # the 20-unit ridge
+    assert totals.get("hip", 0.0) > 20.0                   # both diagonals
