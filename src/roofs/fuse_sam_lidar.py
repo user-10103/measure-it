@@ -50,7 +50,11 @@ def _xyz(points) -> np.ndarray:
     return arr[:, :3]
 
 
-TWO_STORY_MIN_EAVE_M = 5.0     # eave above ~5 m of ground = second story
+TWO_STORY_LEVEL_STEP_M = 2.4   # a facet a story-height ABOVE the building's
+                               # lowest eave = an upper roof level. Relative,
+                               # not absolute: a tall single-story building
+                               # (Holland benchmark) must read 0 — Roofr's
+                               # semantics (roof-over-roof access), not height.
 
 
 def annotate_facets_with_lidar(
@@ -105,11 +109,20 @@ def annotate_facets_with_lidar(
             "n_points": n,
             "residual_m": float(plane.residual_median),
         }
-        if ground_z is not None:
-            # eave = the facet's low edge; 5th percentile rides over outliers
-            eave = float(np.percentile(xyz[inside, 2], 5)) - float(ground_z)
-            out[f.facet_id]["eave_height_m"] = eave
-            out[f.facet_id]["is_two_story"] = bool(eave >= TWO_STORY_MIN_EAVE_M)
+        # eave elevation = the facet's low edge (5th percentile rides outliers)
+        out[f.facet_id]["_eave_z"] = float(np.percentile(xyz[inside, 2], 5))
+
+    # two-story = a roof LEVEL above the building's lowest eave (relative —
+    # Roofr semantics). Needs either >=2 facets (levels comparable) or ground.
+    if out and (ground_z is not None or len(out) >= 2):
+        base = min(a["_eave_z"] for a in out.values())
+        for a in out.values():
+            rel = a["_eave_z"] - base
+            a["is_two_story"] = bool(rel >= TWO_STORY_LEVEL_STEP_M)
+            a["eave_height_m"] = (a["_eave_z"] - float(ground_z)
+                                  if ground_z is not None else rel)
+    for a in out.values():
+        a.pop("_eave_z", None)
     logger.info("LiDAR annotated %d/%d facet(s)", len(out), len(facets))
     return out
 

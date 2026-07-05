@@ -198,8 +198,7 @@ def generate_roof_report(
             annotate_facets_with_lidar, fuse_into_report_input,
             merge_coplanar_facets)
         from src.roofs.geom_edges import (
-            apply_3d_edge_lengths, relabel_flat_junction_flashing,
-            relabel_rakes)
+            apply_3d_edge_lengths, classify_internal_edges, relabel_rakes)
         annotations = annotate_facets_with_lidar(roof.facets, lidar_points,
                                           ground_z=ground_z)
         # merge facets LiDAR proves are one plane (fixes model over-
@@ -218,9 +217,10 @@ def generate_roof_report(
         aspects = {fid: a["aspect_deg"] for fid, a in annotations.items()
                    if not a.get("is_flat")}
         relabel_rakes(report_input["edges"], roof.facets, aspects)
-        # pitched<->flat junctions are flashing, not valleys (Holland criterion)
-        relabel_flat_junction_flashing(report_input["edges"], roof.facets,
-                                       annotations)
+        # internal seams: physics-based classification from the plane aspects
+        # (ridge/hip/valley/flashing/transition — the Holland criterion)
+        report_input["edges"] = classify_internal_edges(
+            report_input["edges"], roof.facets, annotations)
         # plan -> true sloped lengths (hips/valleys/rakes lengthen; level
         # eaves/ridges stay put)
         grads = {fid: a["grad"] for fid, a in annotations.items()}

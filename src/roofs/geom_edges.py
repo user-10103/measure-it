@@ -123,6 +123,94 @@ def relabel_flat_junction_flashing(edges: List[dict], facets, annotations,
     return edges
 
 
+def classify_internal_edges(edges: List[dict], facets, annotations,
+                            touch_tol: float = 1.5,
+                            level_dot: float = 0.45) -> List[dict]:
+    """Reclassify internal seams using the LiDAR aspects — physics, not corners.
+
+    Per straight SEGMENT (junction-safe), from the two flanking facets:
+      * one flat, one pitched          -> wall_flashing (Roofr books it there)
+      * both flat                      -> transition
+      * both pitched:
+          - segment LEVEL (runs perpendicular to both downslopes):
+              downslopes diverge -> RIDGE, converge -> VALLEY
+          - sloped segment: drainage decides — both downslopes pointing INTO
+            the seam -> VALLEY, else HIP
+          - aspects nearly equal (<45 deg) -> transition (a step, not a break)
+
+    Fixes the Holland regression where post-merge seam footage inflated the
+    ridge/hip buckets (157'/195' vs Roofr's 59'/127'). Perimeter edges pass
+    through untouched. Returns a NEW edge list.
+    """
+    import math
+
+    from shapely.geometry import LineString
+
+    lookup = [(f.facet_id, f.polygon) for f in facets
+              if f.polygon is not None and not f.polygon.is_empty]
+    cent = {fid: poly.centroid for fid, poly in lookup}
+
+    def _down(ann):
+        r = math.radians(ann["aspect_deg"])
+        return (math.sin(r), math.cos(r))          # unit downslope (x=E, y=N)
+
+    out: List[dict] = []
+    for e in edges:
+        if e.get("edge_type") not in ("ridge", "hip", "valley") \
+                or len(e.get("geometry_xy", [])) < 2:
+            out.append(e)
+            continue
+        coords = [list(c) for c in e["geometry_xy"]]
+        runs: List = []
+        for a, b in zip(coords[:-1], coords[1:]):
+            seg = LineString([a, b])
+            L = seg.length
+            if L <= 1e-9:
+                continue
+            mid = seg.interpolate(0.5, normalized=True)
+            near = _nearest_facets(mid, lookup, touch_tol)[:2]
+            etype = e["edge_type"]                  # geometric fallback
+            a1 = annotations.get(near[0]) if len(near) > 0 else None
+            a2 = annotations.get(near[1]) if len(near) > 1 else None
+            if a1 and a2:
+                fl1, fl2 = bool(a1.get("is_flat")), bool(a2.get("is_flat"))
+                if fl1 != fl2:
+                    etype = "wall_flashing"
+                elif fl1 and fl2:
+                    etype = "transition"
+                elif "aspect_deg" in a1 and "aspect_deg" in a2:
+                    d1, d2 = _down(a1), _down(a2)
+                    spread = abs(a1["aspect_deg"] - a2["aspect_deg"]) % 360
+                    spread = min(spread, 360 - spread)
+                    dirv = ((b[0] - a[0]) / L, (b[1] - a[1]) / L)
+
+                    def _toward(fid, d):
+                        c = cent[fid]
+                        vx, vy = mid.x - c.x, mid.y - c.y
+                        n = math.hypot(vx, vy) or 1.0
+                        return (d[0] * vx + d[1] * vy) / n
+
+                    t1, t2 = _toward(near[0], d1), _toward(near[1], d2)
+                    level = max(abs(dirv[0] * d1[0] + dirv[1] * d1[1]),
+                                abs(dirv[0] * d2[0] + dirv[1] * d2[1])) <= level_dot
+                    converge = t1 > 0.2 and t2 > 0.2
+                    if spread < 45:
+                        etype = "transition"
+                    elif spread >= 135 and level:
+                        etype = "valley" if converge else "ridge"
+                    else:
+                        etype = "valley" if converge else "hip"
+            if runs and runs[-1][0] == etype and runs[-1][1][-1] == a:
+                runs[-1][1].append(b)
+            else:
+                runs.append((etype, [a, b]))
+        for etype, pts in runs:
+            out.append({"edge_type": etype,
+                        "length_m": float(LineString(pts).length),
+                        "geometry_xy": pts})
+    return out
+
+
 def apply_3d_edge_lengths(edges: List[dict], facets, grads,
                           touch_tol: float = 1.5) -> List[dict]:
     """Plan lengths -> true sloped lengths using the adjacent facet's plane.
