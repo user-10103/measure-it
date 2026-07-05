@@ -91,6 +91,42 @@ def test_separate_outline_and_facet_predictors():
     assert res.outline is not None and len(res.facets) == 2
 
 
+def test_anchor_picks_target_roof_not_neighbor():
+    # THE 909 BUG: loose crop shows the neighbor's bigger roof, which outscores
+    # the target. The footprint anchor must override the score ranking.
+    h = w = 100
+    neighbor = _rect(h, w, 0, 30, 10, 90)      # wide band at the top, score 0.97
+    target = _rect(h, w, 50, 85, 30, 70)       # the actual house, score 0.80
+    facet = _rect(h, w, 50, 85, 30, 70)
+    chip = np.zeros((h, w, 3), np.uint8)
+    anchor = _rect(h, w, 55, 80, 35, 65)       # building footprint (inside target)
+
+    def outline_predict(chip, concept):
+        return np.asarray([neighbor, target]), np.asarray([0.97, 0.80])
+
+    def facet_predict(chip, concept):
+        return np.asarray([facet]), np.asarray([0.9])
+
+    res = segment_roof_sam(facet_predict, chip, predict_outline=outline_predict,
+                           anchor_mask=anchor, regularize=False, min_area_frac=0.0)
+    minx, miny, maxx, maxy = res.outline.bounds
+    assert miny >= 45 and maxy <= 90          # the TARGET roof, not the top band
+    # without the anchor, the neighbor wins (documents the old behavior)
+    res2 = segment_roof_sam(facet_predict, chip, predict_outline=outline_predict,
+                            regularize=False, min_area_frac=0.0)
+    assert res2.outline.bounds[3] <= 35        # top band
+
+
+def test_anchor_ignored_when_nothing_covers_it():
+    # anchor off in the weeds -> fall back to top score, don't return nothing
+    h = w = 60
+    roof = _rect(h, w, 10, 40, 10, 50)
+    anchor = _rect(h, w, 50, 58, 50, 58)       # no candidate covers this
+    res = segment_roof_sam(_fake_predictor(roof, [roof]), np.zeros((h, w, 3), np.uint8),
+                           anchor_mask=anchor, regularize=False, min_area_frac=0.0)
+    assert res.outline is not None             # graceful fallback
+
+
 def test_no_roof_mask_still_returns_facets():
     # roof prompt yields nothing -> no outline, but facets still produced (unclipped)
     h = w = 60

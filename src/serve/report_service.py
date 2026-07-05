@@ -38,10 +38,16 @@ SCORE_THR = 0.15         # in-training checkpoint scores low; NMS dedupes
 
 def fetch_chip(lat: float, lon: float, state: str, out_dir: Path,
                chip_buffer_m: float = CHIP_BUFFER_M):
-    """NAIP roof chip for a location -> (chip HxWx3 uint8, Affine, png_path)."""
+    """NAIP roof chip for a location.
+
+    Returns (chip HxWx3 uint8, Affine, png_path, anchor_mask) — the anchor is
+    the TARGET building footprint rasterized to chip pixels, so segmentation
+    can pick the right roof when neighbors are visible in the loose crop.
+    """
     import geopandas as gpd
     import rasterio
     from PIL import Image
+    from rasterio import features as rio_features
     from rasterio.mask import mask as rio_mask
 
     from src.ingestion.naip import get_naip_for_location
@@ -55,13 +61,17 @@ def fetch_chip(lat: float, lon: float, state: str, out_dir: Path,
     if not naip_tif:
         raise RuntimeError(f"No NAIP imagery available near ({lat}, {lon})")
     with rasterio.open(naip_tif) as src:
-        geom = footprint.to_crs(src.crs).geometry.iloc[0].buffer(chip_buffer_m)
+        fp_geom = footprint.to_crs(src.crs).geometry.iloc[0]
+        geom = fp_geom.buffer(chip_buffer_m)
         arr, transform = rio_mask(src, [geom.__geo_interface__], crop=True,
                                   filled=True)
     chip = np.transpose(arr[:3], (1, 2, 0)).astype("uint8")
+    anchor = rio_features.rasterize(
+        [(fp_geom, 1)], out_shape=chip.shape[:2], transform=transform,
+        dtype="uint8").astype(bool)
     png = out_dir / "chip.png"
     Image.fromarray(chip).save(png)
-    return chip, transform, str(png)
+    return chip, transform, str(png), anchor
 
 
 def _fallback_outline(roof):
@@ -132,12 +142,14 @@ def generate_roof_report(
         lat, lon = float(location[0]), float(location[1])
         source, label = "coordinates", label or f"{lat:.5f}, {lon:.5f}"
 
-    chip, transform, chip_png = chip_fetcher(lat, lon, state, out_dir,
-                                             chip_buffer_m=chip_buffer_m)
+    fetched = chip_fetcher(lat, lon, state, out_dir,
+                           chip_buffer_m=chip_buffer_m)
+    chip, transform, chip_png = fetched[0], fetched[1], fetched[2]
+    anchor = fetched[3] if len(fetched) > 3 else None   # footprint mask
 
     roof = segment_roof_sam(
         predict_facets, chip, transform=transform,
-        predict_outline=predict_outline,
+        predict_outline=predict_outline, anchor_mask=anchor,
         roof_concept="roof", facet_concept="roof facet",
         score_thr=score_thr, iou_thr=0.5,
     )

@@ -59,6 +59,7 @@ def segment_roof_sam(
     transform=None,
     *,
     predict_outline: Optional[PredictFn] = None,
+    anchor_mask: Optional[np.ndarray] = None,
     roof_concept: str = "roof",
     facet_concept: str = "roof facet",
     score_thr: float = 0.65,
@@ -80,6 +81,10 @@ def segment_roof_sam(
         predict_outline: optional separate predictor for the roof OUTLINE — pass
             ZERO-SHOT (base) SAM 3 here. If None, the facet predictor is used for
             the outline too (single-model mode).
+        anchor_mask: optional H x W bool mask of the TARGET building footprint
+            (pixel space). On a loose crop several roofs are visible and the
+            top-scoring "roof" mask can be a NEIGHBOR's — the anchor picks the
+            roof mask that actually covers the target instead.
         roof_concept / facet_concept: the two text prompts.
         score_thr / iou_thr / min_area_frac / simplify_px / regularize / snap_px:
             forwarded to ``masks_to_facets`` for the facet partition.
@@ -100,7 +105,27 @@ def segment_roof_sam(
         r_masks, r_scores = _outline_predict(chip, roof_concept)
         r_masks = np.asarray([np.asarray(m, bool) for m in r_masks])
         if len(r_masks):
-            roof_mask = r_masks[int(np.argmax(np.asarray(r_scores)))]
+            r_scores = np.asarray(r_scores, dtype=float)
+            idx = int(np.argmax(r_scores))
+            if anchor_mask is not None and anchor_mask.any():
+                # fraction of the target footprint each candidate covers
+                anchor = np.asarray(anchor_mask, bool)
+                cover = np.array([(m & anchor).sum() / float(anchor.sum())
+                                  for m in r_masks])
+                best = int(np.lexsort((r_scores, cover))[-1])
+                if cover[best] >= 0.2:
+                    if best != idx:
+                        logger.info(
+                            "outline anchor override: mask %d (cover %.0f%%, "
+                            "score %.2f) over top-score mask %d (cover %.0f%%)",
+                            best, 100 * cover[best], r_scores[best],
+                            idx, 100 * cover[idx])
+                    idx = best
+                else:
+                    logger.warning(
+                        "no roof mask covers the target footprint (best "
+                        "%.0f%%) — falling back to top score", 100 * cover.max())
+            roof_mask = r_masks[idx]
             outline_px = outline_polygon(roof_mask, simplify_px)
     except Exception as e:  # noqa: BLE001
         logger.warning("SAM roof-outline prompt failed (%s)", e)
