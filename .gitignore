@@ -34,3 +34,4 @@ sample_report/
 /data/
 # generated pseudo-label datasets (reproducible via training/build_pseudo_dataset.py)
 training/roof_dataset_pseudo*/
+training/*.tar.gz
