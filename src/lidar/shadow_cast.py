@@ -88,12 +88,16 @@ def cast_shadows(dsm: np.ndarray, res_m: float, az_deg: float, el_deg: float,
     for k in range(1, steps + 1):
         oc = int(round(k * dx))                  # +east = +col
         orow = int(round(-k * dy))               # +north = -row
+        if abs(orow) >= h or abs(oc) >= w:
+            break                                # blocker window left the array
+        # destination window, then source = destination + offset (shapes match
+        # by construction — no slice-arithmetic edge cases)
+        r0, r1 = max(0, -orow), min(h, h - orow)
+        c0, c1 = max(0, -oc), min(w, w - oc)
+        if r1 <= r0 or c1 <= c0:
+            continue
         shifted = np.full(dsm.shape, -np.inf)
-        src_r = slice(max(0, orow), min(h, h + orow))
-        src_c = slice(max(0, oc), min(w, w + oc))
-        dst_r = slice(max(0, -orow), min(h, h - orow))
-        dst_c = slice(max(0, -oc), min(w, w - oc))
-        shifted[dst_r, dst_c] = dsm[src_r, src_c]
+        shifted[r0:r1, c0:c1] = dsm[r0 + orow:r1 + orow, c0 + oc:c1 + oc]
         shadow |= (shifted - k * drop) > (dsm + clearance_m)
     return shadow
 
