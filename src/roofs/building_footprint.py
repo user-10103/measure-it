@@ -170,17 +170,8 @@ def _lon_lat_to_pixel(
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def get_footprint_latlon(
-    lat: float,
-    lon: float,
-    max_dist_m: float = 60.0,
-) -> Optional[list[tuple[float, float]]]:
-    """
-    Return the closest building footprint polygon as [(lat, lon), …] or None.
-
-    Looks up the Microsoft Global ML Building Footprints tile that covers
-    (lat, lon) and returns the polygon whose centroid is within max_dist_m.
-    """
+def _get_footprint_latlon_ms(lat: float, lon: float, max_dist_m: float) -> Optional[list]:
+    """Try Microsoft Global ML Building Footprints (requires Azure index download)."""
     qk = _lat_lon_to_quadkey(lat, lon, zoom=9)
     features = _fetch_tile(qk)
     if not features:
@@ -193,7 +184,6 @@ def get_footprint_latlon(
         geom = feat.get("geometry", {})
         if geom.get("type") not in ("Polygon", "MultiPolygon"):
             continue
-
         rings = (
             geom["coordinates"]
             if geom["type"] == "Polygon"
@@ -207,10 +197,69 @@ def get_footprint_latlon(
             best_poly = outer
 
     if best_dist > max_dist_m or best_poly is None:
-        log.debug(f"Nearest footprint {best_dist:.0f} m away — skipping")
+        return None
+    return [(c[1], c[0]) for c in best_poly]  # (lat, lon)
+
+
+def _get_footprint_latlon_osm(lat: float, lon: float, max_dist_m: float) -> Optional[list]:
+    """Fallback: OpenStreetMap Overpass API — always available, no index needed."""
+    query = (
+        f"[out:json][timeout:10];"
+        f'way["building"](around:{max_dist_m},{lat},{lon});'
+        f"out geom;"
+    )
+    try:
+        req = urllib.request.Request(
+            "https://overpass-api.de/api/interpreter",
+            data=query.encode(),
+            headers={"Content-Type": "text/plain"},
+        )
+        resp = urllib.request.urlopen(req, timeout=15).read()
+        elems = json.loads(resp).get("elements", [])
+    except Exception as e:
+        log.warning(f"OSM Overpass request failed: {e}")
         return None
 
-    return [(c[1], c[0]) for c in best_poly]  # (lat, lon)
+    best_dist = float("inf")
+    best_poly: Optional[list] = None
+
+    for el in elems:
+        if el.get("type") != "way" or "geometry" not in el:
+            continue
+        coords = [(n["lat"], n["lon"]) for n in el["geometry"]]
+        if len(coords) < 3:
+            continue
+        clat = sum(c[0] for c in coords) / len(coords)
+        clon = sum(c[1] for c in coords) / len(coords)
+        dist = _haversine_m(lat, lon, clat, clon)
+        if dist < best_dist:
+            best_dist = dist
+            best_poly = coords
+
+    if best_poly is None or best_dist > max_dist_m:
+        log.debug(f"No OSM building within {max_dist_m} m (nearest {best_dist:.0f} m)")
+        return None
+
+    log.info(f"OSM footprint found — {len(best_poly)} pts, {best_dist:.1f} m from pin")
+    return best_poly  # [(lat, lon), ...]
+
+
+def get_footprint_latlon(
+    lat: float,
+    lon: float,
+    max_dist_m: float = 60.0,
+) -> Optional[list[tuple[float, float]]]:
+    """
+    Return the closest building footprint polygon as [(lat, lon), …] or None.
+
+    Tries Microsoft Global ML Building Footprints first; falls back to
+    OpenStreetMap Overpass when the MS index cannot be downloaded.
+    """
+    result = _get_footprint_latlon_ms(lat, lon, max_dist_m)
+    if result is not None:
+        return result
+    log.debug("MS Buildings index unavailable — falling back to OSM Overpass")
+    return _get_footprint_latlon_osm(lat, lon, max_dist_m)
 
 
 def get_footprint_pixels(
