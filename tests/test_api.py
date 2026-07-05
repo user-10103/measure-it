@@ -128,6 +128,27 @@ def test_unknown_report_404(client):
     assert client.get("/api/report/deadbeef0000/pdf").status_code == 404
 
 
+def test_suggest_endpoint(tmp_path, monkeypatch):
+    monkeypatch.setattr(api_mod, "JOBS_ROOT", tmp_path)
+    app = create_app(predict_facets=fake_facets, predict_outline=fake_outline,
+                     chip_fetcher=fake_chip,
+                     suggester=lambda q: [f"{q} Suggestion One", f"{q} Two"])
+    with TestClient(app) as c:
+        r = c.get("/api/suggest", params={"q": "909 Spring"})
+        assert r.status_code == 200
+        assert r.json()["suggestions"] == ["909 Spring Suggestion One", "909 Spring Two"]
+
+
+def test_suggest_unconfigured_returns_empty(tmp_path, monkeypatch):
+    monkeypatch.setattr(api_mod, "JOBS_ROOT", tmp_path)
+    monkeypatch.delenv("AWS_LOCATION_PLACE_INDEX", raising=False)
+    app = create_app(predict_facets=fake_facets, predict_outline=fake_outline,
+                     chip_fetcher=fake_chip)      # default suggester, no env
+    with TestClient(app) as c:
+        assert c.get("/api/suggest", params={"q": "909 Spring Island"}).json() \
+            == {"suggestions": []}
+
+
 def test_no_models_503(tmp_path, monkeypatch):
     monkeypatch.setattr(api_mod, "JOBS_ROOT", tmp_path)
     monkeypatch.delenv("MEASURE_IT_CKPT", raising=False)

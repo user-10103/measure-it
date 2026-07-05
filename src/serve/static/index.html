@@ -68,10 +68,11 @@
 
     <div id="paneAddr">
       <label for="loc">Address or coordinates</label>
-      <input type="text" id="loc" placeholder="909 Spring Island Way, Melbourne, FL"
-             autocomplete="street-address">
-      <div class="hint">Tip: you can also paste coordinates from Google Maps
-        (right-click the roof → click the numbers).</div>
+      <input type="text" id="loc" placeholder="909 Spring Island Way, Palm Bay, FL"
+             autocomplete="off" list="locSuggestions">
+      <datalist id="locSuggestions"></datalist>
+      <div class="hint">Start typing and pick your address from the suggestions.
+        (Coordinates from Google Maps work too.)</div>
       <div class="row">
         <div class="narrow">
           <label for="state">State</label>
@@ -124,6 +125,22 @@ function setMode(m){ mode = m;
   $('paneAddr').style.display = m==='addr' ? '' : 'none';
   $('paneImg').style.display  = m==='img'  ? '' : 'none';
 }
+// address autocomplete (debounced; silently empty if no geocoder configured)
+let suggTimer = null;
+$('loc').addEventListener('input', () => {
+  clearTimeout(suggTimer);
+  const q = $('loc').value.trim();
+  if (q.length < 4 || /^-?\d/.test(q)) return;        // skip short/coordinate input
+  suggTimer = setTimeout(async () => {
+    try {
+      const r = await fetch('/api/suggest?q=' + encodeURIComponent(q));
+      const d = await r.json();
+      $('locSuggestions').innerHTML =
+        (d.suggestions || []).map(s => `<option value="${s.replace(/"/g,'&quot;')}">`).join('');
+    } catch (e) { /* suggestions are best-effort */ }
+  }, 300);
+});
+
 const drop = $('drop');
 drop.onclick = () => $('file').click();
 $('file').onchange = e => pick(e.target.files[0]);

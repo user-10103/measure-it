@@ -33,7 +33,7 @@ from src.serve.report_service import (
     generate_report_from_image,
     generate_roof_report,
 )
-from src.utils.resolve_location import LocationError
+from src.utils.resolve_location import LocationError, suggest_addresses
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +48,7 @@ class ReportRequest(BaseModel):
 
 
 def create_app(predict_facets=None, predict_outline=None,
-               chip_fetcher=fetch_chip) -> FastAPI:
+               chip_fetcher=fetch_chip, suggester=suggest_addresses) -> FastAPI:
     state = {"predict_facets": predict_facets,
              "predict_outline": predict_outline}
     gpu_lock = threading.Lock()
@@ -106,6 +106,11 @@ def create_app(predict_facets=None, predict_outline=None,
     @app.get("/healthz")
     def healthz():
         return {"ok": True, "model_loaded": state["predict_facets"] is not None}
+
+    @app.get("/api/suggest")
+    def suggest(q: str = ""):
+        """Address autocomplete — empty list when no geocoder is configured."""
+        return {"suggestions": suggester(q)}
 
     @app.get("/", response_class=HTMLResponse)
     def index():

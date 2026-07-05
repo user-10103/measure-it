@@ -149,3 +149,26 @@ def resolve_location(text: str) -> Dict:
                 return {**coords, "source": name}
 
     raise LocationError(FRIENDLY_MISS)
+
+
+def suggest_addresses(text: str, max_results: int = 5) -> List[str]:
+    """Address autocomplete via Amazon Location (typed-ahead suggestions).
+
+    Returns [] when the place index isn't configured or the call fails — the
+    frontend then simply shows no dropdown (typing still works).
+    """
+    index = os.getenv("AWS_LOCATION_PLACE_INDEX")
+    if not index or not text or len(text.strip()) < 4:
+        return []
+    try:
+        import boto3
+        client = boto3.client(
+            "location", region_name=os.getenv("AWS_REGION", "us-west-2"))
+        resp = client.search_place_index_for_suggestions(
+            IndexName=index, Text=text.strip(), MaxResults=max_results,
+            FilterCountries=["USA"],
+        )
+        return [r["Text"] for r in resp.get("Results", []) if r.get("Text")]
+    except Exception as e:  # noqa: BLE001 — suggestions are best-effort
+        logger.warning("address suggestions failed (%s)", e)
+        return []
