@@ -116,6 +116,11 @@ def annotate_facets_with_lidar(
     # Roofr semantics). Needs either >=2 facets (levels comparable) or ground.
     if out and (ground_z is not None or len(out) >= 2):
         base = min(a["_eave_z"] for a in out.values())
+        for fid, a in sorted(out.items()):
+            logger.info("facet %s: eave z=%.2f (rel %.2f m)%s%s", fid,
+                        a["_eave_z"], a["_eave_z"] - base,
+                        " flat" if a.get("is_flat") else "",
+                        f" ground={ground_z:.2f}" if ground_z is not None else "")
         for a in out.values():
             rel = a["_eave_z"] - base
             a["is_two_story"] = bool(rel >= TWO_STORY_LEVEL_STEP_M)

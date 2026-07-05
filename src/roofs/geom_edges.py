@@ -172,7 +172,10 @@ def classify_internal_edges(edges: List[dict], facets, annotations,
             etype = e["edge_type"]                  # geometric fallback
             a1 = annotations.get(near[0]) if len(near) > 0 else None
             a2 = annotations.get(near[1]) if len(near) > 1 else None
-            if a1 and a2:
+            if len(near) == 2 and (a1 is None or a2 is None):
+                # a flank we couldn't measure -> don't guess ridge/hip; say so
+                etype = "unspecified"
+            elif a1 and a2:
                 fl1, fl2 = bool(a1.get("is_flat")), bool(a2.get("is_flat"))
                 if fl1 != fl2:
                     etype = "wall_flashing"
