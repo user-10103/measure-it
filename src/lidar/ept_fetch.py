@@ -79,6 +79,7 @@ def fetch_roof_points(
     buffer_m: float = 3.0,
     max_nodes: int = MAX_NODES,
     with_ground: bool = False,
+    keep_all_classes: bool = False,
 ):
     """Roof point cloud for a building -> (N, 3) xyz in ``target_crs``.
 
@@ -89,6 +90,9 @@ def fetch_roof_points(
         with_ground: also return the median GROUND elevation (class-2 points
             near the building) -> returns (points, ground_z | None). Enables
             building-height / two-story detection downstream.
+        keep_all_classes: keep ground/vegetation/etc. returns instead of
+            dropping them — the full scene (for DSM/shadow casting), not just
+            the roof.
 
     Returns None when there is no coverage (callers degrade to the
     imagery-only report — pitch "unspecified").
@@ -163,7 +167,7 @@ def fetch_roof_points(
         ground_z = float(np.median(gz))
 
     # drop ground/vegetation/noise when the dataset is classified at all
-    if (c > 0).any():
+    if (c > 0).any() and not keep_all_classes:
         keep = ~np.isin(c, list(VEG_GROUND_CLASSES))
         x, y, z = x[keep], y[keep], z[keep]
 
