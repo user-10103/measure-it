@@ -90,6 +90,7 @@ def annotate_facets_with_lidar(
             "slope_deg": float(slope),
             "pitch_string": compute_pitch_string(slope),
             "aspect_deg": float(aspect),        # downslope compass deg (rake relabel)
+            "grad": (float(plane.a), float(plane.b)),   # plane gradient (3D lengths, merging)
             "aspect_bin": compute_aspect_bin(aspect),
             "is_flat": bool(is_flat),
             "surface_area_m2": float(
@@ -99,6 +100,88 @@ def annotate_facets_with_lidar(
         }
     logger.info("LiDAR annotated %d/%d facet(s)", len(out), len(facets))
     return out
+
+
+def merge_coplanar_facets(
+    facets: List,
+    points,
+    annotations: Dict[int, dict],
+    angle_tol_deg: float = 5.0,
+    residual_max: float = 0.12,
+    touch_tol: float = 0.5,
+):
+    """Merge ADJACENT facets that LiDAR proves are the same physical plane.
+
+    Fixes model over-segmentation (a gable slope split into parallel bands)
+    with evidence, not heuristics: two facets merge only if (a) they touch,
+    (b) their fitted normals agree within ``angle_tol_deg``, (c) both share
+    flat/pitched status, and (d) a SINGLE plane refit over their combined
+    points is tight (median residual < ``residual_max`` and >=70% inliers) —
+    which rejects same-slope roofs at different heights (a step/parapet).
+    Merging conserves area exactly (polygon union). Returns (facets, changed).
+    """
+    import math
+
+    from shapely import contains_xy
+    from shapely.ops import unary_union
+
+    from src.roofs.segment import Facet
+
+    xyz = _xyz(points)
+    by_id = {f.facet_id: f for f in facets}
+    ids = [f.facet_id for f in facets]
+    parent = {i: i for i in ids}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def normal(g):
+        n = np.array([-g[0], -g[1], 1.0])
+        return n / np.linalg.norm(n)
+
+    for i in range(len(ids)):
+        for j in range(i + 1, len(ids)):
+            a, b = by_id[ids[i]], by_id[ids[j]]
+            aa, ab = annotations.get(a.facet_id), annotations.get(b.facet_id)
+            if not aa or not ab or aa["is_flat"] != ab["is_flat"]:
+                continue
+            ang = math.degrees(math.acos(min(1.0, float(
+                normal(aa["grad"]) @ normal(ab["grad"])))))
+            if ang > angle_tol_deg:
+                continue
+            if a.polygon.distance(b.polygon) > touch_tol:
+                continue
+            m = (contains_xy(a.polygon, xyz[:, 0], xyz[:, 1])
+                 | contains_xy(b.polygon, xyz[:, 0], xyz[:, 1]))
+            if int(m.sum()) < MIN_FACET_POINTS:
+                continue
+            try:
+                pl = fit_plane_ransac(xyz[m])
+            except Exception:  # noqa: BLE001
+                continue
+            if (not pl.success or pl.residual_median > residual_max
+                    or pl.inlier_count < 0.7 * int(m.sum())):
+                continue                       # e.g. same slope, different height
+            parent[find(ids[j])] = find(ids[i])
+
+    groups: Dict[int, list] = {}
+    for fid in ids:
+        groups.setdefault(find(fid), []).append(fid)
+    if all(len(g) == 1 for g in groups.values()):
+        return list(facets), False
+
+    merged: List = []
+    for new_id, members in enumerate(groups.values(), start=1):
+        poly = unary_union([by_id[m].polygon.buffer(0.05) for m in members]).buffer(-0.05)
+        if poly.geom_type == "MultiPolygon":
+            poly = max(poly.geoms, key=lambda g: g.area)
+        merged.append(Facet(facet_id=new_id, points=None, label=new_id, polygon=poly))
+    logger.info("plane merge: %d facet(s) -> %d (LiDAR coplanarity)",
+                len(facets), len(merged))
+    return merged, True
 
 
 def fuse_into_report_input(report_input: dict,

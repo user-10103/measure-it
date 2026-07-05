@@ -87,8 +87,9 @@ def test_lidar_fusion_adds_pitch(tmp_path):
         (28.0303, -80.69809), "FL", fake_facets, fake_outline,
         out_dir=tmp_path, chip_fetcher=fake_chip, lidar_points=pts,
     )
-    assert res.num_facets == 4
-    assert res.num_pitched == 4                       # every facet got a pitch
+    # the 4 quads lie on ONE plane -> the coplanar merge correctly makes 1 facet
+    assert res.num_facets == 1
+    assert res.num_pitched == 1
     with open(res.pdf_path, "rb") as fh:
         assert fh.read(5) == b"%PDF-"
 
@@ -122,7 +123,8 @@ def test_use_lidar_autofetch(tmp_path, monkeypatch):
         (28.0303, -80.69809), "FL", fake_facets, fake_outline,
         out_dir=tmp_path, chip_fetcher=fake_chip_with_meta, use_lidar=True,
     )
-    assert res.num_pitched == 4                        # auto-fetched + fused
+    # 4 coplanar quads merge to 1 facet; it gets a pitch
+    assert res.num_pitched == 1 and res.num_facets == 1
     # slope runs east -> the east-west perimeter runs relabel to RAKE
     assert res.edge_totals_m.get("rake", 0) > 0
     assert res.edge_totals_m.get("eave", 0) > 0        # north-south runs stay

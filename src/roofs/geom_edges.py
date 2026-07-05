@@ -88,6 +88,76 @@ def edges_from_outline_and_facets(outline, facets, touch_tol: float = 2.0) -> Li
     return edges
 
 
+def _nearest_facets(mid, lookup, touch_tol):
+    """Facet ids whose boundary passes within touch_tol of a point, nearest first."""
+    hits = sorted(((poly.boundary.distance(mid), fid) for fid, poly in lookup),
+                  key=lambda t: t[0])
+    return [fid for d, fid in hits if d <= touch_tol]
+
+
+def relabel_flat_junction_flashing(edges: List[dict], facets, annotations,
+                                   touch_tol: float = 1.5) -> List[dict]:
+    """A seam between a PITCHED facet and a FLAT facet is wall flashing, not a
+    valley/hip/ridge (the Holland-vs-Roofr criterion: Roofr books those
+    junctions under flashing; a valley needs two PITCHED faces draining into
+    it). Pure relabel — geometry untouched; needs LiDAR is_flat per facet."""
+    from shapely.geometry import LineString
+
+    lookup = [(f.facet_id, f.polygon) for f in facets
+              if f.polygon is not None and not f.polygon.is_empty]
+    for e in edges:
+        if e.get("edge_type") not in ("valley", "hip", "ridge"):
+            continue
+        g = e.get("geometry_xy", [])
+        if len(g) < 2:
+            continue
+        mid = LineString(g).interpolate(0.5, normalized=True)
+        near = _nearest_facets(mid, lookup, touch_tol)[:2]
+        if len(near) < 2:
+            continue
+        flats = [annotations.get(fid, {}).get("is_flat") for fid in near]
+        if None in flats:
+            continue
+        if flats[0] != flats[1]:                 # one pitched, one flat
+            e["edge_type"] = "wall_flashing"
+    return edges
+
+
+def apply_3d_edge_lengths(edges: List[dict], facets, grads,
+                          touch_tol: float = 1.5) -> List[dict]:
+    """Plan lengths -> true sloped lengths using the adjacent facet's plane.
+
+    An edge on plane z = a*x + b*y + c with unit direction d gains
+    sqrt(1 + (grad . d)^2). Level edges (eaves, ridges) get factor ~1
+    automatically because they run perpendicular to the gradient; hips,
+    valleys, and rakes lengthen — e.g. Holland's hips 122.5' plan -> ~127'
+    true at 3:12 (the Roofr number).
+    """
+    import math
+
+    from shapely.geometry import LineString
+
+    lookup = [(f.facet_id, f.polygon) for f in facets
+              if f.polygon is not None and not f.polygon.is_empty]
+    for e in edges:
+        g = e.get("geometry_xy", [])
+        if len(g) < 2:
+            continue
+        (x0, y0), (x1, y1) = g[0], g[-1]
+        plan = math.hypot(x1 - x0, y1 - y0)
+        if plan <= 1e-9:
+            continue
+        d = ((x1 - x0) / plan, (y1 - y0) / plan)
+        mid = LineString(g).interpolate(0.5, normalized=True)
+        near = _nearest_facets(mid, lookup, touch_tol)
+        grad = next((grads[fid] for fid in near if fid in grads), None)
+        if grad is None:
+            continue
+        dz = abs(grad[0] * d[0] + grad[1] * d[1])
+        e["length_m"] = float(e["length_m"] * math.sqrt(1.0 + dz * dz))
+    return edges
+
+
 def relabel_rakes(edges: List[dict], facets, aspects_deg,
                   angle_thresh_deg: float = 45.0, touch_tol: float = 1.5) -> List[dict]:
     """Split perimeter "eave" edges into eave vs RAKE using slope direction.

@@ -182,19 +182,38 @@ def generate_roof_report(
         except Exception as e:  # noqa: BLE001 — LiDAR is additive, never fatal
             logger.warning("LiDAR fetch failed (%s) — imagery-only report", e)
 
-    # optional LiDAR fusion: read-only pitch/sloped-area annotation — facet
-    # geometry is frozen by this point ("SAM for shape, LiDAR for pitch")
+    # LiDAR fusion: annotate -> evidence-based coplanar merge -> pitch fields
+    # -> edge refinements (rakes, flashing, true 3D lengths)
     if lidar_points is not None and roof.facets:
         from src.roofs.fuse_sam_lidar import (
-            annotate_facets_with_lidar, fuse_into_report_input)
-        from src.roofs.geom_edges import relabel_rakes
+            annotate_facets_with_lidar, fuse_into_report_input,
+            merge_coplanar_facets)
+        from src.roofs.geom_edges import (
+            apply_3d_edge_lengths, relabel_flat_junction_flashing,
+            relabel_rakes)
         annotations = annotate_facets_with_lidar(roof.facets, lidar_points)
+        # merge facets LiDAR proves are one plane (fixes model over-
+        # segmentation; area-conserving; off via MEASURE_IT_PLANE_MERGE=0)
+        if _os.getenv("MEASURE_IT_PLANE_MERGE", "1") == "1":
+            merged, changed = merge_coplanar_facets(
+                roof.facets, lidar_points, annotations)
+            if changed:
+                roof.facets = merged
+                annotations = annotate_facets_with_lidar(merged, lidar_points)
+                report_input = facets_to_report_input(
+                    roof, label, aerial_image_path=chip_png)
         fuse_into_report_input(report_input, annotations)
-        # eave vs rake: pure relabel from each facet's downslope direction —
-        # edge geometry/lengths untouched; only sloped, annotated facets vote
+        # eave vs rake: pure relabel from each facet's downslope direction
         aspects = {fid: a["aspect_deg"] for fid, a in annotations.items()
                    if not a.get("is_flat")}
         relabel_rakes(report_input["edges"], roof.facets, aspects)
+        # pitched<->flat junctions are flashing, not valleys (Holland criterion)
+        relabel_flat_junction_flashing(report_input["edges"], roof.facets,
+                                       annotations)
+        # plan -> true sloped lengths (hips/valleys/rakes lengthen; level
+        # eaves/ridges stay put)
+        grads = {fid: a["grad"] for fid, a in annotations.items()}
+        apply_3d_edge_lengths(report_input["edges"], roof.facets, grads)
 
     pdf_path = out_dir / "roof_report.pdf"
     generate_report(report_input, str(pdf_path))
