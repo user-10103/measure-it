@@ -33,7 +33,7 @@ RUN pip install \
         fastapi "uvicorn[standard]" python-multipart \
         rasterio geopandas shapely pyproj affine \
         boto3 requests reportlab scipy scikit-image scikit-learn \
-        pillow matplotlib
+        pillow matplotlib "laspy[lazrs]"
 
 EXPOSE 8000
 COPY deploy/entrypoint.sh /entrypoint.sh
