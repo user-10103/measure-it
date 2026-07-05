@@ -89,6 +89,7 @@ def annotate_facets_with_lidar(
         out[f.facet_id] = {
             "slope_deg": float(slope),
             "pitch_string": compute_pitch_string(slope),
+            "aspect_deg": float(aspect),        # downslope compass deg (rake relabel)
             "aspect_bin": compute_aspect_bin(aspect),
             "is_flat": bool(is_flat),
             "surface_area_m2": float(

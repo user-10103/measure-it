@@ -129,9 +129,12 @@ def render_diagram(report_input: dict, mode: str = "plain",
                 label = str(int(round(m2_to_sqft(f.get("surface_area_m2") or f.get("plan_area_m2", 0.0)))))
                 if f.get("is_flat"):
                     label = "Flat " + label
-            else:  # pitch
-                pitch = (f.get("pitch_string") or "0:12").split(":")[0]
-                arrow = "" if f.get("is_flat") else ARROWS.get(f.get("aspect_bin", ""), "")
+            else:  # pitch — full "5:12"; "–" when unmeasured (never a fake "0")
+                if f.get("is_flat"):
+                    pitch, arrow = "Flat", ""
+                else:
+                    pitch = f.get("pitch_string") or "–"
+                    arrow = ARROWS.get(f.get("aspect_bin", ""), "")
                 flag = "?" if f.get("needs_review") else ""
                 label = f"{pitch}{flag} {arrow}".strip()
             color = REVIEW_OUTLINE if (mode == "pitch" and f.get("needs_review")) else LABEL_RGB

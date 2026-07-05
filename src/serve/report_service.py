@@ -187,8 +187,14 @@ def generate_roof_report(
     if lidar_points is not None and roof.facets:
         from src.roofs.fuse_sam_lidar import (
             annotate_facets_with_lidar, fuse_into_report_input)
+        from src.roofs.geom_edges import relabel_rakes
         annotations = annotate_facets_with_lidar(roof.facets, lidar_points)
         fuse_into_report_input(report_input, annotations)
+        # eave vs rake: pure relabel from each facet's downslope direction —
+        # edge geometry/lengths untouched; only sloped, annotated facets vote
+        aspects = {fid: a["aspect_deg"] for fid, a in annotations.items()
+                   if not a.get("is_flat")}
+        relabel_rakes(report_input["edges"], roof.facets, aspects)
 
     pdf_path = out_dir / "roof_report.pdf"
     generate_report(report_input, str(pdf_path))

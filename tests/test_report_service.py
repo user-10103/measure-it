@@ -123,6 +123,9 @@ def test_use_lidar_autofetch(tmp_path, monkeypatch):
         out_dir=tmp_path, chip_fetcher=fake_chip_with_meta, use_lidar=True,
     )
     assert res.num_pitched == 4                        # auto-fetched + fused
+    # slope runs east -> the east-west perimeter runs relabel to RAKE
+    assert res.edge_totals_m.get("rake", 0) > 0
+    assert res.edge_totals_m.get("eave", 0) > 0        # north-south runs stay
 
 
 def test_lidar_fetch_failure_degrades_gracefully(tmp_path, monkeypatch):

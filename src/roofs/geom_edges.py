@@ -86,3 +86,53 @@ def edges_from_outline_and_facets(outline, facets, touch_tol: float = 2.0) -> Li
         edges.append({"edge_type": etype, "length_m": float(seg.length),
                       "geometry_xy": [list(c) for c in seg.coords]})
     return edges
+
+
+def relabel_rakes(edges: List[dict], facets, aspects_deg,
+                  angle_thresh_deg: float = 45.0, touch_tol: float = 1.5) -> List[dict]:
+    """Split perimeter "eave" edges into eave vs RAKE using slope direction.
+
+    Both are perimeter edges; the difference is orientation to the adjacent
+    facet's downslope direction (LiDAR aspect): an eave runs PERPENDICULAR to
+    the slope (the gutter edge), a rake runs ALONG it (the gable-end edge).
+    Pure relabel — geometry and lengths never change. Facets without an aspect
+    (flat / no LiDAR) keep their edges as eaves.
+
+    Args:
+        edges: report edge dicts (mutated in place and returned).
+        facets: objects with ``.facet_id`` and ``.polygon`` (the SAM facets).
+        aspects_deg: {facet_id: downslope compass degrees from North}.
+    """
+    import math
+
+    from shapely.geometry import LineString, Point
+
+    cos_thr = math.cos(math.radians(angle_thresh_deg))
+    lookup = [(f.facet_id, f.polygon) for f in facets
+              if f.polygon is not None and not f.polygon.is_empty]
+    for e in edges:
+        if e.get("edge_type") != "eave" or len(e.get("geometry_xy", [])) < 2:
+            continue
+        seg = LineString(e["geometry_xy"])
+        mid = seg.interpolate(0.5, normalized=True)
+        # adjacent facet = nearest boundary to the segment midpoint
+        best_id, best_d = None, float("inf")
+        for fid, poly in lookup:
+            d = poly.boundary.distance(mid)
+            if d < best_d:
+                best_id, best_d = fid, d
+        if best_id is None or best_d > touch_tol:
+            continue
+        aspect = aspects_deg.get(best_id)
+        if aspect is None:
+            continue
+        (x0, y0), (x1, y1) = e["geometry_xy"][0], e["geometry_xy"][-1]
+        elen = math.hypot(x1 - x0, y1 - y0)
+        if elen <= 1e-9:
+            continue
+        ex, ey = (x1 - x0) / elen, (y1 - y0) / elen
+        a = math.radians(aspect)                      # compass: 0=N, 90=E
+        dx, dy = math.sin(a), math.cos(a)             # downslope unit vector
+        if abs(ex * dx + ey * dy) >= cos_thr:         # parallel to slope -> rake
+            e["edge_type"] = "rake"
+    return edges
