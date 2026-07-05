@@ -61,6 +61,7 @@ def fetch_chip(lat: float, lon: float, state: str, out_dir: Path,
     if not naip_tif:
         raise RuntimeError(f"No NAIP imagery available near ({lat}, {lon})")
     with rasterio.open(naip_tif) as src:
+        chip_crs = str(src.crs)
         fp_geom = footprint.to_crs(src.crs).geometry.iloc[0]
         geom = fp_geom.buffer(chip_buffer_m)
         arr, transform = rio_mask(src, [geom.__geo_interface__], crop=True,
@@ -71,7 +72,8 @@ def fetch_chip(lat: float, lon: float, state: str, out_dir: Path,
         dtype="uint8").astype(bool)
     png = out_dir / "chip.png"
     Image.fromarray(chip).save(png)
-    return chip, transform, str(png), anchor
+    meta = {"crs": chip_crs, "footprint_wgs84": footprint.geometry.iloc[0]}
+    return chip, transform, str(png), anchor, meta
 
 
 def _fallback_outline(roof):
@@ -116,6 +118,7 @@ def generate_roof_report(
     score_thr: float = SCORE_THR,
     chip_buffer_m: float = CHIP_BUFFER_M,
     lidar_points=None,
+    use_lidar: Optional[bool] = None,
 ) -> ReportResult:
     """User input -> roof_report.pdf. The whole pipeline, one entry point.
 
@@ -130,6 +133,10 @@ def generate_roof_report(
             chip's world CRS — enables per-facet pitch + true sloped area via
             read-only fusion (facet shapes are never modified). Without it the
             report shows pitch "unspecified" (plan areas).
+        use_lidar: fetch the points automatically via the pure-python EPT
+            reader (USGS usgs-lidar-public, no credentials). Default: the
+            MEASURE_IT_LIDAR env var ("1" = on). Coverage miss or fetch error
+            degrades gracefully to the imagery-only report.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -146,6 +153,7 @@ def generate_roof_report(
                            chip_buffer_m=chip_buffer_m)
     chip, transform, chip_png = fetched[0], fetched[1], fetched[2]
     anchor = fetched[3] if len(fetched) > 3 else None   # footprint mask
+    meta = fetched[4] if len(fetched) > 4 else {}       # crs + footprint_wgs84
 
     roof = segment_roof_sam(
         predict_facets, chip, transform=transform,
@@ -160,6 +168,19 @@ def generate_roof_report(
             logger.warning("zero-shot outline missed — using facet-union fallback")
 
     report_input = facets_to_report_input(roof, label, aerial_image_path=chip_png)
+
+    # auto-fetch LiDAR when enabled (env MEASURE_IT_LIDAR=1 or use_lidar=True)
+    import os as _os
+    if use_lidar is None:
+        use_lidar = _os.getenv("MEASURE_IT_LIDAR", "0") == "1"
+    if (lidar_points is None and use_lidar and roof.facets
+            and meta.get("crs") and meta.get("footprint_wgs84") is not None):
+        try:
+            from src.lidar.ept_fetch import fetch_roof_points
+            lidar_points = fetch_roof_points(
+                lat, lon, meta["footprint_wgs84"], meta["crs"])
+        except Exception as e:  # noqa: BLE001 — LiDAR is additive, never fatal
+            logger.warning("LiDAR fetch failed (%s) — imagery-only report", e)
 
     # optional LiDAR fusion: read-only pitch/sloped-area annotation — facet
     # geometry is frozen by this point ("SAM for shape, LiDAR for pitch")

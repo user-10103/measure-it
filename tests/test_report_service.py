@@ -101,6 +101,49 @@ def test_without_lidar_num_pitched_zero(tmp_path):
     assert res.num_pitched == 0                       # imagery-only floor
 
 
+def test_use_lidar_autofetch(tmp_path, monkeypatch):
+    """use_lidar=True fetches points via ept_fetch and pitches the facets."""
+    from shapely.geometry import box as shp_box
+
+    def fake_chip_with_meta(lat, lon, state, out_dir, chip_buffer_m=18.0):
+        chip, tr, png = fake_chip(lat, lon, state, out_dir, chip_buffer_m)[:3]
+        return chip, tr, png, None, {"crs": "EPSG:32617",
+                                     "footprint_wgs84": shp_box(-80.7, 28.0, -80.699, 28.001)}
+
+    def fake_fetch(lat, lon, fp, crs, **kw):
+        xs, ys = np.meshgrid(np.arange(500010.0, 500050.0, 0.5),
+                             np.arange(3099950.0, 3099990.0, 0.5))
+        x, y = xs.ravel(), ys.ravel()
+        return np.column_stack([x, y, 0.5 * (x - 500000.0)])
+
+    import src.lidar.ept_fetch as ef
+    monkeypatch.setattr(ef, "fetch_roof_points", fake_fetch)
+    res = generate_roof_report(
+        (28.0303, -80.69809), "FL", fake_facets, fake_outline,
+        out_dir=tmp_path, chip_fetcher=fake_chip_with_meta, use_lidar=True,
+    )
+    assert res.num_pitched == 4                        # auto-fetched + fused
+
+
+def test_lidar_fetch_failure_degrades_gracefully(tmp_path, monkeypatch):
+    def fake_chip_with_meta(lat, lon, state, out_dir, chip_buffer_m=18.0):
+        from shapely.geometry import box as shp_box
+        chip, tr, png = fake_chip(lat, lon, state, out_dir, chip_buffer_m)[:3]
+        return chip, tr, png, None, {"crs": "EPSG:32617",
+                                     "footprint_wgs84": shp_box(0, 0, 1, 1)}
+
+    import src.lidar.ept_fetch as ef
+    monkeypatch.setattr(ef, "fetch_roof_points",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("net down")))
+    res = generate_roof_report(
+        (28.0, -80.7), "FL", fake_facets, fake_outline,
+        out_dir=tmp_path, chip_fetcher=fake_chip_with_meta, use_lidar=True,
+    )
+    assert res.num_pitched == 0                        # imagery-only, no crash
+    with open(res.pdf_path, "rb") as fh:
+        assert fh.read(5) == b"%PDF-"
+
+
 def test_no_facets_still_produces_pdf(tmp_path):
     res = generate_roof_report(
         (28.0, -80.7), "FL", no_outline, no_outline,
