@@ -79,3 +79,11 @@ Either way: nobody ever types a token into a prompt in production.
   note that path has 6 pre-existing test failures (RAKE detection) to fix first.
 - Facet quality reflects the in-training checkpoint; it improves with the
   dataset growth toward ~5,000 labeled roofs.
+- **"Two story area" semantics (arbitrated 2026-07-06 on the Holland benchmark):**
+  our field measures roof area sitting >=2.4 m above the building's LOWEST roof
+  level — a physical, LiDAR-derived access quantity. Roofr's field reflects
+  parcel-record building stories instead, so on tall commercial buildings we
+  report a real nonzero value where they report 0 (Holland: our 3,054 sqft —
+  mixed pitched+flat upper facets at +2.4-3.3 m — vs their 0). On residential,
+  the two definitions coincide. True parcel parity would require a county
+  records lookup, not a geometry change.
