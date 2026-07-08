@@ -12,7 +12,6 @@ from typing import Optional, Tuple
 
 import geopandas as gpd
 import numpy as np
-import pdal
 from scipy.interpolate import griddata
 from scipy.ndimage import gaussian_filter, maximum_filter
 from scipy.spatial import ConvexHull
@@ -31,7 +30,17 @@ from src.config import (
 logger = logging.getLogger(__name__)
 
 
-def build_pdal_pipeline(ept_url: str, polygon_wkt_epsg4326: str) -> dict:
+def utm_epsg_for(lon: float, lat: float) -> int:
+    """NAD83 UTM zone EPSG for a CONUS lon/lat (e.g. Tampa -> 26917)."""
+    zone = int((lon + 180.0) / 6.0) + 1
+    return 26900 + zone
+
+
+def build_pdal_pipeline(
+    ept_url: str,
+    polygon_wkt_epsg4326: str,
+    out_srs: Optional[str] = None,
+) -> dict:
     """
     Construct PDAL pipeline configuration for EPT point cloud extraction.
 
@@ -41,10 +50,15 @@ def build_pdal_pipeline(ept_url: str, polygon_wkt_epsg4326: str) -> dict:
     1. Read EPT data for polygon bounds
     2. Remove statistical outliers
     3. Filter to building-relevant classifications (1-6)
+    4. Reproject to `out_srs` (when given) — several FL EPTs are published in
+       EPSG:3857 Web Mercator, where XY is NOT true meters at FL latitudes
+       (areas +28%, lengths +13%, slopes -12% at 28N). Reprojecting to UTM at
+       the source keeps every downstream gradient/length/area in real meters.
 
     Args:
         ept_url: EPT endpoint URL (e.g., "https://.../ept.json")
         polygon_wkt_epsg4326: WKT polygon with CRS tag (e.g., "POLYGON(...)/EPSG:4326")
+        out_srs: optional target CRS (e.g. "EPSG:26917")
 
     Returns:
         Pipeline configuration dict ready for pdal.Pipeline()
@@ -69,24 +83,35 @@ def build_pdal_pipeline(ept_url: str, polygon_wkt_epsg4326: str) -> dict:
             }
         ]
     }
+    if out_srs:
+        pipeline["pipeline"].append({
+            "type": "filters.reprojection",
+            "out_srs": out_srs,
+        })
 
     logger.debug(f"Built PDAL pipeline with {len(pipeline['pipeline'])} stages")
     return pipeline
 
 
-def fetch_lidar_points(ept_url: str, polygon_wkt_epsg4326: str) -> Optional[np.ndarray]:
+def fetch_lidar_points(
+    ept_url: str,
+    polygon_wkt_epsg4326: str,
+    out_srs: Optional[str] = None,
+) -> Optional[Tuple[np.ndarray, str]]:
     """
     Execute PDAL pipeline to fetch LiDAR points for a polygon area.
 
-    Single responsibility: retrieve and return point cloud array.
+    Single responsibility: retrieve and return point cloud array and its CRS.
 
     Args:
         ept_url: EPT endpoint URL
         polygon_wkt_epsg4326: WKT polygon with CRS tag
 
     Returns:
-        Structured numpy array with fields: X, Y, Z, Classification, etc.
-        or None if execution fails
+        Tuple of (points, srswkt) where points is a structured numpy array with
+        fields X, Y, Z, Classification etc., and srswkt is the WKT CRS string
+        that PDAL reported for the output points.
+        Returns (None, None) if the EPT tile has no coverage.
 
     Raises:
         RuntimeError: If PDAL pipeline execution fails
@@ -97,23 +122,41 @@ def fetch_lidar_points(ept_url: str, polygon_wkt_epsg4326: str) -> Optional[np.n
     logger.info(f"Fetching LiDAR points from EPT: {ept_url}")
 
     try:
-        pipeline_config = build_pdal_pipeline(ept_url, polygon_wkt_epsg4326)
+        import pdal  # lazy — not needed unless LiDAR path is active
+        pipeline_config = build_pdal_pipeline(ept_url, polygon_wkt_epsg4326, out_srs=out_srs)
         pipeline = pdal.Pipeline(json.dumps(pipeline_config))
 
         n_points = pipeline.execute()
 
         if n_points == 0:
             logger.warning("EPT query returned 0 points - area may not have LiDAR coverage")
-            return None
+            return None, None
 
         points = pipeline.arrays[0]
+        # Canonical point order: the threaded EPT reader returns points in a
+        # nondeterministic order, and downstream consumers are order-sensitive
+        # (Qhull triangulation in griddata, KDTree tie-breaks, RANSAC/KMeans
+        # index sampling). Sorting here makes the whole pipeline reproducible
+        # for identical EPT content.
+        points = points[np.lexsort((points['Z'], points['Y'], points['X']))]
+        # With an explicit reprojection stage the output CRS is out_srs by
+        # construction; srswkt2 may still report the reader's native SRS.
+        if out_srs:
+            srswkt = out_srs
+        else:
+            # srswkt2 is the PDAL 3.x attribute name; fall back to srswkt for older builds.
+            srswkt = (
+                getattr(pipeline, "srswkt2", None)
+                or getattr(pipeline, "srswkt", None)
+                or ""
+            )
 
         logger.info(
             f"Retrieved {n_points:,} points. "
             f"Z range: {points['Z'].min():.2f} to {points['Z'].max():.2f} meters"
         )
 
-        return points
+        return points, srswkt
 
     except Exception as e:
         error_msg = f"PDAL pipeline execution failed: {str(e)}"
@@ -231,52 +274,30 @@ def extract_roof_polygon(
     logger.info(f"Extracting roof polygon (threshold offset: {threshold_offset}m)")
 
     try:
-        # Segment roof region
-        max_elevation = grid_z.max()
-        roof_threshold = max_elevation - threshold_offset
+        # Use a ground-relative threshold: everything more than threshold_offset metres
+        # above the estimated ground plane is "building".  The old max-relative approach
+        # (max_z - 2 m) captured only the roof peak — useless for the footprint.
+        z_flat = grid_z.ravel()
+        # 10th percentile of non-minimum cells ≈ ground elevation
+        ground_z = float(np.percentile(z_flat[z_flat > z_flat.min() + 0.1], 10))
+        roof_threshold = ground_z + threshold_offset
         roof_mask = grid_z >= roof_threshold
 
         roof_x = grid_x[roof_mask]
         roof_y = grid_y[roof_mask]
-        roof_z = grid_z[roof_mask]
 
         if len(roof_x) < 10:
             logger.error(f"Insufficient roof points: {len(roof_x)} (need at least 10)")
             raise ValueError("Not enough points above roof threshold")
 
-        logger.debug(
-            f"Roof segmentation: {len(roof_x):,} points above {roof_threshold:.2f}m "
-            f"({len(roof_x)/roof_mask.size*100:.1f}% of grid)"
-        )
-
-        # Fit dominant plane with RANSAC
-        X_roof = np.column_stack([roof_x, roof_y])
-        y_roof = roof_z
-
-        ransac = RANSACRegressor(
-            residual_threshold=RANSAC_RESIDUAL_M,
-            max_trials=1000,
-            random_state=42
-        )
-        ransac.fit(X_roof, y_roof)
-
-        inlier_mask = ransac.inlier_mask_
-        n_inliers = inlier_mask.sum()
-
-        if n_inliers < 10:
-            logger.error(f"RANSAC found only {n_inliers} inliers (need at least 10)")
-            raise ValueError("RANSAC plane fitting failed - insufficient inliers")
-
         logger.info(
-            f"RANSAC plane fitting: {n_inliers:,} inliers "
-            f"({n_inliers/len(X_roof)*100:.1f}% of roof points)"
+            f"Footprint extraction: {len(roof_x):,} points above {roof_threshold:.2f}m "
+            f"(ground≈{ground_z:.2f}m + {threshold_offset}m offset)"
         )
 
-        # Extract boundary via convex hull
-        boundary_x = roof_x[inlier_mask]
-        boundary_y = roof_y[inlier_mask]
-
-        points_2d = np.column_stack([boundary_x, boundary_y])
+        # Convex hull of ALL above-ground points — no RANSAC here.
+        # RANSAC is for plane fitting (step 8), not footprint extraction.
+        points_2d = np.column_stack([roof_x, roof_y])
         hull = ConvexHull(points_2d)
         hull_points = points_2d[hull.vertices]
 
@@ -356,11 +377,45 @@ def get_ept_lidar_for_location(
         # Create CRS-tagged WKT for PDAL
         polygon_wkt_epsg4326 = buffer_wgs84.wkt + "/EPSG:4326"
 
-        # Fetch points
-        points = fetch_lidar_points(ept_url, polygon_wkt_epsg4326)
+        # Fetch points — returns (array, srswkt) so we know the actual output CRS.
+        # Reproject at the source to true-meter UTM: several FL EPTs publish in
+        # EPSG:3857, which distorts every downstream area/length/slope at 28N.
+        out_srs = f"EPSG:{utm_epsg_for(lon, lat)}"
+        points, points_crs = fetch_lidar_points(ept_url, polygon_wkt_epsg4326, out_srs=out_srs)
 
         if points is None or len(points) == 0:
             logger.warning("No LiDAR points retrieved")
+            return None
+
+        logger.info(f"EPT output CRS: {points_crs[:80] if points_crs else '(unknown)'}")
+
+        # Clip points to building footprint + 10m buffer.
+        # The fetch used a 30m buffer to ensure coverage; now we discard trees
+        # and adjacent structures outside the actual building boundary.
+        if points_crs:
+            try:
+                from pyproj import CRS as _CRS
+                _pts_crs = _CRS.from_user_input(points_crs)
+                _to_pts = Transformer.from_crs("EPSG:4326", _pts_crs, always_xy=True).transform
+                _bldg_native = shp_transform(_to_pts, building_polygon_wgs84)
+                _bldg_clip = _bldg_native.buffer(10.0)
+                import shapely as _shp_lib
+                _mask = _shp_lib.contains_xy(
+                    _bldg_clip,
+                    points['X'].astype(float),
+                    points['Y'].astype(float),
+                )
+                n_before = len(points)
+                points = points[_mask]
+                logger.info(
+                    f"Clipped to building footprint (+10m): "
+                    f"{len(points):,}/{n_before:,} points retained"
+                )
+            except Exception as _ce:
+                logger.warning(f"Building footprint clip failed: {_ce} — using all points")
+
+        if len(points) == 0:
+            logger.warning("No points inside building footprint")
             return None
 
         # Build DSM
@@ -373,6 +428,7 @@ def get_ept_lidar_for_location(
 
         result = {
             "points": points,
+            "points_crs": points_crs,
             "grid_x": grid_x,
             "grid_y": grid_y,
             "grid_z": grid_z,

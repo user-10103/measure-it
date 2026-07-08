@@ -19,6 +19,10 @@ def main():
     ap.add_argument("--prefix", default="phase1")
     ap.add_argument("--dataset", default="roof_dataset")
     ap.add_argument("--workers", type=int, default=16)
+    ap.add_argument("--listing", default="chips_needed.txt",
+                    help="Filename of the chips list inside each split dir "
+                         "(default: chips_needed.txt). Use chips_needed_{prefix}.txt "
+                         "when working with merged datasets.")
     args = ap.parse_args()
 
     import boto3
@@ -28,7 +32,7 @@ def main():
     jobs = []
     for split in ("train", "valid", "test"):
         d = os.path.join(args.dataset, split)
-        listing = os.path.join(d, "chips_needed.txt")
+        listing = os.path.join(d, args.listing)
         if not os.path.exists(listing):
             continue
         for name in (l.strip() for l in open(listing) if l.strip()):

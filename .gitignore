@@ -29,3 +29,8 @@ sample_report/
 
 # OS
 .DS_Store
+
+# local geodata caches (NAIP tiles, EPT index, msbuildings shards) - multi-GB
+/data/
+# generated pseudo-label datasets (reproducible via training/build_pseudo_dataset.py)
+training/roof_dataset_pseudo*/

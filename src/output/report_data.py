@@ -70,7 +70,7 @@ def build_report_model(report_input: dict) -> ReportModel:
     pitch_area: Dict[str, float] = defaultdict(float)
     facet_rows = []
     for f in facets:
-        sqft = m2_to_sqft(f.get("plan_area_m2", 0.0))
+        sqft = m2_to_sqft(f.get("surface_area_m2") or f.get("plan_area_m2", 0.0))
         total += sqft
         is_flat = bool(f.get("is_flat"))
         pitch = f.get("pitch_string") or "unspecified"

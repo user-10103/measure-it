@@ -42,11 +42,14 @@ RIDGE_OPPOSE_COS_MAX = -0.5    # gradients > 120deg apart => ridge
 
 class EdgeType(Enum):
     """Roof edge classification types."""
-    RIDGE = "ridge"      # Both planes slope downward away from line
-    HIP = "hip"          # Planes slope downward away from each other
-    VALLEY = "valley"    # Planes slope downward towards line
-    EAVE = "eave"        # Lower edge at wall line
-    RAKE = "rake"        # Gable end edge
+    RIDGE = "ridge"               # Both planes slope downward away from line
+    HIP = "hip"                   # Planes slope downward away from each other
+    VALLEY = "valley"             # Planes slope downward towards line
+    EAVE = "eave"                 # Lower perimeter edge (facet drains outward)
+    RAKE = "rake"                 # Gable-end perimeter edge (slope-parallel)
+    STEP_FLASHING = "step_flashing"  # Sloped facet's HIGH-side perimeter edge (meets wall)
+    WALL_FLASHING = "wall_flashing"  # Roof meets a taller wall head-on (height step at junction)
+    PARAPET = "parapet"           # Flat facet perimeter edge (terminates at raised wall)
     UNKNOWN = "unknown"
 
 
@@ -504,6 +507,43 @@ def merge_collinear_edges(
     return merged
 
 
+def correct_edge_lengths_3d(
+    edges: List["RoofEdge"],
+    plane_by_facet_id: Dict[int, "PlaneModel"],
+) -> None:
+    """Correct hip/rake/valley lengths from plan-projection to true 3D slope distance.
+
+    Ridges and eaves run horizontally along contour lines — no correction needed.
+    Hips, rakes, and valleys lie on sloped surfaces; their true length is:
+        length_3d = length_2d × √(1 + (a·dx + b·dy)²)
+    where (a, b) is the gradient of the adjacent plane and (dx, dy) is the edge's
+    unit direction in plan. Modifies edge.length_m in-place.
+    """
+    NEEDS_CORRECTION = {EdgeType.HIP, EdgeType.RAKE, EdgeType.VALLEY}
+    for edge in edges:
+        if edge.edge_type not in NEEDS_CORRECTION:
+            continue
+        plane = None
+        for fid in edge.facet_ids:
+            if fid is not None and fid in plane_by_facet_id:
+                plane = plane_by_facet_id[fid]
+                break
+        if plane is None:
+            continue
+        coords = list(edge.geometry.coords)
+        if len(coords) < 2:
+            continue
+        dx = coords[-1][0] - coords[0][0]
+        dy = coords[-1][1] - coords[0][1]
+        plan_len = math.hypot(dx, dy)
+        if plan_len < 1e-9:
+            continue
+        dx /= plan_len
+        dy /= plan_len
+        dz_per_unit = plane.a * dx + plane.b * dy
+        edge.length_m = round(edge.length_m * math.sqrt(1.0 + dz_per_unit ** 2), 4)
+
+
 def compute_edge_lengths_by_type(edges: List[RoofEdge]) -> Dict[str, float]:
     """
     Compute total length by edge type.
@@ -701,24 +741,58 @@ def classify_interior_edge(
     return EdgeType.HIP
 
 
-def classify_perimeter_edge(plane: PlaneModel, p0: tuple, p1: tuple) -> EdgeType:
-    """Eave vs rake for a perimeter segment, from the adjacent facet's slope.
+STEP_FLASHING_INWARD_THRESH = 0.35  # downslope·inward > this → edge is on the HIGH side
 
-    Eave = the down-slope direction is ~perpendicular to the edge (contour /
-    bottom edge). Rake = down-slope runs ~parallel to the edge (gable end).
-    A near-flat facet defaults to eave.
+def classify_perimeter_edge(
+    plane: PlaneModel,
+    p0: tuple,
+    p1: tuple,
+    interior_point: Optional[tuple] = None,
+) -> EdgeType:
+    """Classify a perimeter segment as eave, rake, step_flashing, or parapet.
+
+    Rules (applied in priority order):
+      - Flat plane (gradient ≈ 0)    → PARAPET (raised wall at edge of flat section)
+      - Slope ∥ edge direction        → RAKE (gable end)
+      - Downslope toward interior     → STEP_FLASHING (edge is on facet's high side)
+      - Otherwise                     → EAVE (edge is on facet's low side)
+
+    `interior_point` is any point inside the roof (e.g. the adjacent facet's centroid).
+    Without it, step flashing cannot be distinguished from eave.
     """
     g = math.hypot(plane.a, plane.b)
-    if g < 1e-6:
-        return EdgeType.EAVE
-    dsx, dsy = -plane.a / g, -plane.b / g          # downslope unit vector
+    if g < math.tan(math.radians(5.0)):
+        # Flat facet perimeter is a parapet wall. Threshold matches the metrics
+        # flat snap (2.5 deg) — fitted membrane-roof planes are never exactly
+        # gradient-zero, so an epsilon test would classify them as eaves.
+        return EdgeType.PARAPET
+
+    dsx, dsy = -plane.a / g, -plane.b / g   # unit downslope vector
     ex, ey = p1[0] - p0[0], p1[1] - p0[1]
     el = math.hypot(ex, ey)
     if el < 1e-9:
         return EdgeType.EAVE
     ex, ey = ex / el, ey / el
-    parallelism = abs(dsx * ex + dsy * ey)         # 0 = perpendicular, 1 = parallel
-    return EdgeType.RAKE if parallelism >= RAKE_PARALLELISM_THRESH else EdgeType.EAVE
+
+    parallelism = abs(dsx * ex + dsy * ey)  # 0 = perp to edge, 1 = parallel
+    if parallelism >= RAKE_PARALLELISM_THRESH:
+        return EdgeType.RAKE
+
+    if interior_point is not None:
+        mx = (p0[0] + p1[0]) / 2
+        my = (p0[1] + p1[1]) / 2
+        ix = interior_point[0] - mx
+        iy = interior_point[1] - my
+        il = math.hypot(ix, iy)
+        if il > 1e-9:
+            # Positive → downslope is toward the roof interior → edge is on the HIGH
+            # side (facet drains away from this perimeter segment toward the interior).
+            # That geometry matches step flashing: a sloped roof plane meeting a wall
+            # at its upper edge.
+            if (dsx * ix / il + dsy * iy / il) > STEP_FLASHING_INWARD_THRESH:
+                return EdgeType.STEP_FLASHING
+
+    return EdgeType.EAVE
 
 
 def _adjacent_facet(merged: List[dict], outline: Polygon, p0: tuple, p1: tuple) -> Optional[dict]:
@@ -740,10 +814,63 @@ def _adjacent_facet(merged: List[dict], outline: Polygon, p0: tuple, p1: tuple) 
     return None
 
 
+def _classify_step_junction(
+    plane_i: PlaneModel,
+    plane_j: PlaneModel,
+    line: LineString,
+    step_height_m: float,
+) -> Optional[EdgeType]:
+    """Detect a roof-meets-wall junction between two facets.
+
+    Evaluates both planes at the shared edge's midpoint. A height gap larger
+    than `step_height_m` means the facets are at different stories — the edge
+    is flashing on the LOWER roof, not a ridge/hip/valley:
+      - lower facet flat (near-zero gradient)      → WALL_FLASHING
+      - lower facet pitched, edge ∥ its downslope  → STEP_FLASHING
+      - lower facet pitched, edge ⊥ its downslope  → WALL_FLASHING
+
+    Returns None when the planes meet within tolerance (normal interior edge).
+    """
+    mid = line.interpolate(0.5, normalized=True)
+    mx, my = mid.x, mid.y
+    z_i = plane_i.predict(np.array([mx]), np.array([my]))[0]
+    z_j = plane_j.predict(np.array([mx]), np.array([my]))[0]
+
+    lower = plane_i if z_i < z_j else plane_j
+    g = math.hypot(lower.a, lower.b)
+    lower_is_flat = g < math.tan(math.radians(5.0))
+
+    # A flat membrane meeting a pitched section is NEVER a ridge/hip/valley —
+    # any real gap there is roof-meets-wall. Use a tighter trigger for that
+    # case; pitched-pitched junctions keep the caller's threshold so ridge
+    # fits that disagree by a few decimeters aren't misread as steps.
+    trigger = min(0.3, step_height_m) if lower_is_flat else step_height_m
+    if abs(z_i - z_j) <= trigger:
+        if lower_is_flat:
+            # Flush flat-pitched junction: the pitched side drains onto the
+            # membrane — that is its eave, never a ridge/hip/valley.
+            return EdgeType.EAVE
+        return None
+
+    if lower_is_flat:
+        return EdgeType.WALL_FLASHING
+
+    coords = list(line.coords)
+    ex, ey = coords[-1][0] - coords[0][0], coords[-1][1] - coords[0][1]
+    el = math.hypot(ex, ey)
+    if el < 1e-9:
+        return EdgeType.WALL_FLASHING
+    parallelism = abs((-lower.a / g) * (ex / el) + (-lower.b / g) * (ey / el))
+    if parallelism >= RAKE_PARALLELISM_THRESH:
+        return EdgeType.STEP_FLASHING       # edge runs up the lower roof's slope
+    return EdgeType.WALL_FLASHING           # edge runs across the lower roof's slope
+
+
 def classify_edges_from_facets(
     facet_polygons: List[Tuple[int, Polygon]],
     planes: List[PlaneModel],
     outline: Optional[Polygon] = None,
+    step_height_m: Optional[float] = None,
 ) -> List[RoofEdge]:
     """Derive typed roof edges from facet polygons + planes (RGB path).
 
@@ -753,9 +880,14 @@ def classify_edges_from_facets(
             plane_fit.plane_from_pitch_aspect when only pitch/aspect are known.
         outline: clean roof outline polygon for perimeter eave/rake. If None,
             perimeter edges are taken from the merged-facet boundary instead.
+        step_height_m: if set, interior junctions where the two planes' heights
+            differ by more than this are classified as wall/step flashing (roof
+            meets a taller wall) instead of ridge/hip/valley. Requires planes
+            with REAL intercepts (LiDAR fits) — leave None for the RGB path,
+            whose synthesized planes have arbitrary `c`.
 
     Returns:
-        List[RoofEdge] (ridge/hip/valley interior, eave/rake perimeter).
+        List[RoofEdge] (ridge/hip/valley/flashing interior, eave/rake perimeter).
     """
     facets = [{"facet_id": fid, "poly": poly, "plane": planes[i]}
               for i, (fid, poly) in enumerate(facet_polygons) if poly is not None]
@@ -776,25 +908,143 @@ def classify_edges_from_facets(
                     continue
                 ci = (fi["poly"].centroid.x, fi["poly"].centroid.y)
                 cj = (fj["poly"].centroid.x, fj["poly"].centroid.y)
-                etype = classify_interior_edge(fi["plane"], fj["plane"], line, ci, cj)
+                etype = None
+                if step_height_m is not None:
+                    etype = _classify_step_junction(
+                        fi["plane"], fj["plane"], line, step_height_m
+                    )
                 dihedral = compute_dihedral_angle(fi["plane"], fj["plane"])
+                if etype is None:
+                    _aspect_diff = abs(
+                        (math.degrees(math.atan2(-fi["plane"].b, -fi["plane"].a))
+                         - math.degrees(math.atan2(-fj["plane"].b, -fj["plane"].a)) + 180.0)
+                        % 360.0 - 180.0
+                    )
+                    if dihedral < 12.0 and _aspect_diff < 90.0:
+                        # Near-coplanar junction draining the SAME way with no
+                        # height step: fragments of one physical plane (adjacent
+                        # aspect bins at 3:12 differ ~10.6° dihedral). Not a
+                        # structural edge — emitting it fakes valleys/hips along
+                        # mid-slope fragment seams. Opposite-draining pairs are
+                        # kept even at low dihedral: a shallow-fitted ridge is
+                        # still a ridge.
+                        continue
+                    etype = classify_interior_edge(fi["plane"], fj["plane"], line, ci, cj)
+                    if etype == EdgeType.VALLEY and step_height_m is not None:
+                        # Height sanity check (real LiDAR intercepts): a valley
+                        # line sits BELOW both facets' interiors. Gradient-sign
+                        # noise on shallow fits fakes valleys at ridge seams.
+                        _mid = line.interpolate(0.5, normalized=True)
+                        _zl = float(np.mean([
+                            fi["plane"].predict(np.array([_mid.x]), np.array([_mid.y]))[0],
+                            fj["plane"].predict(np.array([_mid.x]), np.array([_mid.y]))[0],
+                        ]))
+                        _zi = fi["plane"].predict(np.array([ci[0]]), np.array([ci[1]]))[0]
+                        _zj = fj["plane"].predict(np.array([cj[0]]), np.array([cj[1]]))[0]
+                        if _zl >= min(_zi, _zj) - 0.05:
+                            # line is not below both interiors -> ridge family
+                            _gi = math.hypot(fi["plane"].a, fi["plane"].b)
+                            _gj = math.hypot(fj["plane"].a, fj["plane"].b)
+                            _cosg = ((fi["plane"].a * fj["plane"].a
+                                      + fi["plane"].b * fj["plane"].b)
+                                     / max(_gi * _gj, 1e-12))
+                            etype = EdgeType.RIDGE if _cosg < -0.5 else EdgeType.HIP
                 edges.append(RoofEdge(eid, etype, line, line.length,
                                       (fi["facet_id"], fj["facet_id"]), dihedral))
                 eid += 1
+                if etype in (EdgeType.WALL_FLASHING, EdgeType.STEP_FLASHING):
+                    # A story step is TWO edges in roofing terms: flashing on
+                    # the lower roof AND the upper roof's own perimeter edge
+                    # (its eave/rake — water drains off it onto the lower roof).
+                    mid = line.interpolate(0.5, normalized=True)
+                    z_i = fi["plane"].predict(np.array([mid.x]), np.array([mid.y]))[0]
+                    z_j = fj["plane"].predict(np.array([mid.x]), np.array([mid.y]))[0]
+                    upper = fi if z_i >= z_j else fj
+                    coords2 = list(line.coords)
+                    up_type = classify_perimeter_edge(
+                        upper["plane"], coords2[0], coords2[-1],
+                        (upper["poly"].centroid.x, upper["poly"].centroid.y),
+                    )
+                    if up_type in (EdgeType.EAVE, EdgeType.RAKE):
+                        edges.append(RoofEdge(eid, up_type, line, line.length,
+                                              (upper["facet_id"], None)))
+                        eid += 1
 
-    # PERIMETER eave/rake from the clean outline (fallback: merged boundary)
+    # PERIMETER: intersect each merged facet's boundary with the outline directly.
+    # This correctly handles outlines that span multiple facet types (e.g. a 30m
+    # edge that is partly hip-eave and partly flat-parapet) without relying on a
+    # midpoint probe that can misidentify the adjacent facet on long segments.
     if outline is not None and not outline.is_empty:
-        coords = list(outline.simplify(OUTLINE_SIMPLIFY_M).exterior.coords)
-        for k in range(len(coords) - 1):
-            p0, p1 = coords[k], coords[k + 1]
-            seg = LineString([p0, p1])
-            if seg.length < MIN_EDGE_LEN_M:
+        # Walk the outline and probe INWARD to find each segment's owner facet.
+        # Cell geometry at the rim is unreliable (absorbed unmodeled strips,
+        # 1 m LiDAR noise at parapet lips), so intersecting cell boundaries
+        # with the outline misattributes the perimeter; a 1.5 m inward probe
+        # lands past the noisy strip in the facet that actually owns the rim.
+        from shapely.geometry import Point as _Pt
+        from shapely.ops import substring as _substring
+
+        ring = outline.exterior
+        L = ring.length
+        n = max(int(L / 0.5), 16)
+
+        def _owner_at(dist):
+            p = ring.interpolate(dist)
+            p2 = ring.interpolate(min(dist + 0.25, L))
+            tx, ty = p2.x - p.x, p2.y - p.y
+            tl = math.hypot(tx, ty) or 1.0
+            nx, ny = -ty / tl, tx / tl
+            for probe_m in (1.5, 0.75):
+                for sgn in (1.0, -1.0):
+                    q = _Pt(p.x + sgn * nx * probe_m, p.y + sgn * ny * probe_m)
+                    if outline.contains(q):
+                        for f in merged:
+                            if f["poly"].contains(q):
+                                return f
+                        break   # inside outline but in no cell: try shorter probe
+            return None
+
+        samples = [(k * L / n, _owner_at((k + 0.5) * L / n)) for k in range(n)]
+        # group consecutive same-owner samples into outline runs
+        runs = []
+        for k, (d, owner) in enumerate(samples):
+            if runs and runs[-1][2] is owner:
+                runs[-1][1] = (k + 1) * L / n
+            else:
+                runs.append([d, (k + 1) * L / n, owner])
+        # a run cut in two by the ring start/end wraps around — merge ends
+        if len(runs) > 1 and runs[0][2] is runs[-1][2]:
+            runs[0][0] = runs[-1][0] - L
+            runs.pop()
+
+        for d0, d1, owner in runs:
+            if owner is None:
                 continue
-            fac = _adjacent_facet(merged, outline, p0, p1)
-            etype = classify_perimeter_edge(fac["plane"], p0, p1) if fac else EdgeType.EAVE
-            edges.append(RoofEdge(eid, etype, seg, seg.length,
-                                  (fac["facet_id"] if fac else None, None)))
+            if d0 >= 0:
+                seg = _substring(ring, d0, d1)
+            else:        # wrapped run: stitch the two outline pieces
+                part_a = _substring(ring, d0 + L, L)
+                part_b = _substring(ring, 0, d1)
+                coords = list(part_a.coords) + list(part_b.coords)[1:]
+                seg = LineString(coords) if len(coords) >= 2 else None
+            if seg is None or seg.length < MIN_EDGE_LEN_M:
+                continue
+            c = list(seg.coords)
+            interior_pt = (owner["poly"].centroid.x, owner["poly"].centroid.y)
+            etype = classify_perimeter_edge(owner["plane"], c[0], c[-1], interior_pt)
+            if etype == EdgeType.STEP_FLASHING:
+                # This pass walks the BUILDING outline — there is nothing taller
+                # beyond it, so a high-side run here is a drip edge that report
+                # conventions count as eave. True step flashing arises at
+                # interior story steps, emitted by the step-junction pass.
+                etype = EdgeType.EAVE
+            edges.append(RoofEdge(eid, etype, seg, seg.length, (owner["facet_id"], None)))
             eid += 1
+            logger.debug(
+                "perimeter run: facet %s slope=%.1f° %.1f m -> %s",
+                owner["facet_id"],
+                math.degrees(math.atan(math.hypot(owner["plane"].a, owner["plane"].b))),
+                seg.length, etype.value,
+            )
     else:
         for fi in merged:
             others = [fj["poly"].boundary for fj in merged if fj["facet_id"] != fi["facet_id"]]
@@ -806,9 +1056,12 @@ def classify_edges_from_facets(
                 seg = LineString(comp)
                 if seg.length < MIN_EDGE_LEN_M:
                     continue
-                etype = classify_perimeter_edge(fi["plane"], comp[0], comp[-1])
+                interior_pt = (fi["poly"].centroid.x, fi["poly"].centroid.y)
+                etype = classify_perimeter_edge(fi["plane"], comp[0], comp[-1], interior_pt)
                 edges.append(RoofEdge(eid, etype, seg, seg.length, (fi["facet_id"], None)))
                 eid += 1
+
+    correct_edge_lengths_3d(edges, {f["facet_id"]: f["plane"] for f in merged})
 
     logger.info(
         "Geometric edges: %d total (%d ridge, %d hip, %d valley, %d eave, %d rake)",

@@ -64,20 +64,14 @@ def refine_with_ept_lidar(
     if lidar_result is None:
         raise RuntimeError("EPT LiDAR processing returned no results")
 
-    # Extract refined polygon (already in projected meters from EPT native CRS)
-    refined_polygon_m = lidar_result["roof_polygon"]
-
-    # Transform to WGS84 for output
-    # Note: EPT native CRS is typically UTM, need to identify it properly
-    # For now, assume the polygon is in a compatible projected CRS with meters
-    # In production, query EPT metadata for exact CRS
-    refined_polygon_wgs84 = gpd.GeoSeries(
-        [refined_polygon_m], crs=aeqd_crs  # Approximate - should use EPT's actual CRS
-    ).to_crs("EPSG:4326").iloc[0]
-
-    # Calculate metrics
-    refined_area = refined_polygon_m.area
-    area_change_pct = ((refined_area - original_area) / original_area) * 100
+    # Use the original MS Buildings footprint as the authoritative boundary.
+    # LiDAR provides elevation and slope data for steps 6-9; the building outline
+    # from MS Buildings is already an accurate delineation of the roof edge.
+    # The LiDAR convex hull (over a 30m fetch buffer) overcounts trees and
+    # adjacent structures — keeping MS Buildings avoids that error entirely.
+    refined_polygon_wgs84 = building_polygon_wgs84
+    refined_area = original_area
+    area_change_pct = 0.0
 
     logger.info(f"Area change: {area_change_pct:+.1f}%")
     logger.info(f"Original: {original_area:.2f} sq m → Refined: {refined_area:.2f} sq m")
@@ -91,6 +85,7 @@ def refine_with_ept_lidar(
         "dataset_name": lidar_result["dataset_name"],
         "point_count": len(lidar_result["points"]),
         "points": lidar_result["points"],
+        "points_crs": lidar_result["points_crs"],
         "grid_x": lidar_result["grid_x"],
         "grid_y": lidar_result["grid_y"],
         "grid_z": lidar_result["grid_z"]
@@ -100,7 +95,8 @@ def refine_with_ept_lidar(
 def get_roof_polygon(
     building_polygon: gpd.GeoDataFrame,
     lat: float,
-    lon: float
+    lon: float,
+    ept_url: Optional[str] = None,
 ) -> Dict:
     """
     Get best available roof polygon using EPT LiDAR or fallback to original.
@@ -136,23 +132,22 @@ def get_roof_polygon(
 
     # Attempt EPT LiDAR refinement
     try:
-        logger.info("Discovering LiDAR dataset for location")
-        dataset = discover_lidar_dataset(lat, lon)
-
-        if dataset is None:
-            logger.warning("No LiDAR dataset found in WESM spatial index")
-            raise RuntimeError("No LiDAR coverage available")
-
-        logger.info(f"Found dataset: {dataset['workunit']}")
-
-        # Construct and validate EPT URL
-        ept_url = construct_ept_url(dataset)
-
         if ept_url is None:
-            raise RuntimeError(
-                f"No EPT data available for dataset {dataset['workunit']}. "
-                f"This may be a legacy dataset not converted to EPT format."
-            )
+            logger.info("Discovering LiDAR dataset for location")
+            dataset = discover_lidar_dataset(lat, lon)
+
+            if dataset is None:
+                logger.warning("No LiDAR dataset found in WESM spatial index")
+                raise RuntimeError("No LiDAR coverage available")
+
+            logger.info(f"Found dataset: {dataset['workunit']}")
+            ept_url = construct_ept_url(dataset)
+
+            if ept_url is None:
+                raise RuntimeError(
+                    f"No EPT data available for dataset {dataset['workunit']}. "
+                    f"This may be a legacy dataset not converted to EPT format."
+                )
 
         # Refine polygon
         logger.info("Attempting EPT LiDAR-based polygon refinement")

@@ -68,6 +68,8 @@ def main():
     ap.add_argument("--gt", required=True, help="GT COCO json (held-out split)")
     ap.add_argument("--chips", required=True, help="dir of chip PNGs for the GT images")
     ap.add_argument("--threshold", type=float, default=0.35)
+    ap.add_argument("--infer-shape", type=int, default=624,
+                    help="Inference shape passed to model.predict(); must be divisible by 24 (default 624 matches training)")
     ap.add_argument("--mask-epsilon", type=float, default=0.025)
     ap.add_argument("--out-pred", default=None, help="optional: write pred COCO here")
     args = ap.parse_args()
@@ -79,6 +81,7 @@ def main():
 
     from src.roofs.rfdetr_backend import RFDETRBackend
     backend = RFDETRBackend(args.checkpoint, threshold=args.threshold,
+                            infer_shape=args.infer_shape,
                             mask_epsilon=args.mask_epsilon)
 
     pred_coco, missing = build_pred_coco(gt, args.chips, backend)

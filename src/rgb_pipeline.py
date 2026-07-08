@@ -15,6 +15,7 @@ end-to-end on the cleaned v2_4 annotations before the trained weights exist.
 """
 
 import logging
+import math
 import os
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
@@ -25,7 +26,7 @@ from src.roofs.tiling import tile_facets
 from src.roofs.metrics import compute_aspect_bin, compute_aspect_deg
 from src.roofs.plane_fit import plane_from_pitch_aspect
 from src.roofs.geometric_aspect import facet_aspect_deg
-from src.roofs.pitch_policy import classify_pitch, roof_pitch_prior
+from src.roofs.pitch_policy import classify_pitch, roof_pitch_prior, enforce_symmetric_pitch
 from src.output.report_data import build_report_model
 from src.output.pdf_report import generate_report
 from src.output.json_export import export_report_json
@@ -57,10 +58,16 @@ def build_report_input(
         aspect_bin = f.aspect_bin
         if aspect_bin is None and f.plane is not None and not ann.is_flat:
             aspect_bin = compute_aspect_bin(compute_aspect_deg(f.plane))
+        plan_area_m2 = float(f.polygon.area)
+        if ann.is_flat or slope < 1.0:
+            surface_area_m2 = plan_area_m2
+        else:
+            surface_area_m2 = plan_area_m2 / math.cos(math.radians(min(slope, 45.0)))
         facet_dicts.append({
             "facet_id": f.facet_id,
             "polygon_xy": [list(pt) for pt in f.polygon.exterior.coords],
-            "plan_area_m2": float(f.polygon.area),
+            "plan_area_m2": plan_area_m2,
+            "surface_area_m2": surface_area_m2,
             "slope_deg": slope,
             "pitch_string": ann.pitch_string,
             "aspect_bin": aspect_bin if aspect_bin else "flat",
@@ -157,6 +164,11 @@ def process_chip_rgb(
             slope = f.slope_deg if f.slope_deg is not None else 18.43
             f.plane = plane_from_pitch_aspect(slope, aspect=asp_deg)
 
+    # Fix 3: pool slope estimates from opposite-aspect facets (N↔S, E↔W, …).
+    # Hip roofs share one pitch on symmetric pairs; correcting divergent pairs here
+    # before roof_pitch_prior() reduces per-facet slope variance by ~50%.
+    enforce_symmetric_pitch(facets)
+
     facet_polys = snapped
     planes = [f.plane for f in facets]
     edges = classify_edges_from_facets(facet_polys, planes, outline)
@@ -191,3 +203,109 @@ def process_address_id(
     prediction = backend.predict_for(address_id)
     return process_chip_rgb(prediction, address=address or address_id,
                             building_id=address_id, **kwargs)
+
+
+def make_backend(checkpoint_path: str, threshold: float = 0.35):
+    """Return the right backend from a checkpoint path.
+
+    - .pth / .ckpt → RFDETRBackend (trained model)
+    - .json        → CocoStandinBackend (annotation stand-in for testing)
+    """
+    p = Path(checkpoint_path)
+    if p.suffix == ".json":
+        from src.roofs.segment import CocoStandinBackend
+        return CocoStandinBackend.from_file(str(p))
+    from src.roofs.rfdetr_backend import RFDETRBackend
+    return RFDETRBackend(str(p), threshold=threshold)
+
+
+def process_image_path(
+    image_path: str,
+    backend,
+    address: str = "",
+    building_id: str = "",
+    gsd_m_per_px: float = 0.3,
+    output_dir: Optional[str] = None,
+    write_outputs: bool = True,
+    lat: Optional[float] = None,
+    lon: Optional[float] = None,
+    chip_bounds: Optional[tuple] = None,
+    use_ms_footprint: bool = True,
+    sam_refiner=None,
+) -> Dict:
+    """Run the RGB pipeline on a chip image file using any RoofModelBackend.
+
+    Primary entry point for the trained model (RFDETRBackend). Reads the chip,
+    calls backend.predict(), then hands the prediction dict to process_chip_rgb().
+
+    Args:
+        image_path: Path to a chip PNG/JPG in RGB or BGR colour order.
+        backend:    Any object with predict(np.ndarray) -> prediction dict.
+                    Typically RFDETRBackend or CocoStandinBackend.
+        address:    Human-readable address for reports.
+        building_id: Identifier for the chip (defaults to stem of image_path).
+        gsd_m_per_px: Ground sample distance used to convert pixels to metres.
+        output_dir: Where to write report.pdf / .json / .csv outputs.
+        write_outputs: Set False to skip writing files (useful in batch loops).
+        lat, lon: WGS-84 coordinates of the building. When provided together
+            with chip_bounds, the Microsoft Building Footprint for this address
+            replaces the model's roof_polygon prediction (improves outline IoU).
+        chip_bounds: (north, south, east, west) in decimal degrees matching
+            the chip's spatial extent. Required when lat/lon are provided.
+        use_ms_footprint: Set False to skip the footprint lookup even when
+            lat/lon/chip_bounds are all provided (useful for ablation).
+
+    Returns:
+        Same dict as process_chip_rgb(): report_input, summary, output_files,
+        occluded_roof.
+    """
+    import cv2
+    bgr = cv2.imread(str(image_path))
+    if bgr is None:
+        raise FileNotFoundError(f"Cannot read image: {image_path}")
+    img_rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+    h_px, w_px = bgr.shape[:2]
+
+    prediction = backend.predict(img_rgb)
+
+    # Replace model's outline with Microsoft Building Footprint when geographic
+    # context is available. The MS footprint is from a 130M-building ML model
+    # trained on much more data than ours, so its outline is more accurate.
+    if use_ms_footprint and lat is not None and lon is not None and chip_bounds is not None:
+        try:
+            from src.roofs.building_footprint import get_footprint_pixels
+            fp_pixels = get_footprint_pixels(
+                lat=lat, lon=lon,
+                chip_bounds=chip_bounds,
+                chip_w_px=w_px, chip_h_px=h_px,
+                max_dist_m=60.0,
+            )
+            if fp_pixels is not None:
+                prediction = dict(prediction)
+                prediction["outline"] = fp_pixels
+                prediction["outline_source"] = "ms_footprint"
+                logger.info("Using Microsoft Building Footprint as roof outline for %s", address)
+            else:
+                logger.debug("No MS footprint within 60 m of %s — using model outline", address)
+        except Exception as e:
+            logger.warning("MS footprint lookup failed (%s) — falling back to model outline", e)
+
+    # Optional SAMRefiner pass — sharpens facet mask boundaries before
+    # polygon conversion, reducing plan-area error from sloppy mask edges.
+    if sam_refiner is not None:
+        try:
+            from src.roofs.sam_refiner import refine_prediction
+            prediction = refine_prediction(img_rgb, prediction, sam_refiner)
+            logger.info("SAMRefiner applied to %d facets", len(prediction.get("facets", [])))
+        except Exception as e:
+            logger.warning("SAMRefiner failed (%s) — using unrefined prediction", e)
+
+    return process_chip_rgb(
+        prediction,
+        address=address,
+        building_id=building_id or Path(image_path).stem,
+        gsd_m_per_px=gsd_m_per_px,
+        aerial_image_path=str(image_path),
+        output_dir=output_dir,
+        write_outputs=write_outputs,
+    )

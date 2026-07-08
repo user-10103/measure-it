@@ -27,7 +27,7 @@ EDGE_CAT_TO_NAME = {
 EDGE_NAME_TO_CAT = {v: k for k, v in EDGE_CAT_TO_NAME.items()}
 
 # geometric edge types the pipeline derives from facet geometry
-GEOMETRIC_EDGE_TYPES = ("eave", "rake", "ridge", "valley", "hip")
+GEOMETRIC_EDGE_TYPES = ("eave", "rake", "ridge", "valley", "hip", "step_flashing", "parapet")
 
 # full set of report edge types (the rest are wall/adjacency edges added later/manually)
 REPORT_EDGE_TYPES = (

@@ -1,0 +1,34 @@
+{
+  "110 Holland Lane, Lutz, FL 33548": {
+    "source": "Roofr report 2024",
+    "total_sqft": 8682,
+    "flat_sqft": 2596,
+    "n_facets": 20,
+    "edges_ft": {
+      "parapet": 224,
+      "wall_flashing": 193,
+      "step_flashing": 126,
+      "ridge": 59,
+      "eave": 509,
+      "hip": 127,
+      "valley": 0,
+      "rake": 0
+    }
+  },
+  "8765 Easter Court, Centennial, CO 80112": {
+    "source": "pipeline baseline 2026-06-10",
+    "total_sqft": 2981,
+    "flat_sqft": 0,
+    "n_facets": 9,
+    "edges_ft": {
+      "parapet": 0,
+      "wall_flashing": 0,
+      "step_flashing": 0,
+      "ridge": 0,
+      "eave": 0,
+      "hip": 0,
+      "valley": 0,
+      "rake": 0
+    }
+  }
+}
