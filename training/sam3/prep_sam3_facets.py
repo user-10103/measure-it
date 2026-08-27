@@ -42,10 +42,18 @@ def _to_rle(seg, h, w):
     return rle
 
 
-def prep_split(coco_json, images_dir, out_dir, concept):
+def prep_split(coco_json, images_dir, out_dir, concept, keep_names=None):
     os.makedirs(out_dir, exist_ok=True)
     d = json.load(open(coco_json))
     cats = d.get("categories", [])
+    # Optional readiness gate: restrict to file_names that passed
+    # training.label_readiness (clean facets only). Roofs with no/garbage facet
+    # labels are excluded so the retrain never sees empty or jagged targets.
+    keep_ids = None
+    if keep_names:
+        keep_names = set(keep_names)
+        keep_ids = {im["id"] for im in d.get("images", [])
+                    if im.get("file_name") in keep_names}
     facet_ids = {c["id"] for c in cats if c["name"].lower() in FACET_NAMES}
     if not facet_ids:                               # no explicit facet class -> keep all
         facet_ids = {c["id"] for c in cats}
@@ -61,6 +69,8 @@ def prep_split(coco_json, images_dir, out_dir, concept):
     seg_ok = 0    # ... that successfully converted to RLE
     for a in d.get("annotations", []):
         if a["category_id"] not in facet_ids:
+            continue
+        if keep_ids is not None and a["image_id"] not in keep_ids:
             continue
         # Drop degenerate annotations (zero-area bbox). A zero-area target box
         # yields NaN in the Hungarian giou cost and crashes the matcher mid-train
@@ -126,14 +136,22 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--supercategory", default="roof")
     ap.add_argument("--concept", default="roof facet")
+    ap.add_argument("--keep", default=None,
+                    help="readiness manifest {file_names:[...]} from "
+                         "training.label_readiness; restricts to clean-facet roofs")
     args = ap.parse_args()
+
+    keep_names = None
+    if args.keep:
+        keep_names = json.load(open(args.keep)).get("file_names")
+        print(f"readiness gate: restricting to {len(keep_names)} clean-facet roofs")
 
     base = os.path.join(args.out, args.supercategory)
     ni, na = prep_split(args.train_coco, args.train_images,
-                        os.path.join(base, "train"), args.concept)
+                        os.path.join(base, "train"), args.concept, keep_names)
     print(f"train: {ni} images, {na} facet annotations")
     vi, va = prep_split(args.val_coco, args.val_images,
-                        os.path.join(base, "test"), args.concept)
+                        os.path.join(base, "test"), args.concept, keep_names)
     print(f"test:  {vi} images, {va} facet annotations")
     print(f"\nReady: {base}/{{train,test}}  (concept='{args.concept}')")
     print(f"Set  paths.roboflow_vl_100_root: {os.path.abspath(args.out)}")

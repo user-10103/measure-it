@@ -43,6 +43,9 @@ class ReportModel:
     waste_table: List[Dict[str, float]]         # [{pct, area_sqft, squares}]
     facet_rows: List[Dict] = field(default_factory=list)
     two_story_area_sqft: float = 0.0
+    obstructions: Dict[str, Dict[str, float]] = field(default_factory=dict)  # type -> {count, area_sqft}
+    num_obstructions: int = 0
+    openings_area_sqft: float = 0.0            # true roof openings (skylights)
 
     def to_dict(self) -> dict:
         return {
@@ -59,6 +62,9 @@ class ReportModel:
             "edge_totals_ftin": self.edge_totals_ftin,
             "pitch_breakdown": self.pitch_breakdown,
             "waste_table": self.waste_table,
+            "obstructions": self.obstructions,
+            "num_obstructions": self.num_obstructions,
+            "openings_area_sqft": round(self.openings_area_sqft, 1),
         }
 
 
@@ -75,6 +81,14 @@ def build_report_model(report_input: dict) -> ReportModel:
         total += sqft
         is_flat = bool(f.get("is_flat"))
         pitch = f.get("pitch_string") or "unspecified"
+        # Honesty rule (path-independent): a non-flat facet whose pitch we could
+        # not measure has NO true surface area — plan area is being used as a
+        # stand-in. Flag it for review rather than shipping an unmeasured number
+        # as if it were measured. Enforced by report_qc.pitch_resolved.
+        needs_review = bool(f.get("needs_review"))
+        if (not is_flat) and pitch == "unspecified" and f.get("surface_area_m2") is None:
+            needs_review = True
+        f = {**f, "needs_review": needs_review}
         if is_flat:
             flat += sqft
         else:
@@ -90,7 +104,23 @@ def build_report_model(report_input: dict) -> ReportModel:
                            "needs_review": bool(f.get("needs_review")),
                            "pitch_source": f.get("pitch_source")})
 
-    num_needs_review = sum(1 for f in facets if f.get("needs_review"))
+    num_needs_review = sum(1 for r in facet_rows if r.get("needs_review"))
+
+    # Obstructions / roof penetrations (foreign objects from the FO detector).
+    # Reported as their own section, NOT deducted from gross area — re-roofing
+    # goes under/around solar. Skylights are true openings, surfaced separately.
+    OPENING_TYPES = {"skylight"}
+    obstructions: Dict[str, Dict[str, float]] = {}
+    openings_area = 0.0
+    for o in report_input.get("foreign_objects", []):
+        t = o.get("type") or o.get("label") or "other_object"
+        a = m2_to_sqft(o.get("area_m2", 0.0) or 0.0)
+        d = obstructions.setdefault(t, {"count": 0, "area_sqft": 0.0})
+        d["count"] += 1
+        d["area_sqft"] = round(d["area_sqft"] + a, 1)
+        if t in OPENING_TYPES:
+            openings_area += a
+    num_obstructions = sum(int(d["count"]) for d in obstructions.values())
 
     predominant_pitch, predominant_area = "0:12", 0.0
     if pitch_area:
@@ -120,6 +150,8 @@ def build_report_model(report_input: dict) -> ReportModel:
         edge_totals_ft=edge_ft, edge_totals_ftin=edge_ftin,
         pitch_breakdown=pitch_breakdown, waste_table=waste, facet_rows=facet_rows,
         two_story_area_sqft=round(two_story, 1),
+        obstructions=obstructions, num_obstructions=num_obstructions,
+        openings_area_sqft=round(openings_area, 1),
     )
     logger.info("Report model: %.0f sqft, %d facets, predominant %s",
                 total, len(facets), predominant_pitch)

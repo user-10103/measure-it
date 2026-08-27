@@ -102,6 +102,7 @@ class ReportResult:
     plan_area_m2: float
     edge_totals_m: Dict[str, float] = field(default_factory=dict)
     num_pitched: int = 0         # facets with LiDAR pitch (0 = imagery-only report)
+    qc: Dict = field(default_factory=dict)   # world-class gate result (report_qc.score_report)
 
     def to_dict(self) -> dict:
         return {**self.__dict__}
@@ -232,15 +233,23 @@ def generate_roof_report(
     pdf_path = out_dir / "roof_report.pdf"
     generate_report(report_input, str(pdf_path))
 
+    # World-class gate: score the finished report and log any FAILs so the
+    # pipeline can never silently ship a degraded deliverable.
+    from src.output.report_qc import score_report, format_report_qc
+    qc = score_report(report_input)
+    if not qc["passed"]:
+        logger.warning("report below world-class bar (score %.0f%%):\n%s",
+                        qc["score"] * 100, format_report_qc(qc))
+
     edge_totals: Dict[str, float] = {}
     for e in report_input["edges"]:
         edge_totals[e["edge_type"]] = (
             edge_totals.get(e["edge_type"], 0.0) + e["length_m"])
     plan_area = sum(f["plan_area_m2"] for f in report_input["facets"])
 
-    logger.info("report: %s -> %d facet(s), outline=%s, %.1f m2 -> %s",
+    logger.info("report: %s -> %d facet(s), outline=%s, %.1f m2, gate=%s -> %s",
                 label, len(report_input["facets"]), outline_found,
-                plan_area, pdf_path)
+                plan_area, "PASS" if qc["passed"] else "FAIL", pdf_path)
     return ReportResult(
         pdf_path=str(pdf_path), chip_path=chip_png, lat=lat, lon=lon,
         location_source=source, num_facets=len(report_input["facets"]),
@@ -248,6 +257,7 @@ def generate_roof_report(
         edge_totals_m=edge_totals,
         num_pitched=sum(1 for f in report_input["facets"]
                         if f.get("pitch_string")),
+        qc=qc,
     )
 
 

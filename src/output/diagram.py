@@ -33,6 +33,23 @@ LABEL_RGB = (40, 40, 40)
 ARROWS = {"N": "^", "S": "v", "E": ">", "W": "<",
           "NE": "/", "SW": "/", "NW": "\\", "SE": "\\"}
 
+# screen-space (north-up) unit vectors per aspect bin = the downslope direction
+import math as _math
+_DIRV = {"N": (0, -1), "S": (0, 1), "E": (1, 0), "W": (-1, 0),
+         "NE": (0.71, -0.71), "NW": (-0.71, -0.71),
+         "SE": (0.71, 0.71), "SW": (-0.71, 0.71)}
+
+
+def _draw_arrow(draw, x, y, dx, dy, length, color, width=2):
+    """Short downslope arrow with a real drawn arrowhead (not an ASCII glyph)."""
+    ex, ey = x + dx * length, y + dy * length
+    draw.line([(x, y), (ex, ey)], fill=color, width=width)
+    ang = _math.atan2(dy, dx)
+    for da in (2.5, -2.5):
+        draw.line([(ex, ey),
+                   (ex + 5 * _math.cos(ang + da), ey + 5 * _math.sin(ang + da))],
+                  fill=color, width=width)
+
 
 def _font(size: int):
     try:
@@ -129,16 +146,19 @@ def render_diagram(report_input: dict, mode: str = "plain",
                 label = str(int(round(m2_to_sqft(f.get("surface_area_m2") or f.get("plan_area_m2", 0.0)))))
                 if f.get("is_flat"):
                     label = "Flat " + label
+                draw.text((sx - 8, sy - 7), label, fill=LABEL_RGB, font=f_small)
             else:  # pitch — full "5:12"; "–" when unmeasured (never a fake "0")
+                review = f.get("needs_review")
+                color = REVIEW_OUTLINE if review else LABEL_RGB
                 if f.get("is_flat"):
-                    pitch, arrow = "Flat", ""
+                    draw.text((sx - 10, sy - 7), "Flat", fill=color, font=f_small)
                 else:
                     pitch = f.get("pitch_string") or "–"
-                    arrow = ARROWS.get(f.get("aspect_bin", ""), "")
-                flag = "?" if f.get("needs_review") else ""
-                label = f"{pitch}{flag} {arrow}".strip()
-            color = REVIEW_OUTLINE if (mode == "pitch" and f.get("needs_review")) else LABEL_RGB
-            draw.text((sx - 8, sy - 7), label, fill=color, font=f_small)
+                    label = f"{pitch}{'?' if review else ''}"
+                    draw.text((sx - 10, sy - 14), label, fill=color, font=f_small)
+                    d = _DIRV.get(f.get("aspect_bin", ""))
+                    if d:                       # drawn downslope arrowhead
+                        _draw_arrow(draw, sx, sy + 5, d[0], d[1], 13, color)
 
     _draw_compass(draw, size, _font(12))
     return img

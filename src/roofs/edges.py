@@ -866,6 +866,27 @@ def _classify_step_junction(
     return EdgeType.WALL_FLASHING           # edge runs across the lower roof's slope
 
 
+def _split_at_corners(coords, angle_thresh_deg: float = 25.0):
+    """Split a polyline into maximal straight pieces, cutting at any vertex
+    whose turn angle exceeds angle_thresh_deg. Keeps an eave and a rake that
+    share a facet from being merged into one mis-typed perimeter edge."""
+    if len(coords) <= 2:
+        return [list(coords)]
+    pieces, cur = [], [coords[0]]
+    for i in range(1, len(coords) - 1):
+        cur.append(coords[i])
+        ax, ay = coords[i][0] - coords[i - 1][0], coords[i][1] - coords[i - 1][1]
+        bx, by = coords[i + 1][0] - coords[i][0], coords[i + 1][1] - coords[i][1]
+        la, lb = math.hypot(ax, ay) or 1.0, math.hypot(bx, by) or 1.0
+        cosang = max(-1.0, min(1.0, (ax * bx + ay * by) / (la * lb)))
+        if math.degrees(math.acos(cosang)) > angle_thresh_deg:
+            pieces.append(cur)
+            cur = [coords[i]]
+    cur.append(coords[-1])
+    pieces.append(cur)
+    return pieces
+
+
 def classify_edges_from_facets(
     facet_polygons: List[Tuple[int, Polygon]],
     planes: List[PlaneModel],
@@ -1028,17 +1049,26 @@ def classify_edges_from_facets(
                 seg = LineString(coords) if len(coords) >= 2 else None
             if seg is None or seg.length < MIN_EDGE_LEN_M:
                 continue
-            c = list(seg.coords)
             interior_pt = (owner["poly"].centroid.x, owner["poly"].centroid.y)
-            etype = classify_perimeter_edge(owner["plane"], c[0], c[-1], interior_pt)
-            if etype == EdgeType.STEP_FLASHING:
-                # This pass walks the BUILDING outline — there is nothing taller
-                # beyond it, so a high-side run here is a drip edge that report
-                # conventions count as eave. True step flashing arises at
-                # interior story steps, emitted by the step-junction pass.
-                etype = EdgeType.EAVE
-            edges.append(RoofEdge(eid, etype, seg, seg.length, (owner["facet_id"], None)))
-            eid += 1
+            # An owner-run can turn a corner (e.g. an eave meeting a rake at a
+            # gable end, both owned by the same facet). Classifying the whole
+            # run by its two endpoints loses the rake, so split the run into
+            # straight pieces at corners and type each piece on its own.
+            for piece in _split_at_corners(list(seg.coords)):
+                pseg = LineString(piece)
+                if pseg.length < MIN_EDGE_LEN_M:
+                    continue
+                etype = classify_perimeter_edge(
+                    owner["plane"], piece[0], piece[-1], interior_pt)
+                if etype == EdgeType.STEP_FLASHING:
+                    # This pass walks the BUILDING outline — nothing is taller
+                    # beyond it, so a high-side run here is a drip edge that
+                    # report conventions count as eave. True step flashing
+                    # arises at interior story steps (step-junction pass).
+                    etype = EdgeType.EAVE
+                edges.append(RoofEdge(eid, etype, pseg, pseg.length,
+                                      (owner["facet_id"], None)))
+                eid += 1
             logger.debug(
                 "perimeter run: facet %s slope=%.1f° %.1f m -> %s",
                 owner["facet_id"],

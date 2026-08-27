@@ -78,6 +78,12 @@ def generate_report(report_input: dict, out_pdf: str,
     c.setFont("Helvetica", 11)
     c.drawString(54, H - 128, "Prepared by measure-it")
     c.drawString(54, H - 158, address)
+    # report id + date (world-class reports always carry these for traceability)
+    import datetime as _dt
+    rid = report_input.get("report_id") or model.building_id or "—"
+    rdate = report_input.get("report_date") or _dt.date.today().isoformat()
+    c.setFont("Helvetica", 9)
+    c.drawString(54, H - 174, f"Report {rid}    {rdate}")
     c.setFillColorRGB(*DARK)
     c.setFont("Helvetica", 11)
     stats = [f"{int(round(model.total_area_sqft))} sqft",
@@ -135,10 +141,18 @@ def generate_report(report_input: dict, out_pdf: str,
     _footer(c, W, 5)
     c.showPage()
 
-    # ---- Page 6: summary ----
+    # ---- Page 6: per-facet detail table ----
+    _header(c, W, H, "Per-facet detail", address)
+    _facet_table(c, W, H, model)
+    _footer(c, W, 6)
+    c.showPage()
+
+    # ---- Page 7: summary ----
     _header(c, W, H, "Report summary", address)
     _summary_tables(c, W, H, model)
-    _footer(c, W, 6)
+    _pitch_table(c, 54, H - 130, model)    # area-by-pitch in the empty left column
+    _obstructions(c, 54, H - 300, model)   # foreign objects (only if detector supplied any)
+    _footer(c, W, 7)
     c.showPage()
 
     c.save()
@@ -226,3 +240,114 @@ def _summary_tables(c, W, H, model: ReportModel):
     for i, w in enumerate(model.waste_table):
         c.drawString(xs[1] + i * 60, y0 - 16, str(int(round(w["area_sqft"]))))
         c.drawString(xs[1] + i * 60, y0 - 32, str(w["squares"]))
+
+
+# ---------------------------------------------------------------------------
+# Added: per-facet detail table + area-by-pitch table (data existed in the
+# ReportModel but was never rendered). Both mirror the EagleView/Roofr layout.
+# ---------------------------------------------------------------------------
+def _facet_table(c, W, H, model: ReportModel):
+    rows = model.facet_rows or []
+    c.setFillColorRGB(*BLUE)
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(54, H - 118, "Per-facet detail")
+    cols = [("#", 54), ("Area (sqft)", 96), ("Pitch", 190), ("Direction", 260),
+            ("Slope", 350), ("Pitch source", 420), ("Flags", 520)]
+    c.setFillColorRGB(*GREY)
+    c.setFont("Helvetica-Bold", 9)
+    yh = H - 138
+    for label, x in cols:
+        c.drawString(x, yh, label)
+    c.setStrokeColorRGB(*GREY)
+    c.setLineWidth(0.5)
+    c.line(54, yh - 4, W - 54, yh - 4)
+    c.setFont("Helvetica", 9)
+    y = yh - 20
+    for i, r in enumerate(rows):
+        if y < 90:
+            c.setFillColorRGB(*GREY)
+            c.setFont("Helvetica-Oblique", 8)
+            c.drawString(54, y, f"... {len(rows)} facets total (table truncated)")
+            break
+        if i % 2 == 0:                       # zebra striping
+            c.setFillColorRGB(0.96, 0.97, 0.99)
+            c.rect(50, y - 4, W - 100, 15, fill=1, stroke=0)
+        c.setFillColorRGB(*DARK)
+        pitch = _pitch_slash(r.get("pitch_string") or "0:12")
+        slope = r.get("slope_deg")
+        slope_s = f"{slope:.0f} deg" if slope is not None else "-"
+        c.drawString(54, y, str(r.get("facet_id")))
+        c.drawString(96, y, f"{r.get('area_sqft', 0):.0f}")
+        c.drawString(190, y, pitch)
+        c.drawString(260, y, str(r.get("aspect_bin") or "-"))
+        c.drawString(350, y, slope_s)
+        c.drawString(420, y, str(r.get("pitch_source") or "-"))
+        flags = []
+        if r.get("is_flat"):
+            flags.append("flat")
+        if r.get("needs_review"):
+            flags.append("review")
+        if r.get("needs_review"):
+            c.setFillColorRGB(0.85, 0.35, 0.0)
+        c.drawString(520, y, ", ".join(flags))
+        y -= 15
+    # confidence / QC footline
+    nr = model.num_needs_review
+    c.setFillColorRGB(*(GREY if nr == 0 else (0.85, 0.35, 0.0)))
+    c.setFont("Helvetica", 9)
+    msg = ("All facets measured with confidence." if nr == 0
+           else f"{nr} of {model.num_facets} facets flagged for manual review.")
+    c.drawString(54, 70, msg)
+
+
+def _pitch_table(c, x, y, model: ReportModel):
+    pb = model.pitch_breakdown or {}
+    c.setFillColorRGB(*BLUE)
+    c.setFont("Helvetica-Bold", 11)
+    c.drawString(x, y, "Area by pitch")
+    c.setFillColorRGB(*GREY)
+    c.setFont("Helvetica-Bold", 9)
+    c.drawString(x, y - 16, "Pitch")
+    c.drawString(x + 80, y - 16, "Area (sqft)")
+    c.drawString(x + 175, y - 16, "Squares")
+    c.setFillColorRGB(*DARK)
+    c.setFont("Helvetica", 9)
+    yy = y - 32
+    for p, d in sorted(pb.items()):
+        c.drawString(x, yy, _pitch_slash(p))
+        c.drawString(x + 80, yy, f"{d.get('area_sqft', 0):.0f}")
+        c.drawString(x + 175, yy, f"{d.get('squares', 0)}")
+        yy -= 14
+
+
+def _obstructions(c, x, y, model: ReportModel):
+    """Obstructions & penetrations block (foreign objects). Rendered only when
+    the FO detector supplied any; gross roof area is intentionally NOT reduced."""
+    if not model.obstructions:
+        return
+    NAMES = {"solar_panel": "Solar panels", "skylight": "Skylights",
+             "chimney": "Chimneys", "ac_unit": "AC units",
+             "satellite_dish": "Satellite dishes", "vent": "Vents / penetrations",
+             "tree_overhang": "Tree overhang", "other_object": "Other"}
+    c.setFillColorRGB(*BLUE)
+    c.setFont("Helvetica-Bold", 11)
+    c.drawString(x, y, "Obstructions & penetrations")
+    c.setFillColorRGB(*GREY)
+    c.setFont("Helvetica-Bold", 9)
+    c.drawString(x, y - 16, "Type")
+    c.drawString(x + 150, y - 16, "Count")
+    c.drawString(x + 205, y - 16, "Area (sqft)")
+    c.setFillColorRGB(*DARK)
+    c.setFont("Helvetica", 9)
+    yy = y - 32
+    for t, d in sorted(model.obstructions.items()):
+        c.drawString(x, yy, NAMES.get(t, t.replace("_", " ")))
+        c.drawString(x + 150, yy, str(int(d["count"])))
+        c.drawString(x + 205, yy, f"{d['area_sqft']:.0f}" if d["area_sqft"] > 0 else "-")
+        yy -= 14
+    if model.openings_area_sqft > 0:
+        c.setFillColorRGB(*GREY)
+        c.setFont("Helvetica-Oblique", 8)
+        c.drawString(x, yy - 4,
+                     f"Roof openings (skylights): {model.openings_area_sqft:.0f} sqft "
+                     "— deduct when replacing deck.")
