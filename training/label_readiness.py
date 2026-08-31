@@ -47,6 +47,10 @@ def _resolve_cats(coco: dict):
 
 
 def _polys(seg):
+    """Return a flat list of Polygons. buffer(0) on a self-intersecting ring can
+    yield a MultiPolygon — explode it so downstream (score_labels) only ever sees
+    Polygons (it assumes .exterior)."""
+    from shapely.geometry import MultiPolygon
     out = []
     if isinstance(seg, list):
         for ring in seg:
@@ -55,14 +59,22 @@ def _polys(seg):
                     p = Polygon(list(zip(ring[0::2], ring[1::2])))
                     if not p.is_valid:
                         p = p.buffer(0)
-                    if not p.is_empty:
+                    if p.is_empty:
+                        continue
+                    if isinstance(p, MultiPolygon):
+                        out.extend(g for g in p.geoms if not g.is_empty)
+                    else:
                         out.append(p)
                 except Exception:
                     pass
     return out
 
 
-def assess(coco: dict) -> dict:
+def assess(coco: dict, min_facets: int = 1, max_facets: int = 40,
+           min_coverage: float = 0.55) -> dict:
+    # Defaults loosened for HUMAN labels: a 1-facet shed or 2-facet gable is
+    # valid (the auto-label default min_facets=3 wrongly drops ~300 simple
+    # roofs). The real quality signals are coverage / overlap / jaggedness.
     facet_ids, roof_ids, edge_map, fo_map = _resolve_cats(coco)
     fname = {im["id"]: im.get("file_name", str(im["id"])) for im in coco["images"]}
     roofs = {im["id"]: {"roof": None, "facets": [], "edges": Counter(), "fo": Counter()}
@@ -91,7 +103,7 @@ def assess(coco: dict) -> dict:
         total += 1
         if r["facets"]:
             with_facets += 1
-            q = score_labels(r["facets"], r["roof"])
+            q = score_labels(r["facets"], r["roof"], min_facets=min_facets, max_facets=max_facets, min_coverage=min_coverage)
             if q["passed"]:
                 facet_pass += 1
                 keep.append(fname[iid])
@@ -122,11 +134,18 @@ def assess(coco: dict) -> dict:
 
 
 if __name__ == "__main__":
-    coco = json.load(open(sys.argv[1]))
-    a = assess(coco)
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("coco"); ap.add_argument("out", nargs="?")
+    ap.add_argument("--min-facets", type=int, default=1)
+    ap.add_argument("--max-facets", type=int, default=40)
+    ap.add_argument("--min-coverage", type=float, default=0.55)
+    ns = ap.parse_args()
+    coco = json.load(open(ns.coco))
+    a = assess(coco, min_facets=ns.min_facets, max_facets=ns.max_facets, min_coverage=ns.min_coverage)
     keep = a.pop("keep_ids")
     print(json.dumps(a, indent=2))
     print(f"\nTRAIN-READY (facet) roofs: {len(keep)} / {a['roofs']}")
-    if len(sys.argv) > 2:
-        json.dump({"file_names": keep}, open(sys.argv[2], "w"))
-        print(f"wrote keep manifest -> {sys.argv[2]} ({len(keep)} file_names)")
+    if ns.out:
+        json.dump({"file_names": keep}, open(ns.out, "w"))
+        print(f"wrote keep manifest -> {ns.out} ({len(keep)} file_names)")
