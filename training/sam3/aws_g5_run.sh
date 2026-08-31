@@ -14,7 +14,7 @@
 set -euo pipefail
 MODE=${MODE:-infer}
 CODE=${CODE:-$HOME/code}
-MEASURE=${MEASURE:-$CODE/measure-it-main}
+MEASURE=${MEASURE:-$CODE}                            # repo root: training/ src/ live here (no measure-it-main subdir)
 BUCKET=s3://measure-it-prod-017341176694
 CKPT=${CKPT:-$HOME/sam3_roof_ft_boxonly_ep9.pt}     # the existing fine-tuned model
 SMOKE=${SMOKE:-"28.0303, -80.69809"}                 # FL address w/ LiDAR coverage
