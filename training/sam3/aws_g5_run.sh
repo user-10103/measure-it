@@ -4,8 +4,8 @@
 # present). Two modes, fastest-answer first:
 #   MODE=infer  (default) — run the EXISTING fine-tuned checkpoint through the
 #                world-class gate on a smoke address. First GATE result, no retrain.
-#   MODE=train  — readiness-gate the fresh labels, prep clean data, retrain SAM3,
-#                then infer + gate.
+#   MODE=train  — DISABLED (credit footgun). Retrain via the credit-safe
+#                RunPod runbook: adresses/runpod/RUNPOD_ONETIME_TRAIN.md
 #
 # Account 017341176694 / us-west-2. SSH in from your IP (SG sg-0e67301a80339fe2b
 # allows 22 from your address; update the SG if your IP rotated). Then:
@@ -30,21 +30,14 @@ if [ ! -f "$CKPT" ]; then
 fi
 
 if [ "$MODE" = "train" ]; then
-  echo "== retrain on readiness-gated fresh labels =="
-  : "${EXPORT_COCO:?set EXPORT_COCO to a FRESH Label Studio COCO export}"
-  : "${ROOF_DATASET:?set ROOF_DATASET to the train/valid split dir}"
-  python -m training.label_readiness "$EXPORT_COCO" /tmp/keep.json
-  python -m training.sam3.prep_sam3_facets \
-    --train-coco "$ROOF_DATASET/train/_annotations.coco.json" --train-images "$ROOF_DATASET/train" \
-    --val-coco   "$ROOF_DATASET/valid/_annotations.coco.json" --val-images   "$ROOF_DATASET/valid" \
-    --out /tmp/sam3_data --keep /tmp/keep.json
-  ( cd "${SAM3_REPO:?set SAM3_REPO}" && \
-    sed -e "s#<DATA_ROOT>#/tmp/sam3_data#" -e "s#<LOG_DIR>#$HOME/sam3_ft#" \
-        -e "s#<BPE_PATH>#$HOME/bpe_simple_vocab_16e6.txt.gz#" \
-        "$MEASURE/training/sam3/roof_facet_ft.yaml" > sam3/train/configs/roof_facet_ft.yaml && \
-    python sam3/train/train.py -c configs/roof_facet_ft.yaml --use-cluster 0 --num-gpus 1 )
-  CKPT=$(ls -t "$HOME"/sam3_ft/checkpoints/*.pt* | head -1)
-  echo "retrained checkpoint: $CKPT"
+  # REMOVED — this branch was a credit footgun: it ran the FULL 40-epoch config
+  # (no epoch cap / LR-schedule scaling -> ~13h ~$10+), WITHOUT patch_sam3.py (so
+  # the mid-run matcher NaN crash is live) and WITHOUT incremental checkpoint sync
+  # (a crash at hour 9 loses all 9). Use the credit-safe RunPod runbook instead.
+  echo "ERROR: MODE=train is disabled here — it lacked the NaN patch, epoch cap," >&2
+  echo "       and checkpoint sync. Use adresses/runpod/RUNPOD_ONETIME_TRAIN.md" >&2
+  echo "       (Stage 0 pre-flight + bounded, resumable, patched pod run)." >&2
+  exit 2
 fi
 
 echo "== inference + WORLD-CLASS gate on $SMOKE (checkpoint: $CKPT) =="
