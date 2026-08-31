@@ -15,6 +15,18 @@ import argparse, json, os, shutil, hashlib
 from collections import defaultdict
 
 
+def _place(src, dst, link=False):
+    """Hardlink src->dst when link=True (near-zero disk), else copy. Falls back
+    to copy if hardlink fails (cross-filesystem EXDEV, etc.)."""
+    if link:
+        try:
+            os.link(src, dst)
+            return
+        except OSError:
+            pass
+    shutil.copy2(src, dst)
+
+
 def _relpath(file_name):
     """Canonical <subdir>/<basename> for an image, stripping LS local-files
     prefixes (`../../label-studio/data/local/<batch>/x.png` -> `<batch>/x.png`).
@@ -35,7 +47,7 @@ def _group_key(im):
     return os.path.splitext(os.path.basename(im["file_name"]))[0]
 
 
-def split(coco, images_dir, out_dir, val_frac=0.1, seed=42):
+def split(coco, images_dir, out_dir, val_frac=0.1, seed=42, link=False):
     imgs = coco["images"]
     groups = defaultdict(list)
     for im in imgs:
@@ -74,7 +86,7 @@ def split(coco, images_dir, out_dir, val_frac=0.1, seed=42):
                 if src:
                     os.makedirs(os.path.dirname(dst), exist_ok=True)
                     if not os.path.exists(dst):
-                        shutil.copy2(src, dst)
+                        _place(src, dst, link)
                 else:
                     missing += 1
                 im2 = dict(im); im2["file_name"] = rel          # normalize so prep resolves it
@@ -94,9 +106,10 @@ def main():
     ap.add_argument("coco"); ap.add_argument("images_dir"); ap.add_argument("out_dir")
     ap.add_argument("--val-frac", type=float, default=0.1)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--link", action="store_true", help="hardlink images instead of copy (saves disk)")
     a = ap.parse_args()
     c = json.load(open(a.coco))
-    counts = split(c, a.images_dir, a.out_dir, a.val_frac, a.seed)
+    counts = split(c, a.images_dir, a.out_dir, a.val_frac, a.seed, link=a.link)
     for k, (ni, na) in counts.items():
         print(f"{k}: {ni} images, {na} annotations")
     print(f"-> {a.out_dir}/{{train,valid}}/_annotations.coco.json")

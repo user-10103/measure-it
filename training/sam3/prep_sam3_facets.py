@@ -42,14 +42,14 @@ def _to_rle(seg, h, w):
     return rle
 
 
-def prep_split(coco_json, images_dir, out_dir, concept, keep_names=None):
+def prep_split(coco_json, images_dir, out_dir, concept, keep_names=None, link=False):
     os.makedirs(out_dir, exist_ok=True)
     d = json.load(open(coco_json))
     cats = d.get("categories", [])
     # Optional readiness gate: restrict to file_names that passed
     # training.label_readiness (clean facets only). Roofs with no/garbage facet
     # labels are excluded so the retrain never sees empty or jagged targets.
-    from training.coco_split import _relpath   # shared <batch>/<name> normalization
+    from training.coco_split import _relpath, _place   # shared normalization + copy/link
     keep_ids = None
     if keep_names:
         # Match in the normalized namespace on BOTH sides so raw-export keep
@@ -130,7 +130,7 @@ def prep_split(coco_json, images_dir, out_dir, concept, keep_names=None):
             raise RuntimeError(
                 f"image name collision on {base!r} in {out_dir} — two source "
                 "images map to one output name; aborting rather than overwrite")
-        shutil.copy(src, dst)
+        _place(src, dst, link)
         im = dict(im); im["file_name"] = base
         imgs.append(im)
 
@@ -152,6 +152,7 @@ def main():
     ap.add_argument("--keep", default=None,
                     help="readiness manifest {file_names:[...]} from "
                          "training.label_readiness; restricts to clean-facet roofs")
+    ap.add_argument("--link", action="store_true", help="hardlink images instead of copy (saves disk)")
     args = ap.parse_args()
 
     keep_names = None
@@ -161,10 +162,10 @@ def main():
 
     base = os.path.join(args.out, args.supercategory)
     ni, na = prep_split(args.train_coco, args.train_images,
-                        os.path.join(base, "train"), args.concept, keep_names)
+                        os.path.join(base, "train"), args.concept, keep_names, link=args.link)
     print(f"train: {ni} images, {na} facet annotations")
     vi, va = prep_split(args.val_coco, args.val_images,
-                        os.path.join(base, "test"), args.concept, keep_names)
+                        os.path.join(base, "test"), args.concept, keep_names, link=args.link)
     print(f"test:  {vi} images, {va} facet annotations")
     print(f"\nReady: {base}/{{train,test}}  (concept='{args.concept}')")
     print(f"Set  paths.roboflow_vl_100_root: {os.path.abspath(args.out)}")
