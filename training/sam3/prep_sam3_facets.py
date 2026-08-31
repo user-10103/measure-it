@@ -49,11 +49,15 @@ def prep_split(coco_json, images_dir, out_dir, concept, keep_names=None):
     # Optional readiness gate: restrict to file_names that passed
     # training.label_readiness (clean facets only). Roofs with no/garbage facet
     # labels are excluded so the retrain never sees empty or jagged targets.
+    from training.coco_split import _relpath   # shared <batch>/<name> normalization
     keep_ids = None
     if keep_names:
-        keep_names = set(keep_names)
+        # Match in the normalized namespace on BOTH sides so raw-export keep
+        # names and split-normalized image names always agree (else keep_ids
+        # empties silently and prep writes zero annotations).
+        keep_names = {_relpath(n) for n in keep_names}
         keep_ids = {im["id"] for im in d.get("images", [])
-                    if im.get("file_name") in keep_names}
+                    if _relpath(im.get("file_name", "")) in keep_names}
     facet_ids = {c["id"] for c in cats if c["name"].lower() in FACET_NAMES}
     if not facet_ids:                               # no explicit facet class -> keep all
         facet_ids = {c["id"] for c in cats}
@@ -116,8 +120,17 @@ def prep_split(coco_json, images_dir, out_dir, concept, keep_names=None):
             continue
         if not os.path.exists(src):
             continue
-        base = os.path.basename(im["file_name"])
-        shutil.copy(src, os.path.join(out_dir, base))
+        # Collision-safe flat name: basenames COLLIDE across batches (batch2/
+        # roof_001.png vs batch3/roof_001.png), and a bare basename copy silently
+        # overwrites — image records then train against the wrong pixels. Encode
+        # the batch into the name and REFUSE to overwrite.
+        base = _relpath(im["file_name"]).replace("/", "__")
+        dst = os.path.join(out_dir, base)
+        if os.path.exists(dst):
+            raise RuntimeError(
+                f"image name collision on {base!r} in {out_dir} — two source "
+                "images map to one output name; aborting rather than overwrite")
+        shutil.copy(src, dst)
         im = dict(im); im["file_name"] = base
         imgs.append(im)
 

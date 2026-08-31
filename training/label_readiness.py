@@ -16,6 +16,7 @@ from collections import defaultdict, Counter
 from shapely.geometry import Polygon
 from shapely.ops import unary_union
 from training.label_quality import score_labels
+from training.coco_split import _relpath   # shared file_name normalization
 
 # Resolve categories by NAME, not hardcoded id — a fresh Label Studio export
 # renumbers ids and names the roof category `roof_outline` (not `roof_polygon`).
@@ -106,7 +107,7 @@ def assess(coco: dict, min_facets: int = 1, max_facets: int = 40,
             q = score_labels(r["facets"], r["roof"], min_facets=min_facets, max_facets=max_facets, min_coverage=min_coverage)
             if q["passed"]:
                 facet_pass += 1
-                keep.append(fname[iid])
+                keep.append(_relpath(fname[iid]))   # SAME namespace prep/coco_split match on
             else:
                 for rs in q["reasons"]:
                     reasons[rs.split("=")[0]] += 1
