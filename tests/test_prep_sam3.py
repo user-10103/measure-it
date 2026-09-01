@@ -70,3 +70,42 @@ def test_prep_keep_matches_normalized_and_raw(tmp_path):
     ni, na = prep_split(str(cj), str(imdir), str(tmp_path / "out/roof/train"), "roof facet",
                         keep_names=["../../label-studio/data/local/batch1_3inch/a.png"])
     assert ni == 1 and na == 1                              # matched, not silently dropped
+
+
+def test_prep_dedups_duplicate_image_records(tmp_path):
+    # Same chip ingested as TWO tasks (7 facets vs 3). Keep the richer, drop the
+    # other's annotations — one image out, not two stacked.
+    import sys; sys.path.insert(0, "training/sam3")
+    from prep_sam3_facets import prep_split
+    imdir = tmp_path / "imgs" / "batch1"; imdir.mkdir(parents=True)
+    Image.fromarray(np.zeros((50, 50, 3), "uint8")).save(imdir / "dup.png")
+    def facet(i, iid, seg):
+        return {"id": i, "image_id": iid, "category_id": 0, "segmentation": [seg],
+                "bbox": [1, 1, 20, 20], "area": 400, "iscrowd": 0}
+    coco = {"categories": [{"id": 0, "name": "facet"}],
+            "images": [{"id": 51, "file_name": "batch1/dup.png", "height": 50, "width": 50},
+                       {"id": 52, "file_name": "batch1/dup.png", "height": 50, "width": 50}],
+            "annotations": [facet(1, 51, [1, 1, 20, 1, 20, 20]),                 # richer: 2 facets
+                            facet(2, 51, [1, 25, 20, 25, 20, 45]),
+                            facet(3, 52, [1, 1, 20, 1, 20, 20])]}                # loser: 1 facet
+    cj = tmp_path / "coco.json"; json.dump(coco, open(cj, "w"))
+    ni, na = prep_split(str(cj), str(tmp_path / "imgs"), str(tmp_path / "out/roof/train"), "roof facet")
+    assert ni == 1 and na == 2                        # one image, the richer 2 facets (not 3 stacked)
+
+
+def test_prep_rerun_over_existing_output_ok(tmp_path):
+    # Source-identity guard: re-running over an existing sam3_data/ must not
+    # abort (same source -> same output is fine; only DIFFERENT sources abort).
+    import sys; sys.path.insert(0, "training/sam3")
+    from prep_sam3_facets import prep_split
+    imdir = tmp_path / "imgs" / "b"; imdir.mkdir(parents=True)
+    Image.fromarray(np.zeros((40, 40, 3), "uint8")).save(imdir / "a.png")
+    coco = {"categories": [{"id": 0, "name": "facet"}],
+            "images": [{"id": 1, "file_name": "b/a.png", "height": 40, "width": 40}],
+            "annotations": [{"id": 1, "image_id": 1, "category_id": 0,
+                             "segmentation": [[1, 1, 30, 1, 30, 30]], "bbox": [1, 1, 29, 29], "area": 400, "iscrowd": 0}]}
+    cj = tmp_path / "coco.json"; json.dump(coco, open(cj, "w"))
+    out = str(tmp_path / "out/roof/train")
+    prep_split(str(cj), str(tmp_path / "imgs"), out, "roof facet")
+    ni, na = prep_split(str(cj), str(tmp_path / "imgs"), out, "roof facet")   # rerun — must not raise
+    assert ni == 1 and na == 1

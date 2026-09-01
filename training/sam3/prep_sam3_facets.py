@@ -20,6 +20,7 @@ Usage:
     --out sam3_roof_data
 """
 import argparse
+import collections
 import json
 import os
 import shutil
@@ -58,6 +59,26 @@ def prep_split(coco_json, images_dir, out_dir, concept, keep_names=None, link=Fa
         keep_names = {_relpath(n) for n in keep_names}
         keep_ids = {im["id"] for im in d.get("images", [])
                     if _relpath(im.get("file_name", "")) in keep_names}
+    # Collapse duplicate image records: some chips were ingested as TWO Label
+    # Studio tasks, so the same picture appears twice, each with its own
+    # annotations (e.g. ids 51/52, 7 facets each). Those are re-labels of one
+    # roof, not two halves of a job — keeping both stacks 14 overlapping facet
+    # masks on one roof and teaches the model that facets duplicate. Keep the
+    # record with the MOST annotations (also rescues the 0-vs-3 case where one
+    # task was left unlabelled) and drop the loser's annotations with it.
+    _per_img = collections.Counter(a["image_id"] for a in d.get("annotations", []))
+    _by_name = collections.defaultdict(list)
+    for _im in d.get("images", []):
+        _by_name[_relpath(_im["file_name"])].append(_im)
+    _drop = {i["id"] for ims in _by_name.values() if len(ims) > 1
+             for i in ims
+             if i["id"] != max(ims, key=lambda x: (_per_img.get(x["id"], 0), -x["id"]))["id"]}
+    if _drop:
+        print(f"  deduped {len(_drop)} duplicate image record(s) "
+              f"(same chip ingested twice; kept the richer labelling)")
+        d = dict(d)
+        d["images"] = [i for i in d["images"] if i["id"] not in _drop]
+        d["annotations"] = [a for a in d["annotations"] if a["image_id"] not in _drop]
     facet_ids = {c["id"] for c in cats if c["name"].lower() in FACET_NAMES}
     if not facet_ids:                               # no explicit facet class -> keep all
         facet_ids = {c["id"] for c in cats}
@@ -110,6 +131,7 @@ def prep_split(coco_json, images_dir, out_dir, concept, keep_names=None, link=Fa
     used = {a["image_id"] for a in anns}
     img_root = os.path.realpath(images_dir)
     imgs = []
+    written = {}          # output name -> source path, to detect REAL collisions
     for im in d.get("images", []):
         if im["id"] not in used:
             continue
@@ -126,10 +148,16 @@ def prep_split(coco_json, images_dir, out_dir, concept, keep_names=None, link=Fa
         # the batch into the name and REFUSE to overwrite.
         base = _relpath(im["file_name"]).replace("/", "__")
         dst = os.path.join(out_dir, base)
-        if os.path.exists(dst):
+        # Guard on SOURCE identity, not os.path.exists(dst): a bare existence
+        # check also fires on output left by a previous run, and on a second
+        # record pointing at the SAME file — neither can corrupt anything. Only
+        # two genuinely DIFFERENT sources landing on one name must abort.
+        prev = written.get(base)
+        if prev is not None and prev != src:
             raise RuntimeError(
-                f"image name collision on {base!r} in {out_dir} — two source "
-                "images map to one output name; aborting rather than overwrite")
+                f"image name collision on {base!r} in {out_dir}: {prev} and "
+                f"{src} map to one output name; aborting rather than overwrite")
+        written[base] = src
         _place(src, dst, link)
         im = dict(im); im["file_name"] = base
         imgs.append(im)
