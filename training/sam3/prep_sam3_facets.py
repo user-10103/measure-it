@@ -27,6 +27,14 @@ import shutil
 
 FACET_NAMES = {"facet", "roof_facet", "roof facet", "roof face"}
 
+# The trainer's RandomResize scales 1024px chips down to min_size 480 (0.469x),
+# so a box must stay >1px AFTER that shrink or it degenerates to zero area and
+# NaNs the loss. Filter at source with margin: 6px * 0.469 = 2.8px, and at 7cm/px
+# 6px = 42cm — smaller than any real facet, so this only drops annotation slivers.
+# (On the current export this drops just 4 of 20,993 boxes; it's forward-proofing.)
+MIN_BOX_PX = 6
+MIN_MASK_AREA = 36        # px^2 at source
+
 
 def _to_rle(seg, h, w):
     """COCO polygon (or uncompressed RLE) -> compressed RLE with str counts."""
@@ -97,11 +105,12 @@ def prep_split(coco_json, images_dir, out_dir, concept, keep_names=None, link=Fa
             continue
         if keep_ids is not None and a["image_id"] not in keep_ids:
             continue
-        # Drop degenerate annotations (zero-area bbox). A zero-area target box
-        # yields NaN in the Hungarian giou cost and crashes the matcher mid-train
-        # (scipy: "matrix contains invalid numeric entries"). Filter at the source.
+        # Drop degenerate / sub-pixel-after-resize annotations. A zero-area target
+        # box yields NaN in the Hungarian giou cost and crashes the matcher; a box
+        # that shrinks below 1px under the trainer's 0.469x resize degenerates the
+        # same way. Filter at the source with MIN_BOX_PX margin.
         bx = a.get("bbox")
-        if bx is not None and (bx[2] <= 1 or bx[3] <= 1):
+        if bx is not None and (bx[2] < MIN_BOX_PX or bx[3] < MIN_BOX_PX):
             dropped += 1
             continue
         a = dict(a); a["category_id"] = 1
@@ -112,7 +121,7 @@ def prep_split(coco_json, images_dir, out_dir, concept, keep_names=None, link=Fa
             # yield a mask-less annotation (the epoch-9 NaN root cause).
             a["segmentation"] = _to_rle(a["segmentation"], h, w)
             a["iscrowd"] = 0
-            if _mu.area(a["segmentation"]) < 1:   # empty mask -> 0/0 dice -> NaN
+            if _mu.area(a["segmentation"]) < MIN_MASK_AREA:  # sub-6px^2 -> ~0 dice -> NaN
                 dropped += 1
                 continue
             seg_ok += 1
