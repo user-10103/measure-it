@@ -37,6 +37,26 @@ def test_outline_and_facets_pixel_space():
     assert inter < 1.0
 
 
+def test_low_coverage_outline_uses_footprint_not_wrong_mask():
+    """When no roof mask covers the target footprint (the muddy 'best 19%' case),
+    the outline is taken from the MS footprint directly, not the wrong top-score
+    mask. Here the wrong mask is large and connected but mostly OFF the footprint
+    (10% cover), so the old 'fall back to top score' path would drag the outline
+    leftward; the fix keeps it footprint-clean."""
+    h = w = 80
+    wrong = _rect(h, w, 20, 60, 0, 24)            # big mask, only cols 20-24 on fp
+    f1 = _rect(h, w, 20, 40, 20, 60)
+    f2 = _rect(h, w, 40, 60, 20, 60)
+    anchor = _rect(h, w, 20, 60, 20, 60)          # true footprint (cols 20-60)
+    chip = np.zeros((h, w, 3), np.uint8)
+    res = segment_roof_sam(_fake_predictor(wrong, [f1, f2]), chip,
+                           predict_outline=None, anchor_mask=anchor,
+                           regularize=False, min_area_frac=0.0)
+    assert res.outline is not None
+    minx, miny, maxx, maxy = res.outline.bounds
+    assert minx >= 15          # footprint-clean; the wrong mask's cols 0-20 excluded
+
+
 def test_facets_clipped_to_outline():
     # a facet mask spilling past the roof outline is clipped to it
     h = w = 100

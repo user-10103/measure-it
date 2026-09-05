@@ -128,11 +128,19 @@ def segment_roof_sam(
                             best, 100 * cover[best], r_scores[best],
                             idx, 100 * cover[idx])
                     idx = best
+                    roof_mask = r_masks[idx]
                 else:
-                    logger.warning(
-                        "no roof mask covers the target footprint (best "
-                        "%.0f%%) — falling back to top score", 100 * cover.max())
-            roof_mask = r_masks[idx]
+                    # No candidate covers the target footprint (the muddy "best
+                    # 19% mask" case, typically when the FACET model doubles as the
+                    # outline model). A wrong roof mask is worse than none — use the
+                    # shadow-immune MS footprint as the outline directly instead of
+                    # falling back to a top-score mask that's on the wrong building.
+                    logger.info(
+                        "no roof mask covers the footprint (best %.0f%%) — using "
+                        "the MS footprint as the outline", 100 * cover.max())
+                    roof_mask = anchor
+            else:
+                roof_mask = r_masks[idx]
     except Exception as e:  # noqa: BLE001
         logger.warning("SAM roof-outline prompt failed (%s)", e)
 
