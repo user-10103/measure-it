@@ -125,13 +125,22 @@ def score_report(report_input: dict, model: ReportModel | None = None) -> dict:
     except Exception as e:
         add("facets_partition", WARN, True, f"partition not checked ({type(e).__name__})")
 
-    # --- edges typed: a multi-facet roof must have a ridge or hip ---
+    # --- edges typed: a multi-facet SLOPED roof must have a ridge or hip. A
+    #     predominantly-flat roof (a commercial building with a small pitched
+    #     annex, say) genuinely has no apex line — WARN, don't FAIL, for the
+    #     missing ridge, so an honest flat roof isn't blocked by the gate.
     ef = model.edge_totals_ft
+    mostly_flat = model.flat_area_sqft > model.pitched_area_sqft
     if model.num_facets > 1:
         has_apex = (ef.get("ridge", 0) + ef.get("hip", 0)) > 0.5
-        add("edges_typed", FAIL, has_apex,
-            "ridge/hip present" if has_apex else
-            "multi-facet roof has NO ridge or hip length -> edge typing failed")
+        if has_apex:
+            add("edges_typed", FAIL, True, "ridge/hip present")
+        elif mostly_flat:
+            add("edges_typed", WARN, True,
+                "predominantly flat roof — no ridge/hip expected")
+        else:
+            add("edges_typed", FAIL, False,
+                "multi-facet sloped roof has NO ridge or hip length -> edge typing failed")
         add("eaves_present", WARN, ef.get("eave", 0) > 0.5,
             "eaves present" if ef.get("eave", 0) > 0.5 else "no eave length")
     else:
@@ -143,7 +152,6 @@ def score_report(report_input: dict, model: ReportModel | None = None) -> dict:
             f"{model.num_obstructions} obstruction(s) reported")
 
     # --- predominant pitch sanity: a mostly-sloped roof must not report 0:12 ---
-    mostly_flat = model.flat_area_sqft > model.pitched_area_sqft
     add("predominant_pitch", WARN,
         mostly_flat or model.predominant_pitch not in ("0:12", "unspecified"),
         f"predominant pitch {model.predominant_pitch}"

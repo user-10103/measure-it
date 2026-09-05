@@ -202,6 +202,19 @@ def generate_roof_report(
             apply_3d_edge_lengths, classify_internal_edges, relabel_rakes)
         annotations = annotate_facets_with_lidar(roof.facets, lidar_points,
                                           ground_z=ground_z)
+        # split facets that LiDAR proves span TWO planes (fixes model UNDER-
+        # segmentation — a hip wing returned as one blob; area-conserving; off
+        # via MEASURE_IT_PLANE_SPLIT=0). Runs before the merge so a freshly split
+        # facet can still be re-merged if it turns out coplanar with a neighbor.
+        if _os.getenv("MEASURE_IT_PLANE_SPLIT", "1") == "1":
+            from src.roofs.fuse_sam_lidar import split_multiplane_facets
+            split, did_split = split_multiplane_facets(roof.facets, lidar_points)
+            if did_split:
+                roof.facets = split
+                annotations = annotate_facets_with_lidar(roof.facets, lidar_points,
+                                                  ground_z=ground_z)
+                report_input = facets_to_report_input(
+                    roof, label, aerial_image_path=chip_png)
         # merge facets LiDAR proves are one plane (fixes model over-
         # segmentation; area-conserving; off via MEASURE_IT_PLANE_MERGE=0)
         if _os.getenv("MEASURE_IT_PLANE_MERGE", "1") == "1":

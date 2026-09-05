@@ -33,11 +33,22 @@ from src.roofs.metrics import (
     compute_slope_deg,
     compute_surface_area,
 )
-from src.roofs.plane_fit import fit_plane_ransac
+from src.roofs.plane_fit import DEFAULT_MIN_INLIER_RATIO, fit_plane_ransac
 
 logger = logging.getLogger(__name__)
 
 MIN_FACET_POINTS = 30          # below this a plane fit is noise, not signal
+MIN_ROOF_CLEARANCE_M = 1.0     # points within 1 m of ground are bare-earth / low
+                               # vegetation, not roof — exclude from fit + eave
+DENSE_FACET_POINTS = 80        # >= this points, use the full 25% inlier floor;
+SPARSE_INLIER_RATIO = 0.15     # smaller facets (3DEP sparsity) get a relaxed floor
+
+# split_multiplane_facets thresholds (the complement to merge_coplanar_facets)
+SPLIT_RESIDUAL_M = 0.30        # a point this far off the primary plane is "off it"
+SPLIT_MIN_OFF_FRAC = 0.25      # facet is multiplane only if this many points are off
+SPLIT_ANGLE_DEG = 15.0         # ... and the second plane differs by at least this
+SPLIT_MIN_PIECE_FRAC = 0.15    # reject a cut that shaves a sliver — both pieces
+                               # must be >= this fraction of the facet area
 
 
 def _xyz(points) -> np.ndarray:
@@ -82,13 +93,27 @@ def annotate_facets_with_lidar(
         if poly is None or poly.is_empty:
             continue
         inside = contains_xy(poly, xyz[:, 0], xyz[:, 1])
-        n = int(inside.sum())
+        pts = xyz[inside]
+        # Drop near-ground returns (bare earth, driveway, low vegetation) that
+        # bleed into the polygon: they drag the plane fit below the inlier floor
+        # and pull the eave elevation down to ground (the observed "eave = ground"
+        # contamination). Roof surfaces sit well above grade.
+        if ground_z is not None and len(pts):
+            roof_only = pts[pts[:, 2] > ground_z + MIN_ROOF_CLEARANCE_M]
+            if len(roof_only) >= min_points:
+                pts = roof_only
+        n = len(pts)
         if n < min_points:
             logger.info("facet %s: %d LiDAR pts (<%d) — leaving unspecified",
                         f.facet_id, n, min_points)
             continue
+        # Area-aware inlier floor: a small facet at 3DEP density (~2-8 pts/m^2)
+        # has too few points for a 25% floor to be meaningful — relax it (it still
+        # needs a coherent core plane). Recovers pitch on tiny facets that were
+        # dropped and left silently unspecified.
+        floor = DEFAULT_MIN_INLIER_RATIO if n >= DENSE_FACET_POINTS else SPARSE_INLIER_RATIO
         try:
-            plane = fit_plane_ransac(xyz[inside])
+            plane = fit_plane_ransac(pts, min_inlier_ratio=floor)
         except Exception as e:  # noqa: BLE001 — annotation is best-effort
             logger.warning("facet %s: plane fit failed (%s)", f.facet_id, e)
             continue
@@ -109,8 +134,9 @@ def annotate_facets_with_lidar(
             "n_points": n,
             "residual_m": float(plane.residual_median),
         }
-        # eave elevation = the facet's low edge (5th percentile rides outliers)
-        out[f.facet_id]["_eave_z"] = float(np.percentile(xyz[inside, 2], 5))
+        # eave elevation = the facet's low edge (5th percentile rides outliers);
+        # computed on the ground-filtered points so a driveway can't pull it down.
+        out[f.facet_id]["_eave_z"] = float(np.percentile(pts[:, 2], 5))
 
     # two-story = a roof LEVEL above the building's lowest eave (relative —
     # Roofr semantics). Needs either >=2 facets (levels comparable) or ground.
@@ -272,6 +298,99 @@ def absorb_unannotated_orphans(
     logger.info("absorbed %d unverifiable orphan facet(s) into neighbors",
                 absorbed)
     return out, True
+
+
+def split_multiplane_facets(facets: List, points):
+    """Split a facet whose LiDAR points fit TWO distinct planes into one facet per
+    plane — the complement to ``merge_coplanar_facets``, fixing model UNDER-
+    segmentation (a hip wing returned as one blob). Evidence-based and
+    conservative: a facet splits only when a large minority of its points are off
+    its primary plane AND those points form a second plane at a clear angle, and
+    the geometric cut (the two planes' line of intersection) yields two
+    substantial pieces. Area is conserved (polygon split). Returns (facets, changed).
+    """
+    import math
+
+    from shapely import contains_xy
+    from shapely.geometry import LineString
+    from shapely.ops import split as shp_split
+
+    from src.roofs.segment import Facet
+
+    xyz = _xyz(points)
+    out: List = []
+    changed = False
+    for f in facets:
+        poly = getattr(f, "polygon", None)
+        if poly is None or poly.is_empty:
+            out.append(f)
+            continue
+        inside = contains_xy(poly, xyz[:, 0], xyz[:, 1])
+        pts = xyz[inside]
+        if len(pts) < 2 * MIN_FACET_POINTS:            # need enough for two planes
+            out.append(f)
+            continue
+        try:
+            p1 = fit_plane_ransac(pts)
+        except Exception:  # noqa: BLE001
+            out.append(f)
+            continue
+        if not p1.success:
+            out.append(f)
+            continue
+        resid = np.abs(pts[:, 2] - (p1.a * pts[:, 0] + p1.b * pts[:, 1] + p1.c))
+        off = resid > SPLIT_RESIDUAL_M
+        if off.sum() < max(MIN_FACET_POINTS, SPLIT_MIN_OFF_FRAC * len(pts)):
+            out.append(f)                              # essentially one plane
+            continue
+        try:
+            p2 = fit_plane_ransac(pts[off])
+        except Exception:  # noqa: BLE001
+            out.append(f)
+            continue
+        n1, n2 = np.array(p1.normal), np.array(p2.normal)
+        ang = math.degrees(math.acos(min(1.0, abs(float(n1 @ n2)))))
+        if not p2.success or ang < SPLIT_ANGLE_DEG:
+            out.append(f)                              # second "plane" too similar
+            continue
+
+        # crease = the two planes' line of intersection, projected to xy:
+        #   (a1-a2)x + (b1-b2)y + (c1-c2) = 0
+        da, db, dc = p1.a - p2.a, p1.b - p2.b, p1.c - p2.c
+        if da == 0 and db == 0:
+            out.append(f)
+            continue
+        cx, cy = poly.centroid.x, poly.centroid.y
+        t = (da * cx + db * cy + dc) / (da * da + db * db)
+        fx, fy = cx - t * da, cy - t * db              # foot of centroid on line
+        norm = math.hypot(da, db)
+        ux, uy = -db / norm, da / norm                 # along-line unit direction
+        minx, miny, maxx, maxy = poly.bounds
+        span = 2.0 * math.hypot(maxx - minx, maxy - miny)
+        line = LineString([(fx - span * ux, fy - span * uy),
+                           (fx + span * ux, fy + span * uy)])
+        try:
+            pieces = [g for g in shp_split(poly, line).geoms
+                      if g.geom_type == "Polygon" and g.area > 0]
+        except Exception:  # noqa: BLE001
+            out.append(f)
+            continue
+        if len(pieces) < 2 or min(g.area for g in pieces) < SPLIT_MIN_PIECE_FRAC * poly.area:
+            out.append(f)                              # sliver cut, not a real split
+            continue
+        logger.info("facet %s split into %d planes (normals %.0f° apart)",
+                    f.facet_id, len(pieces), ang)
+        out.extend(Facet(facet_id=-1, points=None, label=-1, polygon=g) for g in pieces)
+        changed = True
+
+    if not changed:
+        return list(facets), False
+    # renumber to a clean sequential partition (like merge_coplanar_facets)
+    final = [Facet(facet_id=i, points=None, label=i, polygon=f.polygon)
+             for i, f in enumerate(out, start=1)]
+    logger.info("plane split: %d facet(s) -> %d (LiDAR multiplane)",
+                len(facets), len(final))
+    return final, True
 
 
 def fuse_into_report_input(report_input: dict,

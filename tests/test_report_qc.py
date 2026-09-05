@@ -30,6 +30,27 @@ def _degraded():
             "edges": [{"edge_type": "eave", "length_m": 16, "geometry_xy": [[0, 0], [16, 0]]}]}
 
 
+def test_flat_roof_edges_typed_warns_not_fails():
+    # a predominantly-flat commercial roof (two big flat facets, no ridge/hip):
+    # edges_typed must WARN, not FAIL — an honest flat roof isn't blocked by the
+    # gate for a ridge line that physically isn't there.
+    ri = {"address": "C", "report_id": "MI-2",
+          "facets": [
+              {"facet_id": 0, "surface_area_m2": 300, "plan_area_m2": 300,
+               "pitch_string": "0:12", "slope_deg": 0.0, "aspect_bin": None,
+               "is_flat": True, "needs_review": False,
+               "polygon_xy": [[0, 0], [30, 0], [30, 15], [0, 15]]},
+              {"facet_id": 1, "surface_area_m2": 300, "plan_area_m2": 300,
+               "pitch_string": "0:12", "slope_deg": 0.0, "aspect_bin": None,
+               "is_flat": True, "needs_review": False,
+               "polygon_xy": [[0, 15], [30, 15], [30, 30], [0, 30]]}],
+          "outline_xy": [[0, 0], [30, 0], [30, 30], [0, 30]],
+          "edges": [{"edge_type": "eave", "length_m": 40, "geometry_xy": [[0, 0], [40, 0]]}]}
+    checks = {c["id"]: c for c in score_report(ri)["checks"]}
+    assert checks["edges_typed"]["severity"] == "WARN"
+    assert checks["edges_typed"]["ok"] is True
+
+
 def test_world_class_passes():
     r = score_report(_good())
     assert r["passed"], r

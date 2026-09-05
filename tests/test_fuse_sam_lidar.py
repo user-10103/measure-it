@@ -5,7 +5,11 @@ import numpy as np
 import pytest
 from shapely.geometry import box
 
-from src.roofs.fuse_sam_lidar import annotate_facets_with_lidar, fuse_into_report_input
+from src.roofs.fuse_sam_lidar import (
+    annotate_facets_with_lidar,
+    fuse_into_report_input,
+    split_multiplane_facets,
+)
 from src.roofs.segment import Facet
 
 
@@ -62,6 +66,38 @@ def test_fusion_never_touches_geometry():
     before = list(f.polygon.exterior.coords)
     annotate_facets_with_lidar([f], pts)
     assert list(f.polygon.exterior.coords) == before     # frozen shapes
+
+
+def test_split_multiplane_facet_at_the_ridge():
+    # one facet the model returned as a blob, but the points form a ridge at x=5:
+    # left half z=0.5*x, right half z=0.5*(10-x) -> two planes ~53deg apart
+    f = Facet(facet_id=1, polygon=box(0, 0, 10, 10))
+    pts = _grid_points(f.polygon, lambda x, y: np.where(x < 5, 0.5 * x, 0.5 * (10 - x)),
+                       step=0.3)
+    out, changed = split_multiplane_facets([f], pts)
+    assert changed and len(out) == 2
+    assert abs(sum(g.polygon.area for g in out) - 100.0) < 1.0   # area conserved
+    assert all(g.polygon.area > 20 for g in out)                 # two real halves
+
+
+def test_single_plane_facet_not_split():
+    f = Facet(facet_id=1, polygon=box(0, 0, 10, 10))
+    pts = _grid_points(f.polygon, lambda x, y: 0.4 * x + 0.1 * y + 2.0, step=0.3)
+    out, changed = split_multiplane_facets([f], pts)
+    assert not changed and len(out) == 1
+
+
+def test_ground_returns_excluded_from_fit_and_eave():
+    # a facet with roof points ~5-9 m up, plus driveway returns at z~0.2 bleeding in
+    f = Facet(facet_id=1, polygon=box(0, 0, 8, 8))
+    roof = _grid_points(f.polygon, lambda x, y: 0.4 * x + 5.0, step=0.4)
+    ground = np.column_stack([np.linspace(0, 8, 60), np.linspace(0, 8, 60),
+                              np.full(60, 0.2)])
+    pts = np.vstack([roof, ground])
+    ann = annotate_facets_with_lidar([f], pts, ground_z=0.0)
+    assert 1 in ann
+    # eave computed on roof points only -> well above ground, not dragged to ~0.2
+    assert ann[1]["eave_height_m"] > 3.0
 
 
 def test_fuse_into_report_input_fills_only_annotated():
