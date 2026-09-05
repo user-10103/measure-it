@@ -15,10 +15,19 @@ pitch arrive when the LiDAR plane fit is wired in — they slot into the same
 """
 from __future__ import annotations
 
+import hashlib
+from datetime import date
 from typing import List, Optional
 
 from src.output.pdf_report import generate_report
 from src.roofs.geom_edges import edges_from_outline_and_facets
+
+
+def _report_id(address: str) -> str:
+    """Stable, human-readable report id: MI-<YYYYMMDD>-<addr hash>. Same address
+    on the same day is idempotent; different addresses never collide."""
+    h = hashlib.sha1(address.encode("utf-8")).hexdigest()[:6].upper()
+    return f"MI-{date.today():%Y%m%d}-{h}"
 
 
 def _largest(poly):
@@ -65,6 +74,7 @@ def facets_to_report_input(sam_roof, address: str,
 
     return {
         "address": address,
+        "report_id": _report_id(address),   # report_qc.metadata wants a stable id
         "facets": facets,
         "edges": edges,
         "outline_xy": outline_xy,      # zero-shot roof outline -> bold boundary in the diagram

@@ -291,4 +291,20 @@ def fuse_into_report_input(report_input: dict,
         if "is_two_story" in ann:
             f["two_story"] = ann["is_two_story"]
             f["eave_height_m"] = ann["eave_height_m"]
+
+    # Honesty guard: a facet whose plane fit failed (no annotation -> slope still
+    # None, not flat) must be FLAGGED, never left silently unspecified — else the
+    # report prints its plan area as if it were surface area. report_qc treats a
+    # needs_review facet as honestly disclosed (verify in oblique), so flagging
+    # is the intended path for a genuinely unresolvable pitch, not a silent error.
+    # This is the fix for the recurring gate FAIL (pitch_resolved / slope_applied):
+    # e.g. tiny facets below the RANSAC inlier floor at 3DEP point density.
+    unresolved = 0
+    for f in report_input.get("facets", []):
+        if f.get("slope_deg") is None and not f.get("is_flat"):
+            f["needs_review"] = True
+            unresolved += 1
+    if unresolved:
+        logger.info("flagged %d facet(s) needs_review (LiDAR pitch unresolved)",
+                    unresolved)
     return report_input

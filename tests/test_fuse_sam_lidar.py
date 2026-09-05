@@ -79,3 +79,30 @@ def test_fuse_into_report_input_fills_only_annotated():
     assert out["facets"][0]["pitch_string"] == "6:12"
     assert out["facets"][0]["polygon_xy"] == [[0, 0]]     # geometry untouched
     assert out["facets"][1]["pitch_string"] is None       # stays unspecified
+    # the unresolved facet must be FLAGGED, not left silent (gate honesty guard)
+    assert out["facets"][1]["needs_review"] is True
+    assert out["facets"][0].get("needs_review") is not True  # resolved -> not flagged
+
+
+def test_unresolved_pitch_facet_is_flagged_so_gate_passes():
+    """A facet whose plane fit failed (no annotation) is flagged needs_review, so
+    report_qc.pitch_resolved / slope_applied treat it as honestly disclosed rather
+    than a silent plan-area-as-surface-area error. This is the recurring gate FAIL."""
+    from src.output.report_qc import score_report
+    ri = {
+        "address": "x", "report_id": "MI-TEST",
+        "outline_xy": [[0, 0], [10, 0], [10, 10], [0, 10]],
+        "facets": [
+            {"facet_id": 1, "polygon_xy": [[0, 0], [10, 0], [10, 5], [0, 5]],
+             "plan_area_m2": 50.0, "pitch_string": None, "slope_deg": None,
+             "aspect_bin": None, "is_flat": False, "surface_area_m2": None},
+        ],
+        "edges": [],
+    }
+    # no annotation -> facet 1 is unresolved
+    fuse_into_report_input(ri, {})
+    assert ri["facets"][0]["needs_review"] is True
+    res = score_report(ri)
+    checks = {c["id"]: c for c in res["checks"]}
+    assert checks["pitch_resolved"]["ok"], checks["pitch_resolved"]["detail"]
+    assert checks["slope_applied"]["ok"], checks["slope_applied"]["detail"]
