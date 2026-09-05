@@ -87,6 +87,44 @@ def test_single_plane_facet_not_split():
     assert not changed and len(out) == 1
 
 
+def test_flat_facet_not_split_on_clutter():
+    # a flat roof with a tilted rooftop-clutter blob must NOT split — a flat roof
+    # is one plane (the Tampa regression: a big flat facet was split into slivers).
+    f = Facet(facet_id=1, polygon=box(0, 0, 10, 10))
+    flat = _grid_points(f.polygon, lambda x, y: np.full_like(x, 5.0), step=0.3)
+    rng = np.random.RandomState(7)
+    cx, cy = rng.uniform(0, 3, 300), rng.uniform(0, 3, 300)
+    clutter = np.column_stack([cx, cy, 5.0 + 1.2 * cx])          # tilted HVAC blob
+    out, changed = split_multiplane_facets([f], np.vstack([flat, clutter]))
+    assert not changed and len(out) == 1
+
+
+def test_two_plane_split_rejected_when_a_piece_is_point_starved():
+    # a genuine two-plane facet, but the crease is off-centre and sampling coarse,
+    # so one piece would fall under MIN_FACET_POINTS -> don't split (would just
+    # manufacture a pitch-less sliver).
+    f = Facet(facet_id=1, polygon=box(0, 0, 10, 10))
+    # planes meet at x=3.75; left piece is the small one, coarse grid keeps it <30 pts
+    pts = _grid_points(f.polygon,
+                       lambda x, y: np.where(x < 3.75, 0.5 * x, 1.5 + 0.1 * x),
+                       step=1.1)
+    out, changed = split_multiplane_facets([f], pts)
+    assert not changed and len(out) == 1
+
+
+def test_noisy_flat_roof_accepted_as_flat():
+    # a flat roof so noisy the RANSAC fit is below the inlier floor, but the best
+    # plane is LEVEL -> recorded as flat (0:12), not dropped and left unspecified.
+    f = Facet(facet_id=1, polygon=box(0, 0, 12, 12))
+    rng = np.random.RandomState(6)
+    xs, ys = rng.uniform(0, 12, 500), rng.uniform(0, 12, 500)
+    z = 6.0 + rng.normal(0, 1.2, 500)                           # ~16% within 0.25 m
+    ann = annotate_facets_with_lidar([f], np.column_stack([xs, ys, z]))
+    # the facet is recorded (not dropped) and treated as flat -> surface == plan
+    assert 1 in ann and ann[1]["is_flat"] is True
+    assert ann[1]["surface_area_m2"] == pytest.approx(f.polygon.area, rel=1e-6)
+
+
 def test_ground_returns_excluded_from_fit_and_eave():
     # a facet with roof points ~5-9 m up, plus driveway returns at z~0.2 bleeding in
     f = Facet(facet_id=1, polygon=box(0, 0, 8, 8))

@@ -49,6 +49,8 @@ SPLIT_MIN_OFF_FRAC = 0.25      # facet is multiplane only if this many points ar
 SPLIT_ANGLE_DEG = 15.0         # ... and the second plane differs by at least this
 SPLIT_MIN_PIECE_FRAC = 0.15    # reject a cut that shaves a sliver — both pieces
                                # must be >= this fraction of the facet area
+FLAT_ACCEPT_RESIDUAL_M = 0.30  # accept a sub-floor fit as flat (0:12) only if it's
+                               # near-level AND this tight (real flat roof, not noise)
 
 
 def _xyz(points) -> np.ndarray:
@@ -118,7 +120,16 @@ def annotate_facets_with_lidar(
             logger.warning("facet %s: plane fit failed (%s)", f.facet_id, e)
             continue
         if not plane.success:
-            continue
+            # A flat roof with rooftop clutter (HVAC, parapets, ponding) rarely
+            # clears the inlier floor at a 0.25 m RANSAC threshold, yet its near-
+            # LEVEL best-fit plane with a tight residual IS the 0:12 answer. Accept
+            # that; anything else stays honestly unspecified (-> needs_review).
+            if not (compute_slope_deg(plane) < FLAT_SLOPE_DEG
+                    and plane.inlier_count >= min_points
+                    and plane.residual_median < FLAT_ACCEPT_RESIDUAL_M):
+                continue
+            logger.info("facet %s: accepted as flat (%.0f%% inliers, level fit)",
+                        f.facet_id, 100 * plane.inlier_count / n)
         slope = compute_slope_deg(plane)
         is_flat = slope < FLAT_SLOPE_DEG
         aspect = compute_aspect_deg(plane)
@@ -338,6 +349,9 @@ def split_multiplane_facets(facets: List, points):
         if not p1.success:
             out.append(f)
             continue
+        if compute_slope_deg(p1) < FLAT_SLOPE_DEG:
+            out.append(f)                              # flat roof is ONE plane —
+            continue                                   # residual is clutter, not a 2nd facet
         resid = np.abs(pts[:, 2] - (p1.a * pts[:, 0] + p1.b * pts[:, 1] + p1.c))
         off = resid > SPLIT_RESIDUAL_M
         if off.sum() < max(MIN_FACET_POINTS, SPLIT_MIN_OFF_FRAC * len(pts)):
@@ -375,8 +389,19 @@ def split_multiplane_facets(facets: List, points):
         except Exception:  # noqa: BLE001
             out.append(f)
             continue
-        if len(pieces) < 2 or min(g.area for g in pieces) < SPLIT_MIN_PIECE_FRAC * poly.area:
-            out.append(f)                              # sliver cut, not a real split
+        # A clean two-plane facet cuts into exactly two substantial pieces. More
+        # pieces means the line raked across a concave boundary (a messy cut), not
+        # a real crease.
+        if len(pieces) != 2 or min(g.area for g in pieces) < SPLIT_MIN_PIECE_FRAC * poly.area:
+            out.append(f)
+            continue
+        # Each piece must carry enough LiDAR points to fit its OWN plane. Without
+        # this, splitting a sparsely-sampled facet (e.g. 1.3 pts/m^2 3DEP) just
+        # manufactures sub-floor pieces that all come back pitch-less — the Tampa
+        # regression: one flat facet -> eight unspecified slivers.
+        if any(int(contains_xy(g, xyz[:, 0], xyz[:, 1]).sum()) < MIN_FACET_POINTS
+               for g in pieces):
+            out.append(f)
             continue
         logger.info("facet %s split into %d planes (normals %.0f° apart)",
                     f.facet_id, len(pieces), ang)
