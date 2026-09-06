@@ -141,18 +141,28 @@ def generate_report(report_input: dict, out_pdf: str,
     _footer(c, W, 5)
     c.showPage()
 
-    # ---- Page 6: per-facet detail table ----
-    _header(c, W, H, "Per-facet detail", address)
-    _facet_table(c, W, H, model)
+    # ---- Page 6: notes diagram (facets lettered A..Z, smallest to largest) ----
+    _header(c, W, H, "Notes — facet index", address)
+    c.setFillColorRGB(*GREY)
+    c.setFont("Helvetica", 10)
+    c.drawString(54, H - 104, "Roof facets are labelled A to Z, smallest to largest, "
+                              "matching the per-facet detail table.")
+    _draw_diagram(c, report_input, "notes", 90, H - 620, W - 180, 460)
     _footer(c, W, 6)
     c.showPage()
 
-    # ---- Page 7: summary ----
+    # ---- Page 7: per-facet detail table ----
+    _header(c, W, H, "Per-facet detail", address)
+    _facet_table(c, W, H, model)
+    _footer(c, W, 7)
+    c.showPage()
+
+    # ---- Page 8: summary ----
     _header(c, W, H, "Report summary", address)
     _summary_tables(c, W, H, model)
-    _pitch_table(c, 54, H - 130, model)    # area-by-pitch in the empty left column
-    _obstructions(c, 54, H - 300, model)   # foreign objects (only if detector supplied any)
-    _footer(c, W, 7)
+    _pitch_table(c, 54, H - 130, model)    # areas-per-pitch (with % of roof)
+    _obstructions(c, 54, H - 320, model)   # foreign objects (only if detector supplied any)
+    _footer(c, W, 8)
     c.showPage()
 
     c.save()
@@ -202,13 +212,28 @@ def _area_totals(c, W, H, model: ReportModel):
     _kv_lines(c, W / 2, H - 120, right)
 
 
+def _structure_complexity(num_facets: int) -> str:
+    """EagleView-style Simple / Normal / Complex band from facet count."""
+    if num_facets <= 6:
+        return "Simple"
+    if num_facets <= 14:
+        return "Normal"
+    return "Complex"
+
+
 def _summary_tables(c, W, H, model: ReportModel):
     e = model.edge_totals_ftin
+    ft = model.edge_totals_ft
+    stories = 2 if getattr(model, "two_story_area_sqft", 0.0) > 0 else 1
+    drip_ft = ft.get("eave", 0.0) + ft.get("rake", 0.0)   # drip edge = eaves + rakes
     rows = [("Total roof area", f"{int(round(model.total_area_sqft))} sqft"),
             ("Total pitched area", f"{int(round(model.pitched_area_sqft))} sqft"),
             ("Total flat area", f"{int(round(model.flat_area_sqft))} sqft"),
             ("Total roof facets", f"{model.num_facets} facets"),
+            ("Number of stories", f"{stories}"),
+            ("Structure complexity", _structure_complexity(model.num_facets)),
             ("Predominant pitch", _pitch_slash(model.predominant_pitch)),
+            ("Drip edge (eaves+rakes)", f"{int(round(drip_ft))} ft"),
             ("Total eaves", e.get("eave", "0ft 0in")),
             ("Total valleys", e.get("valley", "0ft 0in")),
             ("Total hips", e.get("hip", "0ft 0in")),
@@ -309,14 +334,18 @@ def _pitch_table(c, x, y, model: ReportModel):
     c.setFont("Helvetica-Bold", 9)
     c.drawString(x, y - 16, "Pitch")
     c.drawString(x + 80, y - 16, "Area (sqft)")
-    c.drawString(x + 175, y - 16, "Squares")
+    c.drawString(x + 175, y - 16, "% of roof")
+    c.drawString(x + 250, y - 16, "Squares")
     c.setFillColorRGB(*DARK)
     c.setFont("Helvetica", 9)
+    total = max(model.total_area_sqft, 1e-6)
     yy = y - 32
     for p, d in sorted(pb.items()):
+        area = d.get("area_sqft", 0)
         c.drawString(x, yy, _pitch_slash(p))
-        c.drawString(x + 80, yy, f"{d.get('area_sqft', 0):.0f}")
-        c.drawString(x + 175, yy, f"{d.get('squares', 0)}")
+        c.drawString(x + 80, yy, f"{area:.0f}")
+        c.drawString(x + 175, yy, f"{100 * area / total:.1f}%")
+        c.drawString(x + 250, yy, f"{d.get('squares', 0)}")
         yy -= 14
 
 
