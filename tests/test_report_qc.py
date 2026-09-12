@@ -111,3 +111,29 @@ def test_coverage_fails_on_gappy_facets():
     r = score_report(ri)
     cov = next(c for c in r["checks"] if c["id"] == "facets_coverage")
     assert not cov["ok"]
+
+
+def test_failing_gate_yields_plain_english_incomplete_reason():
+    """A report that fails the gate must be STAMPED, not shipped looking finished.
+    report_service scores the gate BEFORE writing the PDF and sets this reason,
+    which pdf_report renders as the red INCOMPLETE banner on the cover."""
+    from src.serve.report_service import incomplete_reason
+    # 1250 Pineapple Ave signature: many facets, zero ridges/hips (impossible)
+    ri = {"address": "bad", "report_id": "MI-BAD",
+          "outline_xy": [[0, 0], [10, 0], [10, 10], [0, 10]],
+          "facets": [{"facet_id": i + 1,
+                      "polygon_xy": [[i, 0], [i + 1, 0], [i + 1, 10], [i, 10]],
+                      "plan_area_m2": 10.0, "surface_area_m2": 10.8,
+                      "slope_deg": 26.6, "pitch_string": "6:12",
+                      "aspect_bin": "N", "is_flat": False, "needs_review": False}
+                     for i in range(10)],
+          "edges": [{"edge_type": "eave", "length_m": 10,
+                     "geometry_xy": [[0, 0], [10, 0]]}]}
+    qc = score_report(ri)
+    assert not qc["passed"]
+    reason = incomplete_reason(qc)
+    assert reason and "edges_typed" not in reason      # jargon must not reach a client
+    assert "roof edge structure not resolved" in reason
+
+    # a passing report is never stamped
+    assert incomplete_reason(score_report(_good())) is None

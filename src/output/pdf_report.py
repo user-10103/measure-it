@@ -94,13 +94,19 @@ def generate_report(report_input: dict, out_pdf: str,
     # Occluded/unsegmentable roof: stamp a loud full-width strip across the top
     # so a blank-roof report can never be mistaken for a finished one. Drawn at
     # the page top where nothing else lives -> no overpaint.
+    # Stamped when the roof was unsegmentable OR the world-class gate FAILED.
+    # A failing report must never look finished — report_service sets
+    # incomplete_reason with the failing check ids before this runs.
+    _reason = report_input.get("incomplete_reason")
     if report_input.get("occluded_roof"):
+        _reason = _reason or "roof not segmentable from imagery"
+    if _reason:
         c.setFillColorRGB(0.85, 0.20, 0.15)
         c.rect(0, H - 30, W, 30, fill=1, stroke=0)
         c.setFillColorRGB(1, 1, 1)
-        c.setFont("Helvetica-Bold", 12)
+        c.setFont("Helvetica-Bold", 11)
         c.drawCentredString(W / 2, H - 20,
-                            "INCOMPLETE - MANUAL REVIEW REQUIRED  (roof not segmentable from imagery)")
+                            f"INCOMPLETE - MANUAL REVIEW REQUIRED  ({_reason})")
         c.setFillColorRGB(*DARK)
     aerial = report_input.get("aerial_image_path")
     box = (90, H - 560, W - 180, 380)

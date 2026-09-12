@@ -76,6 +76,28 @@ def fetch_chip(lat: float, lon: float, state: str, out_dir: Path,
     return chip, transform, str(png), anchor, meta
 
 
+# plain-English wording for a client-facing cover; the check ids stay in the log
+_WHY = {"edges_typed": "roof edge structure not resolved",
+        "pitch_resolved": "roof pitch could not be measured",
+        "slope_applied": "sloped area not verified",
+        "facets_partition": "overlapping roof faces",
+        "facets_coverage": "roof faces do not cover the roof",
+        "area_sane": "implausible roof area",
+        "area_positive": "no measurable roof area",
+        "facets_present": "no roof faces detected",
+        "facet_table": "per-face detail missing"}
+
+
+def incomplete_reason(qc: dict) -> Optional[str]:
+    """Why a report must be stamped INCOMPLETE, in words a client understands.
+    None when the world-class gate passed."""
+    if qc.get("passed"):
+        return None
+    bad = [c["id"] for c in qc.get("checks", [])
+           if c["severity"] == "FAIL" and not c["ok"]]
+    return "; ".join(_WHY.get(b, b) for b in bad) or "failed quality gate"
+
+
 def _fallback_outline(roof):
     """Outline from the facet union when the zero-shot prompt missed — the
     report then still gets a perimeter (eaves) and the facets tile something."""
@@ -243,16 +265,20 @@ def generate_roof_report(
         grads = {fid: a["grad"] for fid, a in annotations.items()}
         apply_3d_edge_lengths(report_input["edges"], roof.facets, grads)
 
-    pdf_path = out_dir / "roof_report.pdf"
-    generate_report(report_input, str(pdf_path))
-
-    # World-class gate: score the finished report and log any FAILs so the
-    # pipeline can never silently ship a degraded deliverable.
+    # World-class gate runs BEFORE the PDF is written: a report that fails must be
+    # STAMPED INCOMPLETE, never shipped looking finished. Scoring after
+    # generate_report() meant a garbage roof (e.g. 11 facets with zero ridges or
+    # hips - geometrically impossible) printed a polished, confident PDF and only
+    # logged a warning nobody reads.
     from src.output.report_qc import score_report, format_report_qc
     qc = score_report(report_input)
     if not qc["passed"]:
+        report_input["incomplete_reason"] = incomplete_reason(qc)
         logger.warning("report below world-class bar (score %.0f%%):\n%s",
                         qc["score"] * 100, format_report_qc(qc))
+
+    pdf_path = out_dir / "roof_report.pdf"
+    generate_report(report_input, str(pdf_path))
 
     edge_totals: Dict[str, float] = {}
     for e in report_input["edges"]:
