@@ -137,7 +137,9 @@ def render_diagram(report_input: dict, mode: str = "plain",
                   font=_font(14))
         return img
     tx = _make_transform(bounds, size, margin)
-    f_small, f_lab = _font(12), _font(14)
+    # rendered at 2x and downscaled into the PDF, so these are ~half this size
+    # on the page; 12/14 came out at ~6/7pt and could not be read on a projector
+    f_small, f_lab = _font(18), _font(22)
     facets = report_input.get("facets", [])
 
     # 1. facets — clean fills + thin grey seams (no multicolour blobs)

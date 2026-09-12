@@ -339,9 +339,9 @@ def _pitch_table(c, x, y, model: ReportModel):
     c.setFillColorRGB(*GREY)
     c.setFont("Helvetica-Bold", 9)
     c.drawString(x, y - 16, "Pitch")
-    c.drawString(x + 80, y - 16, "Area (sqft)")
-    c.drawString(x + 175, y - 16, "% of roof")
-    c.drawString(x + 250, y - 16, "Squares")
+    c.drawString(x + 70, y - 16, "Area (sqft)")
+    c.drawString(x + 140, y - 16, "% of roof")
+    c.drawString(x + 200, y - 16, "Squares")
     c.setFillColorRGB(*DARK)
     c.setFont("Helvetica", 9)
     total = max(model.total_area_sqft, 1e-6)
@@ -349,9 +349,9 @@ def _pitch_table(c, x, y, model: ReportModel):
     for p, d in sorted(pb.items()):
         area = d.get("area_sqft", 0)
         c.drawString(x, yy, _pitch_slash(p))
-        c.drawString(x + 80, yy, f"{area:.0f}")
-        c.drawString(x + 175, yy, f"{100 * area / total:.1f}%")
-        c.drawString(x + 250, yy, f"{d.get('squares', 0)}")
+        c.drawString(x + 70, yy, f"{area:.0f}")
+        c.drawString(x + 140, yy, f"{100 * area / total:.1f}%")
+        c.drawString(x + 200, yy, f"{d.get('squares', 0)}")
         yy -= 14
 
 
