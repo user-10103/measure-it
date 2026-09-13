@@ -69,7 +69,13 @@ class _GeoSeries:
 
 _stub("geopandas", GeoSeries=_GeoSeries, GeoDataFrame=mock.MagicMock())
 
-# pdal: not installed in test venv
+# pdal: not installed in test venv. ept_client imports it LAZILY, inside
+# fetch_lidar_points, so `ept_client.pdal` does not exist as a module attribute
+# and patching it raises AttributeError. These four tests were doing exactly that
+# and had been erroring out — silently, because the suite was only ever run as a
+# subset — leaving the LiDAR CRS path (the 141M m^2 units bug that `area_sane`
+# exists to catch) with no live coverage at all. Patch the stub module itself,
+# which is what the lazy `import pdal` resolves to.
 _stub("pdal", Pipeline=mock.MagicMock())
 
 # ---------------------------------------------------------------------------
@@ -108,14 +114,31 @@ def _make_fake_pdal_pipeline(n_points=10, srswkt=UTM17N_WKT):
         ("X", "f8"), ("Y", "f8"), ("Z", "f8"), ("Classification", "u1")
     ])
     pts = np.zeros(n_points, dtype=dtype)
-    pts["X"] = 490_000.0 + np.arange(n_points)  # UTM 17N easting for Tampa area
-    pts["Y"] = 3_110_000.0 + np.arange(n_points)
+    # Real UTM 17N coordinates for the WGS84 test location (-82.3951, 28.1178).
+    # The previous 490_000 easting was ~127 km east of it, so every point fell
+    # outside the building footprint and get_ept_lidar_for_location correctly
+    # returned None — the product rejecting points that are not under the
+    # building, which is exactly what it should do.
+    pts["X"] = 362_950.0 + np.arange(n_points)
+    pts["Y"] = 3_111_000.0 + np.arange(n_points)
     pts["Z"] = 10.0 + np.arange(n_points) * 0.1
 
     p = mock.MagicMock()
     p.execute.return_value = n_points
     p.arrays = [pts]
+    # PDAL 3.x names this srswkt2; ept_client reads that first and falls back to
+    # srswkt for older builds. A bare MagicMock auto-creates srswkt2 as a truthy
+    # Mock, so setting only srswkt used to hand the CRS through as a Mock object
+    # and the fallback never ran — the fixture, not the product, was the bug.
+    p.srswkt2 = srswkt
     p.srswkt = srswkt
+    return p
+
+
+def _make_fake_pdal_2x_pipeline(**kw):
+    """A PDAL 2.x pipeline: no srswkt2 at all, so the fallback must carry it."""
+    p = _make_fake_pdal_pipeline(**kw)
+    del p.srswkt2          # makes getattr raise AttributeError, as 2.x would
     return p
 
 
@@ -126,7 +149,7 @@ def _make_fake_pdal_pipeline(n_points=10, srswkt=UTM17N_WKT):
 def test_fetch_lidar_points_returns_tuple(monkeypatch):
     """fetch_lidar_points must return (array, wkt_string), not a bare array."""
     fake = _make_fake_pdal_pipeline()
-    monkeypatch.setattr(ept_client.pdal, "Pipeline", lambda _json: fake)
+    monkeypatch.setattr(sys.modules["pdal"], "Pipeline", lambda _json: fake)
 
     result = ept_client.fetch_lidar_points(
         "https://example.com/ept.json", "POLYGON(...)/EPSG:4326"
@@ -140,7 +163,7 @@ def test_fetch_lidar_points_returns_tuple(monkeypatch):
 def test_fetch_lidar_points_srswkt_matches_pipeline(monkeypatch):
     """The returned srswkt must be exactly what pipeline.srswkt reported."""
     fake = _make_fake_pdal_pipeline(srswkt=UTM17N_WKT)
-    monkeypatch.setattr(ept_client.pdal, "Pipeline", lambda _json: fake)
+    monkeypatch.setattr(sys.modules["pdal"], "Pipeline", lambda _json: fake)
 
     _, srswkt = ept_client.fetch_lidar_points(
         "https://x/ept.json", "POLYGON(...)/EPSG:4326"
@@ -152,7 +175,7 @@ def test_fetch_lidar_points_empty_returns_none_tuple(monkeypatch):
     """Zero-point EPT response must return (None, None)."""
     fake = mock.MagicMock()
     fake.execute.return_value = 0
-    monkeypatch.setattr(ept_client.pdal, "Pipeline", lambda _json: fake)
+    monkeypatch.setattr(sys.modules["pdal"], "Pipeline", lambda _json: fake)
 
     points, srswkt = ept_client.fetch_lidar_points(
         "https://x/ept.json", "POLYGON(...)/EPSG:4326"
@@ -168,11 +191,11 @@ def test_fetch_lidar_points_empty_returns_none_tuple(monkeypatch):
 def test_get_ept_lidar_for_location_propagates_crs(monkeypatch):
     """Result dict from get_ept_lidar_for_location must contain 'points_crs'."""
     fake = _make_fake_pdal_pipeline(srswkt=UTM17N_WKT)
-    monkeypatch.setattr(ept_client.pdal, "Pipeline", lambda _json: fake)
+    monkeypatch.setattr(sys.modules["pdal"], "Pipeline", lambda _json: fake)
 
     dummy_poly = Polygon([
-        (490000, 3110000), (490050, 3110000),
-        (490050, 3110030), (490000, 3110030),
+        (362950, 3111000), (363000, 3111000),
+        (363000, 3111030), (362950, 3111030),
     ])
     monkeypatch.setattr(
         ept_client, "build_dsm_from_points",
@@ -190,7 +213,12 @@ def test_get_ept_lidar_for_location_propagates_crs(monkeypatch):
 
     assert result is not None
     assert "points_crs" in result, f"keys: {list(result.keys())}"
-    assert result["points_crs"] == UTM17N_WKT
+    # get_ept_lidar_for_location reprojects to the NAD83 UTM zone for the
+    # location (EPSG:26917 here), NOT to whatever the reader reports — 3DEP is
+    # published in NAD83, so that is the right datum to standardise on. The old
+    # EPSG:32617 (WGS84/UTM 17N) expectation predates that and was never run.
+    assert result["points_crs"] == f"EPSG:{ept_client.utm_epsg_for(-82.3951, 28.1178)}"
+    assert result["points_crs"] == "EPSG:26917"
 
 
 # ---------------------------------------------------------------------------
@@ -255,3 +283,26 @@ def test_refine_with_ept_lidar_uses_points_crs(monkeypatch):
     # Must be within ~0.1° of the reference point (100 m precision)
     assert abs(out_cx - ref_lon) < 0.1, f"Longitude too far from reference: {out_cx:.4f}"
     assert abs(out_cy - ref_lat) < 0.1, f"Latitude too far from reference: {out_cy:.4f}"
+
+
+def test_srswkt_falls_back_for_pdal_2x(monkeypatch):
+    """The documented fallback in ept_client had no live coverage: the fixture's
+    MagicMock always supplied a truthy srswkt2, so the `or getattr(..., srswkt)`
+    branch never executed in any test."""
+    fake = _make_fake_pdal_2x_pipeline(srswkt=UTM17N_WKT)
+    monkeypatch.setattr(sys.modules["pdal"], "Pipeline", lambda _json: fake)
+    _points, srswkt = ept_client.fetch_lidar_points(
+        "https://example.com/ept.json", "POLYGON(...)/EPSG:4326")
+    assert srswkt == UTM17N_WKT
+
+
+def test_explicit_out_srs_wins_over_what_the_reader_reports(monkeypatch):
+    """With a reprojection stage the output CRS is out_srs by construction, even
+    though srswkt2 still reports the reader's NATIVE SRS. Trusting the reader
+    there is the shape of the CRS/units bug `area_sane` catches downstream."""
+    fake = _make_fake_pdal_pipeline(srswkt="EPSG:26917")   # native, not what we asked for
+    monkeypatch.setattr(sys.modules["pdal"], "Pipeline", lambda _json: fake)
+    _points, srswkt = ept_client.fetch_lidar_points(
+        "https://example.com/ept.json", "POLYGON(...)/EPSG:4326",
+        out_srs=UTM17N_WKT)
+    assert srswkt == UTM17N_WKT
