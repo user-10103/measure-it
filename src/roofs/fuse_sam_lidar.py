@@ -490,6 +490,8 @@ def split_multiplane_facets(facets: List, points):
         # regression: one flat facet -> eight unspecified slivers.
         if any(int(contains_xy(g, xyz[:, 0], xyz[:, 1]).sum()) < MIN_FACET_POINTS
                for g in pieces):
+            logger.info("facet %s: no level split — a piece would hold < %d points",
+                        f.facet_id, MIN_FACET_POINTS)
             out.append(f)
             continue
         logger.info("facet %s split into %d planes (normals %.0f° apart)",
@@ -522,18 +524,47 @@ def _spans_two_levels(pts) -> bool:
     and they are not a roof level. Both sides must carry a real share of the
     points, which is what separates a second SECTION from an HVAC cluster.
     """
-    z = np.sort(pts[:, 2])
-    lo, hi = int(0.05 * len(z)), int(0.95 * len(z))
-    core = z[lo:hi]
-    if len(core) < 2 * MIN_PLANE_INLIERS:
+    clusters = _level_clusters(pts)
+    if clusters is None:
         return False
-    gaps = np.diff(core)
-    k = int(np.argmax(gaps))
-    if gaps[k] < FLAT_LEVEL_STEP_M:
+    # A step alone is not a second SECTION: rooftop plant sits above the deck
+    # through the same plan area. Only count it when the two levels occupy
+    # different ground.
+    return _levels_side_by_side(*clusters)
+
+
+CLUTTER_OVERLAP_MAX = 0.50     # if this much of the smaller cluster's plan hull
+                               # sits inside the other's, the two elevations are
+                               # SUPERIMPOSED (rooftop plant above the deck), not
+                               # two sections side by side
+
+
+def _levels_side_by_side(low, high) -> bool:
+    """Do two elevation clusters occupy DIFFERENT ground, or the same ground?
+
+    A real level change is two sections meeting at a parapet - their plan hulls
+    sit beside each other. Rooftop plant (a mechanical unit, a stair bulkhead, a
+    canopy) is SUPERIMPOSED: LiDAR sees the deck and something 3 m above it
+    through the same plan area, so the hulls overlap almost completely.
+
+    Measured on 755 E Eau Gallie, facets 5 and 6: a clean 3.4-3.7 m step, both
+    clusters well over MIN_FACET_POINTS, and hulls summing to 1.79 and 1.59 of a
+    polygon that is 1.00. Nothing to cut between - and those same facets had the
+    HIGHEST explained fractions on the roof (0.88, 0.97), because once RANSAC
+    drops the plant what remains is an excellent plane. Flagging them as
+    under-segmented was a false positive.
+    """
+    from shapely.geometry import MultiPoint
+
+    try:
+        hull_lo = MultiPoint([tuple(q) for q in low[:, :2]]).convex_hull
+        hull_hi = MultiPoint([tuple(q) for q in high[:, :2]]).convex_hull
+    except Exception:  # noqa: BLE001
         return False
-    below, above = k + 1, len(core) - (k + 1)
-    need = max(MIN_PLANE_INLIERS, int(FLAT_LEVEL_MIN_FRAC * len(core)))
-    return min(below, above) >= need
+    smaller = min(hull_lo.area, hull_hi.area)
+    if smaller <= 0:
+        return False
+    return (hull_lo.intersection(hull_hi).area / smaller) < CLUTTER_OVERLAP_MAX
 
 
 def _level_clusters(pts):
@@ -586,17 +617,33 @@ def split_level_facets(facets: List, points):
             out.append(f)
             continue
         pts = xyz[contains_xy(poly, xyz[:, 0], xyz[:, 1])]
-        clusters = _level_clusters(pts) if len(pts) >= 2 * MIN_FACET_POINTS else None
+        if len(pts) < 2 * MIN_FACET_POINTS:
+            logger.debug("facet %s: no level split — %d pts (<%d)", f.facet_id,
+                         len(pts), 2 * MIN_FACET_POINTS)
+            out.append(f)
+            continue
+        clusters = _level_clusters(pts)
         if clusters is None:
+            logger.debug("facet %s: no level split — no elevation gap >= %.2f m "
+                         "with support on both sides", f.facet_id, FLAT_LEVEL_STEP_M)
             out.append(f)
             continue
         low, high = clusters
+        if not _levels_side_by_side(low, high):
+            # SUPERIMPOSED: rooftop plant above the deck, not two sections. There
+            # is nothing to cut between, and RANSAC already ignores it.
+            logger.info("facet %s: two elevations but SUPERIMPOSED in plan — "
+                        "rooftop plant, not a level change; left whole", f.facet_id)
+            out.append(f)
+            continue
         cx1, cy1 = float(low[:, 0].mean()), float(low[:, 1].mean())
         cx2, cy2 = float(high[:, 0].mean()), float(high[:, 1].mean())
         dx, dy = cx2 - cx1, cy2 - cy1
         sep = math.hypot(dx, dy)
         if sep < 1e-6:
-            out.append(f)                              # stacked, not side by side
+            logger.info("facet %s: no level split — cluster centroids coincide",
+                        f.facet_id)
+            out.append(f)
             continue
         mx, my = (cx1 + cx2) / 2.0, (cy1 + cy2) / 2.0  # midpoint of the centroids
         ux, uy = -dy / sep, dx / sep                   # perpendicular = the divide
@@ -607,10 +654,19 @@ def split_level_facets(facets: List, points):
         try:
             pieces = [g for g in shp_split(poly, line).geoms
                       if g.geom_type == "Polygon" and g.area > 0]
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            logger.info("facet %s: no level split — cut failed (%s)", f.facet_id, e)
             out.append(f)
             continue
-        if len(pieces) != 2 or min(g.area for g in pieces) < SPLIT_MIN_PIECE_FRAC * poly.area:
+        if len(pieces) != 2:
+            logger.info("facet %s: no level split — cut yielded %d piece(s), not 2",
+                        f.facet_id, len(pieces))
+            out.append(f)
+            continue
+        if min(g.area for g in pieces) < SPLIT_MIN_PIECE_FRAC * poly.area:
+            logger.info("facet %s: no level split — a piece is only %.0f%% of the "
+                        "facet", f.facet_id,
+                        100 * min(g.area for g in pieces) / poly.area)
             out.append(f)
             continue
         if any(int(contains_xy(g, xyz[:, 0], xyz[:, 1]).sum()) < MIN_FACET_POINTS

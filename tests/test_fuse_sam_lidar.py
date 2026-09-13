@@ -374,3 +374,33 @@ def test_genuinely_pitched_facet_still_reports_its_pitch():
     pts = _grid_points(f.polygon, lambda x, y: 0.5 * x)      # 6:12
     a = annotate_facets_with_lidar([f], pts)[1]
     assert a["is_flat"] is False and a["pitch_string"] == "6:12"
+
+
+def test_rooftop_plant_is_not_a_level_change():
+    """755 E Eau Gallie facets 5 and 6: a clean 3.4-3.7 m step, both clusters well
+    supported — but the two plan hulls summed to 1.79 and 1.59 of a polygon that is
+    1.00. The levels are SUPERIMPOSED: a mechanical unit or stair bulkhead above
+    the deck, not two sections. Those facets had the HIGHEST explained fractions on
+    the roof (0.88, 0.97), so calling them under-segmented was a false positive."""
+    from src.roofs.fuse_sam_lidar import detect_multiplane_facets, split_level_facets
+    f = Facet(facet_id=1, polygon=box(0, 0, 12, 12))
+    deck = _grid_points(f.polygon, lambda x, y: np.full_like(x, 5.0), step=0.3)
+    # plant sitting 3.5 m up, over the MIDDLE of the same deck (superimposed)
+    rng = np.random.RandomState(51)
+    n = int(0.35 * len(deck))
+    plant = np.column_stack([rng.uniform(3, 9, n), rng.uniform(3, 9, n),
+                             np.full(n, 8.5)])
+    pts = np.vstack([deck, plant])
+    assert detect_multiplane_facets([f], pts) == []        # not under-segmented
+    out, changed = split_level_facets([f], pts)
+    assert not changed and len(out) == 1                   # nothing to cut
+
+
+def test_genuine_side_by_side_levels_still_split():
+    """A real level change — two sections on different ground — must still split."""
+    from src.roofs.fuse_sam_lidar import detect_multiplane_facets, split_level_facets
+    f = Facet(facet_id=1, polygon=box(0, 0, 20, 20))
+    pts = _grid_points(f.polygon, lambda x, y: np.where(x < 10, 5.0, 6.4), step=0.4)
+    assert detect_multiplane_facets([f], pts) == [1]
+    out, changed = split_level_facets([f], pts)
+    assert changed and len(out) == 2
