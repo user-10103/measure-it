@@ -177,7 +177,7 @@ def generate_roof_report(
     predict_outline=None,
     out_dir: Union[str, Path] = "output/report",
     label: Optional[str] = None,
-    chip_fetcher: Callable = fetch_chip,
+    chip_fetcher: Optional[Callable] = None,
     score_thr: float = SCORE_THR,
     chip_buffer_m: float = CHIP_BUFFER_M,
     lidar_points=None,
@@ -195,7 +195,12 @@ def generate_roof_report(
             geocode, not from a literal.
         predict_facets / predict_outline: from
             ``sam3_predictors.load_sam3_predictors`` (or fakes in tests).
-        chip_fetcher: injected imagery step (network-free in tests).
+        chip_fetcher: injected imagery step (network-free in tests). Defaults
+            to imagery_select.fetch_chip_best — county GIS orthophoto where one
+            is registered for the location, NAIP everywhere else. The facet
+            model is fine-tuned on GIS imagery, so serving NAIP unconditionally
+            (the previous default) meant inferring at 4x the training GSD.
+            Pass fetch_chip explicitly to force the NAIP path.
         lidar_points: optional roof point cloud (x,y,z struct or (N,3)) in the
             chip's world CRS — enables per-facet pitch + true sloped area via
             read-only fusion (facet shapes are never modified). Without it the
@@ -225,6 +230,9 @@ def generate_roof_report(
                 "state= explicitly. NAIP is archived per state, so guessing "
                 "one would fetch imagery for the wrong part of the country.")
         logger.info("state resolved from coordinates: %s", state)
+    if chip_fetcher is None:
+        from src.ingestion.imagery_select import fetch_chip_best
+        chip_fetcher = fetch_chip_best
     fetched = chip_fetcher(lat, lon, state, out_dir,
                            chip_buffer_m=chip_buffer_m)
     chip, transform, chip_png = fetched[0], fetched[1], fetched[2]
@@ -348,6 +356,15 @@ def generate_roof_report(
     # hips - geometrically impossible) printed a polished, confident PDF and only
     # logged a warning nobody reads.
     from src.output.report_qc import score_report, format_report_qc
+    # Which imagery this roof was actually measured from. The facet model is
+    # fine-tuned on GIS orthophotos, so a NAIP-sourced report is an out-of-domain
+    # inference and must say so rather than look identical to an in-domain one.
+    # Survives the report_input rebuilds above by being set last.
+    for _k in ("imagery_source", "imagery_gsd_m", "imagery_year",
+               "imagery_county"):
+        if _k in meta:
+            report_input[_k] = meta[_k]
+
     qc = score_report(report_input)
     if not qc["passed"]:
         report_input["incomplete_reason"] = incomplete_reason(qc)
