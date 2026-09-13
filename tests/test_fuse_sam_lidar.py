@@ -350,3 +350,27 @@ def test_hvac_does_not_trigger_a_level_split():
                             np.full(n, 6.6)])
     out, changed = split_level_facets([f], np.vstack([deck, hvac]))
     assert not changed and len(out) == 1
+
+
+def test_flat_facet_does_not_report_a_pitch_it_was_not_charged_for():
+    """A facet just under FLAT_SLOPE_DEG gets no slope multiplier on its area, so
+    it must not print a pitch either. 755 E Eau Gallie listed 2,481 sqft under a
+    1/12 row while counting the same area as flat and excluding it from pitched
+    area — the report contradicting itself."""
+    import math
+    from src.roofs.metrics import FLAT_SLOPE_DEG
+    f = Facet(facet_id=1, polygon=box(0, 0, 12, 12))
+    grad = math.tan(math.radians(FLAT_SLOPE_DEG - 0.3))      # just inside "flat"
+    pts = _grid_points(f.polygon, lambda x, y: grad * x + 4.0, step=0.3)
+    a = annotate_facets_with_lidar([f], pts)[1]
+    assert a["is_flat"] is True
+    assert a["pitch_string"] == "0:12"                       # not "1:12"
+    # and the area carries no slope multiplier, consistent with that
+    assert a["surface_area_m2"] == pytest.approx(f.polygon.area, rel=1e-6)
+
+
+def test_genuinely_pitched_facet_still_reports_its_pitch():
+    f = Facet(facet_id=1, polygon=box(0, 0, 10, 10))
+    pts = _grid_points(f.polygon, lambda x, y: 0.5 * x)      # 6:12
+    a = annotate_facets_with_lidar([f], pts)[1]
+    assert a["is_flat"] is False and a["pitch_string"] == "6:12"

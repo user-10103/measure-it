@@ -200,7 +200,14 @@ def annotate_facets_with_lidar(
         aspect = compute_aspect_deg(plane)
         out[f.facet_id] = {
             "slope_deg": float(slope),
-            "pitch_string": compute_pitch_string(slope),
+            # Report the SAME slope the area math used. A facet at 4.76 deg is
+            # under FLAT_SLOPE_DEG, so surface_area applies no multiplier (below
+            # it "the slope is membrane-roof LiDAR noise") - but this printed
+            # "1:12" anyway, so 755 E Eau Gallie showed 2,481 sqft under a 1/12
+            # pitch row while the same area was counted as flat and excluded from
+            # pitched area. If the slope is not trusted enough to use, it is not
+            # trusted enough to print.
+            "pitch_string": compute_pitch_string(0.0 if is_flat else slope),
             "aspect_deg": float(aspect),        # downslope compass deg (rake relabel)
             "grad": (float(plane.a), float(plane.b)),   # plane gradient (3D lengths, merging)
             "aspect_bin": compute_aspect_bin(aspect),
