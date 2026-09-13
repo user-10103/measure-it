@@ -47,6 +47,31 @@ MIN_PLANE_INLIERS = 20         # ...but a RATIO alone is not enough: 36 points a
                                # 1600 Sarno produced a 59.8 deg "facet" that way on
                                # an 8 deg roof, and it polluted the edge graph.
 
+# MIN_PLANE_INLIERS is a COUNT, and a count is secretly an AREA whose size depends
+# on the survey. Brevard County runs ~30 pts/m^2, where 20 inliers means "the plane
+# must cover ~0.7 m^2". Rural 3DEP QL2 runs ~2 pts/m^2, where the SAME constant
+# means "~10 m^2" - silently discarding every dormer, bay window and porch roof.
+# Same code, same number, a different product. So scale the requirement by the
+# survey's measured density and hold the AREA constant instead.
+#
+# But the constant was doing TWO jobs, and scaling it alone regresses the bug it
+# was added for. The jobs are:
+#   1. AREA      - "the plane must cover enough real roof". Scales with density.
+#   2. NOISE     - "the plane must not be fitted to scatter". Does NOT scale: at
+#                  1 pt/m^2 the Sarno facet is 36 points, "sparse" by the density
+#                  measure, and relaxing to 8 lets its 14-inlier 59.8 deg plane
+#                  back onto an 8 deg roof (test_plane_fit_on_a_handful...).
+# So relaxing the count is only safe if the plane EARNS it: inside the relaxed
+# band the fit must also explain PLANE_EXPLAINS_MIN of the facet's own points -
+# the same criterion the report gate applies downstream, applied early enough to
+# keep the bogus plane out of the edge graph. A clean dormer on a sparse survey
+# explains 0.8-0.9 and is recovered; scatter explains 0.39 and stays out.
+MIN_PLANE_AREA_M2 = 0.7        # what MIN_PLANE_INLIERS meant at Brevard density
+ABS_MIN_PLANE_INLIERS = 8      # however sparse the survey, fewer than this cannot
+                               # define a plane at all - a hard numerical floor
+RELAXED_EXPLAINS_MIN = 0.60    # == report_qc.PLANE_EXPLAINS_MIN; kept as a local
+                               # constant so roofs/ does not import from output/
+
 # split_multiplane_facets thresholds (the complement to merge_coplanar_facets)
 SPLIT_RESIDUAL_M = 0.30        # a point this far off the primary plane is "off it"
 SPLIT_MIN_OFF_FRAC = 0.25      # facet is multiplane only if this many points are off
@@ -127,11 +152,49 @@ def _attribution_report(facets, xyz, annotated: int, n_facets: int) -> str:
                dist, verdict))
 
 
+def survey_density(facets, xyz) -> float:
+    """Measured point density of THIS survey, in points per m^2 of roof plan area.
+
+    Scene-level, not per-facet, on purpose: density is a property of the LiDAR
+    collection, so one number describes it. A per-facet figure would read low
+    exactly where a facet is occluded or a polygon is a thin sliver that
+    ``contains_xy`` undercounts - and those are the cases where relaxing the
+    plane requirement is least safe.
+
+    Returns 0.0 when it cannot be measured, which callers must treat as
+    "no evidence" (keep the strict default), never as "sparse".
+    """
+    from shapely.ops import unary_union
+
+    polys = [f.polygon for f in facets
+             if getattr(f, "polygon", None) is not None and not f.polygon.is_empty]
+    if not polys or not len(xyz):
+        return 0.0
+    try:
+        area = unary_union(polys).area
+    except Exception:  # noqa: BLE001 - density is advisory, never fatal
+        return 0.0
+    return (len(xyz) / area) if area > 0 else 0.0
+
+
+def required_plane_inliers(density: float) -> int:
+    """Inliers a plane must have, scaled so the constant means a fixed AREA.
+
+    Capped at MIN_PLANE_INLIERS so this only ever relaxes (see the constants):
+    a dense survey keeps today's behaviour exactly.
+    """
+    if density <= 0:
+        return MIN_PLANE_INLIERS           # unmeasurable -> stay strict
+    scaled = int(round(MIN_PLANE_AREA_M2 * density))
+    return max(ABS_MIN_PLANE_INLIERS, min(MIN_PLANE_INLIERS, scaled))
+
+
 def annotate_facets_with_lidar(
     facets: List,
     points,
     min_points: int = MIN_FACET_POINTS,
     ground_z: Optional[float] = None,
+    declines: Optional[Dict[int, str]] = None,
 ) -> Dict[int, dict]:
     """Per-facet pitch annotation. Returns {facet_id: annotation} — facets that
     can't be annotated are simply absent (they keep "unspecified" downstream).
@@ -142,14 +205,38 @@ def annotate_facets_with_lidar(
         ground_z: optional ground elevation (m, same datum as the points).
             When given, each facet gets ``eave_height_m`` (5th-percentile roof
             z minus ground) and ``is_two_story``.
+        declines: optional dict, populated with ``{facet_id: reason}`` for every
+            facet that could NOT be annotated. A facet is absent from the result
+            for five different reasons and the report could not tell them apart,
+            so "unspecified" had to be diagnosed by re-running the address. Pass
+            this in and the reason travels with the report instead.
     """
     from shapely import contains_xy
 
     xyz = _xyz(points)
     out: Dict[int, dict] = {}
+
+    def decline(fid, reason: str):
+        """Every path that leaves a facet unspecified goes through here, so none
+        of them can be silent again. Two of the five used to be a bare
+        ``continue`` - including the commonest one, a failed plane fit."""
+        logger.info("facet %s: %s - leaving unspecified", fid, reason)
+        if declines is not None:
+            declines[fid] = reason
+
+    # Hold the plane requirement at a fixed AREA rather than a fixed count, so a
+    # sparse rural survey does not silently discard every dormer on the roof.
+    density = survey_density(facets, xyz)
+    need_inliers = required_plane_inliers(density)
+    if need_inliers != MIN_PLANE_INLIERS:
+        logger.info("survey density %.1f pts/m2 - plane inlier requirement "
+                    "relaxed %d -> %d (holding ~%.1f m2)",
+                    density, MIN_PLANE_INLIERS, need_inliers, MIN_PLANE_AREA_M2)
+
     for f in facets:
         poly = getattr(f, "polygon", None)
         if poly is None or poly.is_empty:
+            decline(getattr(f, "facet_id", None), "no polygon")
             continue
         inside = contains_xy(poly, xyz[:, 0], xyz[:, 1])
         pts = xyz[inside]
@@ -163,8 +250,8 @@ def annotate_facets_with_lidar(
                 pts = roof_only
         n = len(pts)
         if n < min_points:
-            logger.info("facet %s: %d LiDAR pts (<%d) — leaving unspecified",
-                        f.facet_id, n, min_points)
+            decline(f.facet_id,
+                    f"only {n} LiDAR points inside the facet (need {min_points})")
             continue
         # Area-aware inlier floor: a small facet at 3DEP density (~2-8 pts/m^2)
         # has too few points for a 25% floor to be meaningful — relax it (it still
@@ -173,17 +260,30 @@ def annotate_facets_with_lidar(
         floor = DEFAULT_MIN_INLIER_RATIO if n >= DENSE_FACET_POINTS else SPARSE_INLIER_RATIO
         try:
             plane = fit_plane_ransac(pts, min_inlier_ratio=floor)
-        except Exception as e:  # noqa: BLE001 — annotation is best-effort
-            logger.warning("facet %s: plane fit failed (%s)", f.facet_id, e)
+        except Exception as e:  # noqa: BLE001 - annotation is best-effort
+            decline(f.facet_id, f"plane fit raised {type(e).__name__}: {e}")
             continue
         # A ratio can clear the floor on a handful of points; require an absolute
         # inlier count too, or a noise plane fit to ~15 points is treated as roof
         # geometry and reaches the edge classifier.
         if plane.success and plane.inlier_count < MIN_PLANE_INLIERS:
-            logger.info("facet %s: plane fit has only %d inlier(s) (<%d) — "
-                        "leaving unspecified", f.facet_id, plane.inlier_count,
-                        MIN_PLANE_INLIERS)
-            continue
+            explains = plane.inlier_count / n
+            if plane.inlier_count < need_inliers:
+                decline(f.facet_id,
+                        f"plane fit found only {plane.inlier_count} inliers "
+                        f"(need {need_inliers} at {density:.1f} pts/m2)")
+                continue
+            # in the density-relaxed band: the plane must earn the relaxation
+            if explains < RELAXED_EXPLAINS_MIN:
+                decline(f.facet_id,
+                        f"plane fit has {plane.inlier_count} inliers, under the "
+                        f"{MIN_PLANE_INLIERS} floor, and explains only "
+                        f"{explains:.0%} of the facet (need "
+                        f"{RELAXED_EXPLAINS_MIN:.0%} to accept a sparse fit)")
+                continue
+            logger.info("facet %s: accepting sparse fit - %d inliers explain "
+                        "%.0f%% of the facet at %.1f pts/m2",
+                        f.facet_id, plane.inlier_count, 100 * explains, density)
         if not plane.success:
             # A flat roof with rooftop clutter (HVAC, parapets, ponding) rarely
             # clears the inlier floor at a 0.25 m RANSAC threshold, yet its near-
@@ -192,6 +292,14 @@ def annotate_facets_with_lidar(
             if not (compute_slope_deg(plane) < FLAT_SLOPE_DEG
                     and plane.inlier_count >= min_points
                     and plane.residual_median < FLAT_ACCEPT_RESIDUAL_M):
+                # The commonest decline on a real roof, and it used to be a bare
+                # `continue`: RANSAC never reached its inlier floor, so no plane
+                # describes this facet, and it is not level enough to accept as
+                # flat. Say so - "unspecified" with no reason costs a re-run.
+                decline(f.facet_id,
+                        f"no plane fits: RANSAC reached {plane.inlier_count}/{n} "
+                        f"inliers at {compute_slope_deg(plane):.1f} deg, "
+                        f"residual {plane.residual_median:.2f} m")
                 continue
             logger.info("facet %s: accepted as flat (%.0f%% inliers, level fit)",
                         f.facet_id, 100 * plane.inlier_count / n)

@@ -262,8 +262,14 @@ def generate_roof_report(
             merge_coplanar_facets)
         from src.roofs.geom_edges import (
             apply_3d_edge_lengths, classify_internal_edges, relabel_rakes)
+        # Why each unannotated facet is unannotated. Absent from `annotations`
+        # covers five different causes and the report could not tell them apart,
+        # so "unspecified" had to be diagnosed by re-running the address. Cleared
+        # before each re-annotation so it describes the FINAL facet set.
+        lidar_declines: dict = {}
         annotations = annotate_facets_with_lidar(roof.facets, lidar_points,
-                                          ground_z=ground_z)
+                                          ground_z=ground_z,
+                                          declines=lidar_declines)
         # split facets that LiDAR proves span TWO planes (fixes model UNDER-
         # segmentation — a hip wing returned as one blob; area-conserving; off
         # via MEASURE_IT_PLANE_SPLIT=0). Runs before the merge so a freshly split
@@ -278,8 +284,10 @@ def generate_roof_report(
             did_split = did_split or did_level
             if did_split:
                 roof.facets = split
+                lidar_declines.clear()
                 annotations = annotate_facets_with_lidar(roof.facets, lidar_points,
-                                                  ground_z=ground_z)
+                                                  ground_z=ground_z,
+                                                  declines=lidar_declines)
                 report_input = facets_to_report_input(
                     roof, label, aerial_image_path=chip_png)
         # merge facets LiDAR proves are one plane (fixes model over-
@@ -292,8 +300,10 @@ def generate_roof_report(
             merged, absorbed = absorb_unannotated_orphans(merged, annotations)
             if changed or absorbed:
                 roof.facets = merged
+                lidar_declines.clear()
                 annotations = annotate_facets_with_lidar(merged, lidar_points,
-                                              ground_z=ground_z)
+                                              ground_z=ground_z,
+                                              declines=lidar_declines)
                 report_input = facets_to_report_input(
                     roof, label, aerial_image_path=chip_png)
         # Independent check on FACET COUNT, which the gate cannot see for itself:
@@ -302,6 +312,9 @@ def generate_roof_report(
         from src.roofs.fuse_sam_lidar import detect_multiplane_facets
         report_input["multiplane_facets"] = detect_multiplane_facets(
             roof.facets, lidar_points)
+        if lidar_declines:
+            report_input["lidar_declines"] = {str(k): v
+                                              for k, v in lidar_declines.items()}
         fuse_into_report_input(report_input, annotations)
         # eave vs rake: pure relabel from each facet's downslope direction
         aspects = {fid: a["aspect_deg"] for fid, a in annotations.items()

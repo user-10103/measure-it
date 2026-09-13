@@ -404,3 +404,101 @@ def test_genuine_side_by_side_levels_still_split():
     assert detect_multiplane_facets([f], pts) == [1]
     out, changed = split_level_facets([f], pts)
     assert changed and len(out) == 2
+
+
+# --- density-scaled plane requirement + no silent declines -------------------
+# MIN_PLANE_INLIERS is a COUNT, so it is secretly an AREA that moves by 15x
+# across US LiDAR surveys: ~0.7 m^2 at Brevard's ~30 pts/m^2, but ~10 m^2 at
+# rural 3DEP QL2's ~2 pts/m^2, where it silently discards every dormer.
+
+def test_plane_requirement_holds_area_not_count_across_survey_densities():
+    from src.roofs.fuse_sam_lidar import (ABS_MIN_PLANE_INLIERS,
+                                          MIN_PLANE_INLIERS,
+                                          required_plane_inliers)
+    # Brevard-grade survey: unchanged, so validated roofs cannot regress
+    assert required_plane_inliers(30.0) == MIN_PLANE_INLIERS
+    assert required_plane_inliers(100.0) == MIN_PLANE_INLIERS   # capped, never tightens
+    # rural QL2: relaxed, or a real dormer needs 10 m^2 to be seen at all
+    assert required_plane_inliers(2.0) == ABS_MIN_PLANE_INLIERS
+    assert ABS_MIN_PLANE_INLIERS <= required_plane_inliers(8.0) < MIN_PLANE_INLIERS
+    # unmeasurable density is "no evidence", never "sparse"
+    assert required_plane_inliers(0.0) == MIN_PLANE_INLIERS
+
+
+def test_survey_density_is_scene_level_not_per_facet():
+    """Density is a property of the collection, so one number describes it. A
+    per-facet figure would read low exactly where a facet is occluded — the case
+    where relaxing the plane requirement is least safe."""
+    from src.roofs.fuse_sam_lidar import survey_density
+    f1 = Facet(facet_id=1, polygon=box(0, 0, 10, 10))
+    f2 = Facet(facet_id=2, polygon=box(10, 0, 20, 10))
+    pts = _grid_points(f1.polygon, lambda x, y: 0.0 * x)      # 4 pts/m^2, f1 only
+    d = survey_density([f1, f2], pts)
+    assert 1.5 < d < 2.5, d          # 400 pts over 200 m^2 of roof, not over f1
+    assert survey_density([], pts) == 0.0
+    assert survey_density([f1], np.empty((0, 3))) == 0.0
+
+
+def test_every_unannotated_facet_says_why():
+    """A facet absent from `annotations` has five possible causes and the report
+    could not tell them apart, so "unspecified" cost a re-run of the address to
+    diagnose. Two of the five paths were a bare `continue` with no log at all."""
+    starved = Facet(facet_id=1, polygon=box(0, 0, 10, 10))
+    declines: dict = {}
+    ann = annotate_facets_with_lidar(
+        [starved], _grid_points(starved.polygon, lambda x, y: 0.0 * x, step=5.0),
+        declines=declines)
+    assert ann == {}                      # absent, as before
+    assert 1 in declines                  # ...but no longer silent
+    assert "LiDAR points" in declines[1]
+    # a facet with no geometry at all is reported too, not skipped invisibly
+    from shapely.geometry import Polygon
+    declines.clear()
+    annotate_facets_with_lidar([Facet(facet_id=2, polygon=Polygon())],
+                               _grid_points(box(0, 0, 10, 10), lambda x, y: 0.0 * x),
+                               declines=declines)
+    assert declines.get(2) == "no polygon"
+
+
+def test_annotation_is_unchanged_when_no_declines_sink_is_passed():
+    """The sink is optional: every existing caller keeps its exact behaviour."""
+    f = Facet(facet_id=1, polygon=box(0, 0, 10, 10))
+    pts = _grid_points(f.polygon, lambda x, y: 0.5 * x)
+    assert annotate_facets_with_lidar([f], pts)[1]["pitch_string"] == "6:12"
+
+
+def test_density_relaxation_does_not_readmit_the_sarno_noise_plane():
+    """Scaling MIN_PLANE_INLIERS by density ALONE regresses the bug it was added
+    for: the 36-point Sarno facet spans 36 m^2, so it reads as 1 pt/m^2 "sparse"
+    and the relaxed floor of 8 accepts its 14-inlier 59.8-degree plane. Relaxing
+    the count is only safe when the plane explains the facet — here 14/36 = 39%,
+    well under the bar, so it stays out of the edge graph."""
+    from src.roofs.fuse_sam_lidar import RELAXED_EXPLAINS_MIN
+    f = Facet(facet_id=1, polygon=box(0, 0, 6, 6))
+    rng = np.random.RandomState(11)
+    xs, ys = rng.uniform(0, 6, 14), rng.uniform(0, 6, 14)
+    good = np.column_stack([xs, ys, 1.7 * xs])          # steep, 14 points
+    gx, gy = rng.uniform(0, 6, 22), rng.uniform(0, 6, 22)
+    junk = np.column_stack([gx, gy, rng.uniform(0, 12, 22)])
+    declines: dict = {}
+    ann = annotate_facets_with_lidar([f], np.vstack([good, junk]),
+                                     min_points=30, declines=declines)
+    assert ann == {}
+    assert "explains only" in declines[1]
+    assert 14 / 36 < RELAXED_EXPLAINS_MIN
+
+
+def test_a_clean_sparse_facet_is_recovered_not_dropped():
+    """The case the relaxation exists for: a real dormer on a rural QL2 survey.
+    Few points, but they are a clean plane — 20 inliers is an ARBITRARY bar that
+    only happens to suit Brevard's ~30 pts/m^2."""
+    f = Facet(facet_id=1, polygon=box(0, 0, 12, 12))     # 144 m^2
+    # ~0.25 pts/m^2 over the facet: 36 clean points on a 6:12 plane
+    rng = np.random.RandomState(3)
+    xs, ys = rng.uniform(0, 12, 36), rng.uniform(0, 12, 36)
+    pts = np.column_stack([xs, ys, 0.5 * xs])
+    declines: dict = {}
+    ann = annotate_facets_with_lidar([f], pts, min_points=30, declines=declines)
+    assert ann, declines                                 # recovered, not dropped
+    assert ann[1]["pitch_string"] == "6:12"
+    assert ann[1]["explained_frac"] > 0.9                # it earned the relaxation
