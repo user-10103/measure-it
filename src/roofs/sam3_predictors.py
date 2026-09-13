@@ -115,8 +115,20 @@ def load_sam3_predictors(
         # re-download to the default cache. Log where they actually land so a
         # mis-ordered env var is visible instead of costing a silent re-download.
         try:
+            import os as _os
             from huggingface_hub.constants import HF_HUB_CACHE
-            logger.info("HF cache in use: %s", HF_HUB_CACHE)
+            want = _os.environ.get("HF_HOME")
+            if want and not str(HF_HUB_CACHE).startswith(str(want)):
+                # WARNING, not info: the whole point is to be seen, and a fresh
+                # Colab kernel's root logger sits at WARNING — an info-level
+                # warning about silent misconfiguration is itself silent.
+                logger.warning(
+                    "HF_HOME=%s but huggingface_hub is caching in %s — HF_HOME was "
+                    "set AFTER huggingface_hub was first imported, so it had no "
+                    "effect and the ~6.5 GB base weights will re-download", 
+                    want, HF_HUB_CACHE)
+            else:
+                logger.info("HF cache in use: %s", HF_HUB_CACHE)
         except Exception:  # noqa: BLE001 — observability only, never fatal
             pass
         base = build_sam3_image_model()          # pretrained weights, untouched

@@ -98,6 +98,42 @@ def incomplete_reason(qc: dict) -> Optional[str]:
     return "; ".join(_WHY.get(b, b) for b in bad) or "failed quality gate"
 
 
+def _lidar_clip_geometry(meta: dict, roof):
+    """Geometry to clip the LiDAR fetch to: the building footprint UNIONED with the
+    roof outline we actually segmented.
+
+    The points were clipped to the MS Buildings footprint while the FACETS come
+    from the SAM outline, and nothing reconciled the two. Wherever they diverge —
+    a geocode pin tens of metres off the building, an anchor override picking a
+    different mask, a footprint-healing expansion — facets land in a region no
+    point was ever fetched for, and every one comes back pitch-less. That is
+    1600 Sarno Rd: 550 points fetched, 0 of 6 facets annotated, and with no pitch
+    the edges cannot be classified either (0 ridges/hips, 188 ft "unspecified").
+
+    Clipping to the union guarantees every facet we are about to ask about is
+    covered. Falls back to the footprint when the outline is unusable.
+    """
+    fp = meta["footprint_wgs84"]
+    outline = getattr(roof, "outline", None)
+    if outline is None or outline.is_empty or not getattr(roof, "georeferenced", False):
+        return fp                      # pixel-space outline can't be reprojected
+    try:
+        from pyproj import Transformer
+        from shapely.ops import transform as shp_transform, unary_union
+        to_wgs = Transformer.from_crs(meta["crs"], "EPSG:4326", always_xy=True).transform
+        merged = unary_union([fp, shp_transform(to_wgs, outline)])
+        if merged.is_empty:
+            return fp
+        grew = merged.area > fp.area * 1.01
+        logger.info("LiDAR clip = footprint %s detected outline",
+                    "UNION" if grew else "(outline adds nothing beyond)")
+        return merged
+    except Exception as e:  # noqa: BLE001 — clip widening is additive, never fatal
+        logger.warning("could not union the outline into the LiDAR clip (%s) — "
+                       "using footprint alone", e)
+        return fp
+
+
 def _fallback_outline(roof):
     """Outline from the facet union when the zero-shot prompt missed — the
     report then still gets a perimeter (eaves) and the facets tile something."""
@@ -202,7 +238,7 @@ def generate_roof_report(
         try:
             from src.lidar.ept_fetch import fetch_roof_points
             lidar_points, ground_z = fetch_roof_points(
-                lat, lon, meta["footprint_wgs84"], meta["crs"],
+                lat, lon, _lidar_clip_geometry(meta, roof), meta["crs"],
                 with_ground=True)
         except Exception as e:  # noqa: BLE001 — LiDAR is additive, never fatal
             logger.warning("LiDAR fetch failed (%s) — imagery-only report", e)
