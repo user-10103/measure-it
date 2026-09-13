@@ -273,3 +273,47 @@ def test_flat_roof_clutter_is_not_called_undersegmented():
     cx, cy = rng.uniform(0, 3, 400), rng.uniform(0, 3, 400)
     clutter = np.column_stack([cx, cy, 5.0 + 1.2 * cx])
     assert detect_multiplane_facets([f], np.vstack([flat, clutter])) == []
+
+
+def test_flat_facet_spanning_two_roof_levels_is_flagged():
+    """2725 Judge Fran shipped 43,029 sqft as ONE flat facet with zero ridges,
+    hips, valleys, parapets or transitions — and passed the gate, because the
+    angle test cannot see a level change. A commercial roof at two elevations is
+    two sections, and the parapet between them is a real edge."""
+    from src.roofs.fuse_sam_lidar import detect_multiplane_facets
+    f = Facet(facet_id=1, polygon=box(0, 0, 20, 20))
+    # two flat halves 1.2 m apart in elevation — a parapet step, not a slope
+    pts = _grid_points(f.polygon,
+                       lambda x, y: np.where(x < 10, 5.0, 6.2), step=0.4)
+    assert detect_multiplane_facets([f], pts) == [1]
+
+
+def test_flat_roof_with_hvac_is_not_called_two_levels():
+    """Rooftop units sit above the deck but are a small minority — they must not
+    read as a second roof level, or every flat commercial roof fails."""
+    from src.roofs.fuse_sam_lidar import detect_multiplane_facets
+    f = Facet(facet_id=1, polygon=box(0, 0, 20, 20))
+    deck = _grid_points(f.polygon, lambda x, y: np.full_like(x, 5.0), step=0.4)
+    rng = np.random.RandomState(31)
+    n = int(0.08 * len(deck))                       # 8% of returns are plant
+    hx, hy = rng.uniform(0, 4, n), rng.uniform(0, 4, n)
+    hvac = np.column_stack([hx, hy, np.full(n, 6.5)])
+    assert detect_multiplane_facets([f], np.vstack([deck, hvac])) == []
+
+
+def test_single_level_flat_roof_is_not_flagged():
+    from src.roofs.fuse_sam_lidar import detect_multiplane_facets
+    f = Facet(facet_id=1, polygon=box(0, 0, 20, 20))
+    rng = np.random.RandomState(32)
+    pts = _grid_points(f.polygon, lambda x, y: np.full_like(x, 5.0), step=0.4)
+    pts[:, 2] += rng.normal(0, 0.03, len(pts))      # normal membrane noise
+    assert detect_multiplane_facets([f], pts) == []
+
+
+def test_pitched_roof_is_not_mistaken_for_two_levels():
+    """A real slope has continuously varying z and no elevation gap — the level
+    test must not fire on it, or every pitched roof gets flagged."""
+    from src.roofs.fuse_sam_lidar import detect_multiplane_facets
+    f = Facet(facet_id=1, polygon=box(0, 0, 20, 20))
+    pts = _grid_points(f.polygon, lambda x, y: 0.5 * x + 3.0, step=0.4)
+    assert detect_multiplane_facets([f], pts) == []

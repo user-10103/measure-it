@@ -53,6 +53,10 @@ SPLIT_MIN_OFF_FRAC = 0.25      # facet is multiplane only if this many points ar
 SPLIT_ANGLE_DEG = 15.0         # ... and the second plane differs by at least this
 SPLIT_MIN_PIECE_FRAC = 0.15    # reject a cut that shaves a sliver — both pieces
                                # must be >= this fraction of the facet area
+FLAT_LEVEL_STEP_M = 0.60       # two flat sections this far apart in elevation are
+                               # different roof LEVELS, not one plane with clutter
+FLAT_LEVEL_MIN_FRAC = 0.25     # ...and each level needs this share of the points,
+                               # so an HVAC cluster is not mistaken for a level
 FLAT_ACCEPT_RESIDUAL_M = 0.30  # accept a sub-floor fit as flat (0:12) only if it's
                                # near-level AND this tight (real flat roof, not noise)
 
@@ -488,6 +492,35 @@ def split_multiplane_facets(facets: List, points):
     return final, True
 
 
+def _spans_two_levels(pts) -> bool:
+    """True when a FLAT facet's points sit at two distinct elevations.
+
+    A flat facet cannot be "two planes at an angle", so the slope test that finds
+    under-segmentation on a pitched roof is blind to it. But a large commercial
+    roof is routinely several flat sections at DIFFERENT HEIGHTS, separated by
+    parapets or level changes — and reporting them as one plane loses every
+    internal edge. 2725 Judge Fran shipped 43,029 sqft as a single facet with
+    zero ridges, hips, valleys, parapets or transitions, and passed the gate,
+    because nothing was looking for a step.
+
+    Trim the tails before measuring the gap: rooftop units and noise live there,
+    and they are not a roof level. Both sides must carry a real share of the
+    points, which is what separates a second SECTION from an HVAC cluster.
+    """
+    z = np.sort(pts[:, 2])
+    lo, hi = int(0.05 * len(z)), int(0.95 * len(z))
+    core = z[lo:hi]
+    if len(core) < 2 * MIN_PLANE_INLIERS:
+        return False
+    gaps = np.diff(core)
+    k = int(np.argmax(gaps))
+    if gaps[k] < FLAT_LEVEL_STEP_M:
+        return False
+    below, above = k + 1, len(core) - (k + 1)
+    need = max(MIN_PLANE_INLIERS, int(FLAT_LEVEL_MIN_FRAC * len(core)))
+    return min(below, above) >= need
+
+
 def detect_multiplane_facets(facets: List, points) -> List[int]:
     """Facet ids whose LiDAR points STILL support more than one plane.
 
@@ -527,8 +560,24 @@ def detect_multiplane_facets(facets: List, points) -> List[int]:
             p1 = fit_plane_ransac(pts)
         except Exception:  # noqa: BLE001
             continue
-        if not p1.success or compute_slope_deg(p1) < FLAT_SLOPE_DEG:
-            continue                                   # flat roof = one plane
+        if not p1.success:
+            continue
+        # A STEP in elevation means separate sections, checked BEFORE the slope
+        # tests rather than only on flat facets. Two flat levels side by side fit
+        # as a shallow RAMP — the 2725 Judge Fran geometry fits at 5.4 deg, just
+        # over FLAT_SLOPE_DEG — so gating this on "is flat" lets the case dodge
+        # both tests, which is how 43,029 sqft shipped as a single plane with no
+        # internal edges. A genuinely pitched roof has continuously varying z and
+        # no such gap, so this does not fire on it.
+        if _spans_two_levels(pts):
+            logger.warning(
+                "facet %s spans two roof LEVELS per LiDAR — separate sections "
+                "reported as one plane, losing the parapet / level-change edges "
+                "between them", f.facet_id)
+            flagged.append(f.facet_id)
+            continue
+        if compute_slope_deg(p1) < FLAT_SLOPE_DEG:
+            continue                                   # flat, single level
         resid = np.abs(pts[:, 2] - (p1.a * pts[:, 0] + p1.b * pts[:, 1] + p1.c))
         off = resid > SPLIT_RESIDUAL_M
         if off.sum() < max(MIN_FACET_POINTS, SPLIT_MIN_OFF_FRAC * len(pts)):
