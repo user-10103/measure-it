@@ -137,3 +137,24 @@ def test_failing_gate_yields_plain_english_incomplete_reason():
 
     # a passing report is never stamped
     assert incomplete_reason(score_report(_good())) is None
+
+
+def test_undersegmented_roof_fails_the_gate():
+    """One big facet passes partition/coverage/edges_typed trivially. When LiDAR
+    says that facet spans more than one plane, the gate must FAIL — an
+    under-segmented roof under-reports surface area, and material is ordered off
+    that number."""
+    ri = _good()
+    ri["multiplane_facets"] = [0]
+    r = score_report(ri)
+    failed = {c["id"] for c in r["checks"] if c["severity"] == "FAIL" and not c["ok"]}
+    assert "facets_vs_lidar_planes" in failed
+    assert not r["passed"]
+
+
+def test_lidar_agreement_passes_and_is_absent_without_lidar():
+    ri = _good()
+    ri["multiplane_facets"] = []            # LiDAR ran, agrees
+    assert score_report(ri)["passed"]
+    ids = {c["id"] for c in score_report(_good())["checks"]}
+    assert "facets_vs_lidar_planes" not in ids   # no LiDAR -> not vacuously passed

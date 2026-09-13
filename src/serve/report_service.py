@@ -85,7 +85,9 @@ _WHY = {"edges_typed": "roof edge structure not resolved",
         "area_sane": "implausible roof area",
         "area_positive": "no measurable roof area",
         "facets_present": "no roof faces detected",
-        "facet_table": "per-face detail missing"}
+        "facet_table": "per-face detail missing",
+        "facets_vs_lidar_planes": "roof appears under-segmented — elevation data "
+                                  "shows more roof faces than were detected"}
 
 
 def incomplete_reason(qc: dict) -> Optional[str]:
@@ -287,6 +289,12 @@ def generate_roof_report(
                                               ground_z=ground_z)
                 report_input = facets_to_report_input(
                     roof, label, aerial_image_path=chip_png)
+        # Independent check on FACET COUNT, which the gate cannot see for itself:
+        # a roof returned as too few planes passes partition/coverage/edges_typed
+        # trivially while under-reporting surface area. Runs on the FINAL facets.
+        from src.roofs.fuse_sam_lidar import detect_multiplane_facets
+        report_input["multiplane_facets"] = detect_multiplane_facets(
+            roof.facets, lidar_points)
         fuse_into_report_input(report_input, annotations)
         # eave vs rake: pure relabel from each facet's downslope direction
         aspects = {fid: a["aspect_deg"] for fid, a in annotations.items()

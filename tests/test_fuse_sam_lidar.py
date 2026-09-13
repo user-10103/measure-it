@@ -241,3 +241,35 @@ def test_plane_fit_on_a_handful_of_inliers_is_rejected():
     junk = np.column_stack([gx, gy, rng.uniform(0, 12, 22)])
     ann = annotate_facets_with_lidar([f], np.vstack([good, junk]), min_points=30)
     assert ann == {}          # absent, not a bogus 60-degree roof plane
+
+
+def test_undersegmented_facet_is_detected_against_lidar():
+    """The gate is blind to under-segmentation: one big facet satisfies
+    facets_partition, facets_coverage and edges_typed trivially while
+    under-reporting surface area. LiDAR is the independent evidence."""
+    from src.roofs.fuse_sam_lidar import detect_multiplane_facets
+    # ONE facet covering a roof whose points are actually two planes (a ridge)
+    f = Facet(facet_id=1, polygon=box(0, 0, 10, 10))
+    pts = _grid_points(f.polygon,
+                       lambda x, y: np.where(x < 5, 0.5 * x, 0.5 * (10 - x)),
+                       step=0.3)
+    assert detect_multiplane_facets([f], pts) == [1]
+
+
+def test_single_plane_facet_is_not_flagged_as_undersegmented():
+    from src.roofs.fuse_sam_lidar import detect_multiplane_facets
+    f = Facet(facet_id=1, polygon=box(0, 0, 10, 10))
+    pts = _grid_points(f.polygon, lambda x, y: 0.4 * x + 0.1 * y + 2.0, step=0.3)
+    assert detect_multiplane_facets([f], pts) == []
+
+
+def test_flat_roof_clutter_is_not_called_undersegmented():
+    """A flat commercial roof's HVAC clutter is not a second roof plane — flagging
+    it would cry wolf on every legitimate flat roof (the Tampa regression)."""
+    from src.roofs.fuse_sam_lidar import detect_multiplane_facets
+    f = Facet(facet_id=1, polygon=box(0, 0, 10, 10))
+    flat = _grid_points(f.polygon, lambda x, y: np.full_like(x, 5.0), step=0.3)
+    rng = np.random.RandomState(21)
+    cx, cy = rng.uniform(0, 3, 400), rng.uniform(0, 3, 400)
+    clutter = np.column_stack([cx, cy, 5.0 + 1.2 * cx])
+    assert detect_multiplane_facets([f], np.vstack([flat, clutter])) == []

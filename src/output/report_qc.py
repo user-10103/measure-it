@@ -146,6 +146,17 @@ def score_report(report_input: dict, model: ReportModel | None = None) -> dict:
     else:
         add("edges_typed", WARN, True, "single-facet roof; ridge/hip N/A")
 
+    # --- under-segmentation: does the facet count agree with the LiDAR? ---
+    # Only scored when LiDAR actually ran (the key is absent otherwise), because
+    # without elevation there is no independent evidence and a vacuous pass would
+    # be exactly the silent success this check exists to prevent.
+    if "multiplane_facets" in report_input:
+        mp = report_input.get("multiplane_facets") or []
+        add("facets_vs_lidar_planes", FAIL, not mp,
+            "facet count agrees with the LiDAR plane count" if not mp else
+            f"facet(s) {mp} still span MORE THAN ONE plane per LiDAR — the roof is "
+            "under-segmented, so its surface area is under-reported")
+
     # --- obstructions accounted when the FO detector ran ---
     if "foreign_objects" in report_input:
         add("obstructions", WARN, model.num_obstructions >= 0,

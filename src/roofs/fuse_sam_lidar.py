@@ -488,6 +488,70 @@ def split_multiplane_facets(facets: List, points):
     return final, True
 
 
+def detect_multiplane_facets(facets: List, points) -> List[int]:
+    """Facet ids whose LiDAR points STILL support more than one plane.
+
+    The world-class gate is structurally BLIND to under-segmentation. A roof
+    returned as one big facet trivially satisfies facets_partition (nothing to
+    overlap), facets_coverage (100% by construction) and edges_typed (the
+    single-facet branch returns "ridge/hip N/A"). So a roof cut into too few
+    planes passes every check while UNDER-REPORTING SURFACE AREA — and that is
+    the failure that actually reaches a customer, because material is ordered off
+    that number. A refusal is recoverable; a confident short number is not.
+
+    This supplies the independent evidence the gate lacked. It runs the same
+    two-plane test ``split_multiplane_facets`` uses, but on the FINAL facets —
+    after splitting and coplanar merging — so what it reports is what the report
+    actually ships. split declines some cuts deliberately (a point-starved piece,
+    a messy cut across a concave boundary); those are precisely the facets that
+    stay under-segmented invisibly.
+
+    Flat-primary facets are skipped for the same reason split skips them: on a
+    flat commercial roof the off-plane returns are rooftop clutter, not a second
+    roof plane, and flagging them would cry wolf on every legitimate flat roof.
+    """
+    import math
+
+    from shapely import contains_xy
+
+    xyz = _xyz(points)
+    flagged: List[int] = []
+    for f in facets:
+        poly = getattr(f, "polygon", None)
+        if poly is None or poly.is_empty:
+            continue
+        pts = xyz[contains_xy(poly, xyz[:, 0], xyz[:, 1])]
+        if len(pts) < 2 * MIN_FACET_POINTS:
+            continue                                   # too sparse to judge
+        try:
+            p1 = fit_plane_ransac(pts)
+        except Exception:  # noqa: BLE001
+            continue
+        if not p1.success or compute_slope_deg(p1) < FLAT_SLOPE_DEG:
+            continue                                   # flat roof = one plane
+        resid = np.abs(pts[:, 2] - (p1.a * pts[:, 0] + p1.b * pts[:, 1] + p1.c))
+        off = resid > SPLIT_RESIDUAL_M
+        if off.sum() < max(MIN_FACET_POINTS, SPLIT_MIN_OFF_FRAC * len(pts)):
+            continue                                   # essentially one plane
+        try:
+            p2 = fit_plane_ransac(pts[off])
+        except Exception:  # noqa: BLE001
+            continue
+        if not p2.success or p2.inlier_count < MIN_PLANE_INLIERS:
+            continue
+        n1, n2 = np.array(p1.normal), np.array(p2.normal)
+        ang = math.degrees(math.acos(min(1.0, abs(float(n1 @ n2)))))
+        if ang < SPLIT_ANGLE_DEG:
+            continue
+        logger.warning(
+            "facet %s spans >1 plane per LiDAR (%d of %d points off the primary "
+            "plane form a second at %.0f deg) — roof is under-segmented and its "
+            "surface area is under-reported", f.facet_id, int(off.sum()),
+            len(pts), ang)
+        flagged.append(f.facet_id)
+    return flagged
+
+
 def fuse_into_report_input(report_input: dict,
                            annotations: Dict[int, dict]) -> dict:
     """Fill the pitch fields sam_report left as None. Geometry untouched:
