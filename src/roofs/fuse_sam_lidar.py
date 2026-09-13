@@ -70,6 +70,55 @@ TWO_STORY_LEVEL_STEP_M = 2.4   # a facet a story-height ABOVE the building's
                                # semantics (roof-over-roof access), not height.
 
 
+def _attribution_report(facets, xyz, annotated: int, n_facets: int) -> str:
+    """Why did LiDAR points fail to land in the facets? Compare WHERE THE POINTS ARE
+    with WHERE THE FACETS ARE — both already in the caller's CRS — and name the cause.
+
+    The failure this exists for (1600 Sarno Rd): the EPT fetch reported "550 roof
+    point(s) for the footprint" and then 0 of 6 facets were annotated. That is
+    indistinguishable, from the existing logs, between three very different bugs:
+
+      * BAD DECLARED SRS in the EPT header — the footprint clip in ept_fetch happens
+        in EPT space and succeeds even when the header's SRS is wrong (the footprint
+        is transformed into the same wrong space), so the error only appears after
+        the reprojection to the chip CRS. Signature: centroids kilometres apart.
+      * WRONG BUILDING — the geocode pin sat 22 m from the selected footprint, so
+        points were queried for one structure and facets segmented on another.
+        Signature: centroids tens of metres apart, bboxes similar in size.
+      * NEITHER — the points really are over the roof but fall between the facet
+        polygons. Signature: the bboxes overlap.
+
+    Bounding boxes (not unions) keep this cheap; it only runs off the happy path.
+    """
+    px0, py0 = float(xyz[:, 0].min()), float(xyz[:, 1].min())
+    px1, py1 = float(xyz[:, 0].max()), float(xyz[:, 1].max())
+    bounds = [f.polygon.bounds for f in facets
+              if getattr(f, "polygon", None) is not None and not f.polygon.is_empty]
+    fx0 = min(b[0] for b in bounds); fy0 = min(b[1] for b in bounds)
+    fx1 = max(b[2] for b in bounds); fy1 = max(b[3] for b in bounds)
+    pcx, pcy = (px0 + px1) / 2.0, (py0 + py1) / 2.0
+    fcx, fcy = (fx0 + fx1) / 2.0, (fy0 + fy1) / 2.0
+    dist = float(np.hypot(pcx - fcx, pcy - fcy))
+    overlap = (px0 <= fx1 and fx0 <= px1 and py0 <= fy1 and fy0 <= py1)
+    if dist > 1000.0:
+        verdict = (">1km apart -> suspect EPT header SRS / reprojection "
+                   "(points landed in the wrong coordinate space)")
+    elif overlap:
+        verdict = ("bboxes overlap -> points are over the roof but fall between the "
+                   "facet polygons (not a placement error)")
+    else:
+        verdict = ("~tens of metres apart -> suspect wrong building / footprint "
+                   "offset (points queried for a different structure)")
+    return ("LiDAR attribution: %d/%d facet(s) annotated from %d point(s)\n"
+            "  points bbox=(%.1f, %.1f, %.1f, %.1f) centroid=(%.1f, %.1f)\n"
+            "  facets bbox=(%.1f, %.1f, %.1f, %.1f) centroid=(%.1f, %.1f)\n"
+            "  centroid distance = %.1f m -> %s"
+            % (annotated, n_facets, len(xyz),
+               px0, py0, px1, py1, pcx, pcy,
+               fx0, fy0, fx1, fy1, fcx, fcy,
+               dist, verdict))
+
+
 def annotate_facets_with_lidar(
     facets: List,
     points,
@@ -166,6 +215,15 @@ def annotate_facets_with_lidar(
     for a in out.values():
         a.pop("_eave_z", None)
     logger.info("LiDAR annotated %d/%d facet(s)", len(out), len(facets))
+    # Points were supplied but (almost) nothing stuck -> say WHY, once, decisively.
+    # WARNING when NOTHING was annotated (always a real bug). INFO when under half
+    # stuck, because partial attribution is routine on sparse 3DEP (~1-2 pts/m^2)
+    # and would otherwise cry wolf on every small facet.
+    n_facets = sum(1 for f in facets
+                   if getattr(f, "polygon", None) is not None and not f.polygon.is_empty)
+    if len(xyz) and n_facets and len(out) * 2 < n_facets:
+        report = _attribution_report(facets, xyz, len(out), n_facets)
+        (logger.info if out else logger.warning)(report)
     return out
 
 

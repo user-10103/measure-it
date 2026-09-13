@@ -1,4 +1,5 @@
 """Fusion is read-only annotation: known synthetic slopes -> exact pitch."""
+import logging
 import math
 
 import numpy as np
@@ -180,3 +181,47 @@ def test_unresolved_pitch_facet_is_flagged_so_gate_passes():
     checks = {c["id"]: c for c in res["checks"]}
     assert checks["pitch_resolved"]["ok"], checks["pitch_resolved"]["detail"]
     assert checks["slope_applied"]["ok"], checks["slope_applied"]["detail"]
+
+
+def _attribution_records(caplog):
+    return [r for r in caplog.records if "LiDAR attribution" in r.getMessage()]
+
+
+def test_attribution_diagnostic_names_bad_srs_when_points_are_kilometres_off(caplog):
+    """Points supplied, none land in any facet -> ONE decisive WARNING naming the
+    cause. This is the 1600 Sarno failure (550 points, 0/6 facets) made
+    self-diagnosing; kilometres of offset means the reprojection, not the roof."""
+    f = Facet(facet_id=1, polygon=box(0, 0, 10, 10))
+    far = box(5000, 5000, 5010, 5010)            # same-size roof, ~7 km away
+    pts = _grid_points(far, lambda x, y: 0.5 * (x - 5000) + 20.0)
+    with caplog.at_level(logging.WARNING, logger="src.roofs.fuse_sam_lidar"):
+        ann = annotate_facets_with_lidar([f], pts)
+    assert ann == {}                              # behaviour unchanged
+    recs = _attribution_records(caplog)
+    assert len(recs) == 1, caplog.text
+    msg = recs[0].getMessage()
+    assert recs[0].levelno == logging.WARNING
+    assert "0/1 facet(s) annotated" in msg
+    assert "EPT header SRS" in msg
+
+
+def test_attribution_diagnostic_names_footprint_offset_at_tens_of_metres(caplog):
+    """A 25 m offset is the wrong-building signature (the pin sat 22 m from the
+    selected footprint), NOT a reprojection error — the verdict must say so."""
+    f = Facet(facet_id=1, polygon=box(0, 0, 10, 10))
+    near = box(25, 0, 35, 10)                     # same size, disjoint, 25 m east
+    pts = _grid_points(near, lambda x, y: 0.5 * (x - 25) + 20.0)
+    with caplog.at_level(logging.WARNING, logger="src.roofs.fuse_sam_lidar"):
+        annotate_facets_with_lidar([f], pts)
+    recs = _attribution_records(caplog)
+    assert len(recs) == 1, caplog.text
+    assert "wrong building" in recs[0].getMessage()
+
+
+def test_attribution_diagnostic_silent_on_the_happy_path(caplog):
+    """Must cost nothing and say nothing when attribution works."""
+    f = Facet(facet_id=1, polygon=box(0, 0, 10, 10))
+    pts = _grid_points(f.polygon, lambda x, y: 0.5 * x)
+    with caplog.at_level(logging.INFO, logger="src.roofs.fuse_sam_lidar"):
+        assert annotate_facets_with_lidar([f], pts)
+    assert not _attribution_records(caplog)
