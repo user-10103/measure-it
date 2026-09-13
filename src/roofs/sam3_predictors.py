@@ -50,6 +50,28 @@ def _make_predict(processor):
     return _p
 
 
+def _load_checkpoint(path):
+    """``torch.load`` for a multi-GB checkpoint, memory-mapped when possible.
+
+    The fine-tuned checkpoint is ~10 GB and the Colab box has ~12 GB of RAM, so
+    reading it wholly into memory is tight. ``mmap=True`` maps it instead.
+
+    It is deliberately applied HERE, to our own checkpoint path, rather than by
+    monkeypatching ``torch.load`` globally: a global patch that forces mmap
+    breaks every file-like load in the process (mmap needs a real
+    zipfile-serialised path), which is a much larger blast radius than the
+    problem it solves. mmap also needs torch>=2.1, so fall back cleanly.
+    """
+    import torch
+    try:
+        return torch.load(path, map_location="cpu", weights_only=False, mmap=True)
+    except (TypeError, ValueError, RuntimeError) as e:
+        # TypeError: torch<2.1 has no mmap kwarg. ValueError/RuntimeError: the
+        # file is not zipfile-serialised, or not a real path.
+        logger.info("mmap checkpoint load unavailable (%s) — loading normally", e)
+        return torch.load(path, map_location="cpu", weights_only=False)
+
+
 def load_sam3_predictors(
     ckpt_path: str,
     use_zeroshot_outline: bool = True,
@@ -73,7 +95,7 @@ def load_sam3_predictors(
     from sam3.model.sam3_image_processor import Sam3Processor
 
     ft = build_sam3_image_model()
-    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    ckpt = _load_checkpoint(ckpt_path)
     missing, unexpected = ft.load_state_dict(ckpt["model"], strict=False)
     logger.info("fine-tuned SAM3 loaded (epoch %s) missing=%d unexpected=%d",
                 ckpt.get("epoch"), len(missing), len(unexpected))
@@ -88,6 +110,15 @@ def load_sam3_predictors(
 
     predict_outline = None
     if use_zeroshot_outline:
+        # HF_HOME is read ONCE by huggingface_hub at import time — setting it in a
+        # later notebook cell silently does nothing and the ~6.5 GB base weights
+        # re-download to the default cache. Log where they actually land so a
+        # mis-ordered env var is visible instead of costing a silent re-download.
+        try:
+            from huggingface_hub.constants import HF_HUB_CACHE
+            logger.info("HF cache in use: %s", HF_HUB_CACHE)
+        except Exception:  # noqa: BLE001 — observability only, never fatal
+            pass
         base = build_sam3_image_model()          # pretrained weights, untouched
         base.eval().to(device)
         predict_outline = _make_predict(Sam3Processor(
