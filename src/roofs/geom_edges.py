@@ -34,15 +34,53 @@ def _reflex_flags(ring: List[tuple]) -> List[bool]:
     return flags
 
 
-def _shared_seams(facets) -> List[LineString]:
-    """Boundaries shared between facet pairs = the internal seams."""
+SEAM_TOL_M = 0.10          # facets this close are adjacent; see _shared_seams
+SEAM_MIN_M = 0.05          # below this it is a corner touch or a snap artefact,
+                           # not a seam worth typing
+
+
+def _shared_seams(facets, tol: float = SEAM_TOL_M) -> List[LineString]:
+    """Boundaries shared between facet pairs = the internal seams.
+
+    TOLERANT BY NECESSITY. Requiring an exact boundary intersection is brittle to
+    a degree that silently removes every internal edge from a report:
+
+        exact shared edge      -> [10.0]                    correct
+        independently simplified -> [3.02, 1.99, 1.97, 3.02]  fragmented
+        1 cm gap               -> []                        EVERY SEAM GONE
+        1 cm overlap           -> [0.01, 0.01]              useless slivers
+
+    Facet polygons never come out exactly coincident. masks_to_facets runs
+    Douglas-Peucker per facet INDEPENDENTLY, and merge_coplanar_facets pushes them
+    through union/buffer, so adjacent facets routinely end up a few millimetres
+    apart or overlapping. 1600 Sarno shipped with edge_totals_m == {"eave": 65.28}
+    — every internal seam absent rather than mislabelled — which is what this
+    looks like from the outside: no ridge, no hip, and a gate failure nobody could
+    explain from the logs.
+
+    The fix is to SNAP one boundary onto the other within ``tol`` and then take the
+    exact intersection, rather than intersecting with a buffer. Both close the gap,
+    but only snapping preserves the SHAPE: an exact intersection splits the run at
+    its vertices, so a seam that goes hip -> ridge -> hip corner-to-corner stays
+    three pieces and each is typed by its own endpoints. Intersecting with a buffer
+    returns one continuous 48 m polyline instead, which types the whole run as hip
+    and loses the ridge — and it also picks up stray millimetres of the eave that
+    happen to pass within tol.
+    """
+    from shapely.ops import snap
+
     segs: List[LineString] = []
     polys = [f for f in facets if f is not None and not f.is_empty]
     for i in range(len(polys)):
+        bi = polys[i].boundary
         for j in range(i + 1, len(polys)):
-            inter = polys[i].boundary.intersection(polys[j].boundary)
+            # snap j onto i so a sub-tolerance gap/overlap becomes coincident,
+            # then intersect EXACTLY -> the run still splits at its vertices
+            inter = bi.intersection(snap(polys[j].boundary, bi, tol))
+            if inter.is_empty:
+                continue
             for g in getattr(inter, "geoms", [inter]):
-                if g.geom_type == "LineString" and g.length > 1e-6:
+                if g.geom_type == "LineString" and g.length >= SEAM_MIN_M:
                     segs.append(g)
     return segs
 

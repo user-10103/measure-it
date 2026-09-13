@@ -103,3 +103,27 @@ def test_corner_to_corner_seam_keeps_its_ridge():
         totals[e["edge_type"]] = totals.get(e["edge_type"], 0.0) + e["length_m"]
     assert abs(totals.get("ridge", 0.0) - 20.0) < 1.0     # the 20-unit ridge
     assert totals.get("hip", 0.0) > 20.0                   # both diagonals
+
+
+def test_seam_survives_a_sub_centimetre_gap():
+    """Facet polygons are simplified independently and pushed through union/buffer
+    in the coplanarity merge, so adjacent facets routinely end up millimetres apart.
+    An EXACT boundary intersection returns nothing for a 1 cm gap, which deletes
+    every internal edge from the report: 1600 Sarno shipped with
+    edge_totals_m == {"eave": 65.28} — no ridge, no hip, nothing mislabelled,
+    just absent. Snapping within tolerance recovers the seam at its true length."""
+    from shapely.geometry import box
+    from src.roofs.geom_edges import _shared_seams
+
+    for a, b, label in [
+        (box(0, 0, 5, 10), box(5, 0, 10, 10), "touching"),
+        (box(0, 0, 5, 10), box(5.008, 0, 10, 10), "8 mm gap"),
+        (box(0, 0, 5.008, 10), box(5, 0, 10, 10), "8 mm overlap"),
+    ]:
+        got = [s.length for s in _shared_seams([a, b])]
+        assert got and abs(got[0] - 10.0) < 0.05, f"{label}: {got}"
+
+    # genuinely separate facets must NOT acquire a seam
+    assert _shared_seams([box(0, 0, 5, 10), box(10, 0, 15, 10)]) == []
+    # nor should two facets that merely touch at a corner
+    assert _shared_seams([box(0, 0, 5, 5), box(5, 5, 10, 10)]) == []
