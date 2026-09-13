@@ -101,12 +101,24 @@ def generate_report(report_input: dict, out_pdf: str,
     if report_input.get("occluded_roof"):
         _reason = _reason or "roof not segmentable from imagery"
     if _reason:
+        # The headline gets its OWN line and the reason a second, elided one.
+        # Putting both on one centred line overflowed the page once the reasons
+        # became plain English: the string ran off BOTH margins and clipped the
+        # word INCOMPLETE down to "TE", so every automated stamp check (and every
+        # human skim) saw an unstamped report. A failing report that looks
+        # finished is the exact failure this banner exists to prevent.
         c.setFillColorRGB(0.85, 0.20, 0.15)
-        c.rect(0, H - 30, W, 30, fill=1, stroke=0)
+        c.rect(0, H - 46, W, 46, fill=1, stroke=0)
         c.setFillColorRGB(1, 1, 1)
-        c.setFont("Helvetica-Bold", 11)
-        c.drawCentredString(W / 2, H - 20,
-                            f"INCOMPLETE - MANUAL REVIEW REQUIRED  ({_reason})")
+        c.setFont("Helvetica-Bold", 13)
+        c.drawCentredString(W / 2, H - 21, "INCOMPLETE - MANUAL REVIEW REQUIRED")
+        c.setFont("Helvetica", 9)
+        _text, _max = str(_reason), W - 72
+        while _text and c.stringWidth(_text, "Helvetica", 9) > _max:
+            _text = _text[:-2]
+        if _text != str(_reason):
+            _text = _text.rstrip(" ,;-\u2014") + "\u2026"
+        c.drawCentredString(W / 2, H - 37, _text)
         c.setFillColorRGB(*DARK)
     aerial = report_input.get("aerial_image_path")
     box = (90, H - 560, W - 180, 380)
