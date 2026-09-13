@@ -172,7 +172,7 @@ class ReportResult:
 
 def generate_roof_report(
     location: Union[str, Tuple[float, float]],
-    state: str,
+    state: Optional[str],
     predict_facets,
     predict_outline=None,
     out_dir: Union[str, Path] = "output/report",
@@ -188,7 +188,11 @@ def generate_roof_report(
     Args:
         location: anything a user types (address / "lat, lon" / maps link),
             or an explicit (lat, lon) tuple.
-        state: 2-letter state for the NAIP archive (e.g. "FL").
+        state: 2-letter state for the NAIP archive (e.g. "FL"). Optional —
+            derived from the coordinates when omitted. Every caller used to
+            default this to "FL", so the serving path had never been asked for
+            imagery outside one state; a national run needs it from the
+            geocode, not from a literal.
         predict_facets / predict_outline: from
             ``sam3_predictors.load_sam3_predictors`` (or fakes in tests).
         chip_fetcher: injected imagery step (network-free in tests).
@@ -212,6 +216,15 @@ def generate_roof_report(
         lat, lon = float(location[0]), float(location[1])
         source, label = "coordinates", label or f"{lat:.5f}, {lon:.5f}"
 
+    if state is None:
+        from src.ingestion.imagery_select import state_county_for
+        state, _county = state_county_for(lat, lon)
+        if state is None:
+            raise ValueError(
+                f"Could not determine the state for ({lat}, {lon}); pass "
+                "state= explicitly. NAIP is archived per state, so guessing "
+                "one would fetch imagery for the wrong part of the country.")
+        logger.info("state resolved from coordinates: %s", state)
     fetched = chip_fetcher(lat, lon, state, out_dir,
                            chip_buffer_m=chip_buffer_m)
     chip, transform, chip_png = fetched[0], fetched[1], fetched[2]

@@ -56,8 +56,11 @@ def _banner_incomplete(pdf_path) -> bool:
     return "INCOMPLETE" in done.stdout.upper()
 
 
-def run_sweep(addresses, predict_facets, predict_outline, state="FL",
+def run_sweep(addresses, predict_facets, predict_outline, state=None,
               out_root="/content/demo", use_lidar=True):
+    # state=None -> derived per address from its coordinates. It used to default
+    # to "FL", which silently sent every out-of-state address to the Florida
+    # NAIP archive; the national probe had to work around it per-address.
     """Run the full pipeline per address. Returns one dict per address."""
     from src.serve.report_service import generate_roof_report
 
@@ -247,7 +250,7 @@ def report_facts(rows):
     return rows
 
 
-def live_report(address, predict_facets, predict_outline, state="FL",
+def live_report(address, predict_facets, predict_outline, state=None,
                 out_root="/content/live", use_lidar=True, dpi=110):
     """One address in, a rendered report out. Never raises in front of a client."""
     import io
