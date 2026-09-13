@@ -158,3 +158,28 @@ def test_lidar_agreement_passes_and_is_absent_without_lidar():
     assert score_report(ri)["passed"]
     ids = {c["id"] for c in score_report(_good())["checks"]}
     assert "facets_vs_lidar_planes" not in ids   # no LiDAR -> not vacuously passed
+
+
+def test_facet_whose_plane_explains_half_its_points_fails():
+    """2725 Judge Fran: 8 SAM facets merged into 1, the resulting plane explaining
+    49% of 121,189 points — ~62,000 returns more than 0.25 m off it — and every
+    existing guard passed it. residual_median even looked excellent, because it is
+    measured over inliers only: the worse the fit, the better that number reads."""
+    ri = _good()
+    ri["facets"][0]["explained_frac"] = 0.49
+    ri["facets"][1]["explained_frac"] = 0.95
+    r = score_report(ri)
+    failed = {c["id"] for c in r["checks"] if c["severity"] == "FAIL" and not c["ok"]}
+    assert "facet_plane_fit" in failed
+    assert not r["passed"]
+    detail = next(c["detail"] for c in r["checks"] if c["id"] == "facet_plane_fit")
+    assert "49%" in detail
+
+
+def test_well_fitted_facets_pass_and_check_is_absent_without_lidar():
+    ri = _good()
+    for f, frac in zip(ri["facets"], (0.77, 0.97)):   # Sarno / Eau Gallie range
+        f["explained_frac"] = frac
+    assert score_report(ri)["passed"]
+    ids = {c["id"] for c in score_report(_good())["checks"]}
+    assert "facet_plane_fit" not in ids      # no LiDAR -> no vacuous pass

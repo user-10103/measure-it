@@ -20,6 +20,12 @@ from src.output.units import m2_to_sqft
 
 FAIL, WARN, OK = "FAIL", "WARN", "OK"
 
+# A plane explaining less than this share of its own facet's points is not
+# describing that surface - it is averaging across sections that disagree.
+# Observed: 2725 Judge Fran 49% (8 sections merged into 1), against 1600 Sarno
+# and 755 E Eau Gallie at 77-97%.
+PLANE_EXPLAINS_MIN = 0.60
+
 
 @dataclass
 class Check:
@@ -145,6 +151,25 @@ def score_report(report_input: dict, model: ReportModel | None = None) -> dict:
             "eaves present" if ef.get("eave", 0) > 0.5 else "no eave length")
     else:
         add("edges_typed", WARN, True, "single-facet roof; ridge/hip N/A")
+
+    # --- does the accepted plane actually describe the facet? ---
+    # 2725 Judge Fran shipped 43,029 sqft as ONE flat plane explaining 49% of its
+    # own 121,189 points - roughly 62,000 returns more than 0.25 m off it - after
+    # the coplanarity merge collapsed 8 SAM facets into 1. Every existing guard
+    # passed it: the absolute inlier floor wants 20 and it had 59,347; the ratio
+    # floor wants 15% and it had 49%; facets_vs_lidar_planes asks whether a
+    # SECOND plane exists, and the dominant plane genuinely is dominant - it just
+    # does not explain half the roof. And residual_median looked excellent
+    # (0.041 m) because it is measured over inliers only.
+    thin = [(f.get("facet_id"), f["explained_frac"]) for f in facets
+            if f.get("explained_frac") is not None
+            and f["explained_frac"] < PLANE_EXPLAINS_MIN]
+    if any(f.get("explained_frac") is not None for f in facets):
+        add("facet_plane_fit", FAIL, not thin,
+            "each facet's plane explains its own points" if not thin else
+            "plane explains only " + ", ".join(f"{p:.0%} of facet {i}" for i, p in thin)
+            + f" (need {PLANE_EXPLAINS_MIN:.0%}) — the surface is not one plane, so "
+            "its pitch and area are averages over sections that disagree")
 
     # --- under-segmentation: does the facet count agree with the LiDAR? ---
     # Only scored when LiDAR actually ran (the key is absent otherwise), because

@@ -208,7 +208,12 @@ def annotate_facets_with_lidar(
             "surface_area_m2": float(
                 compute_surface_area(poly.area, 0.0 if is_flat else slope)),
             "n_points": n,
+            # residual_median is computed over INLIERS ONLY, so the worse a fit
+            # is, the better this number looks - it reports on the points the fit
+            # already agreed with. explained_frac is the honest companion: how
+            # much of the facet the accepted plane actually accounts for.
             "residual_m": float(plane.residual_median),
+            "explained_frac": float(plane.inlier_count) / max(n, 1),
             # elevation of this facet, so the edge classifier can tell a PARAPET
             # (two flat sections at different heights) from a mere transition
             "median_z": float(np.median(pts[:, 2])),
@@ -712,6 +717,8 @@ def fuse_into_report_input(report_input: dict,
         f["aspect_bin"] = ann["aspect_bin"]
         f["is_flat"] = ann["is_flat"]
         f["surface_area_m2"] = ann["surface_area_m2"]
+        if "explained_frac" in ann:
+            f["explained_frac"] = ann["explained_frac"]
         if "is_two_story" in ann:
             f["two_story"] = ann["is_two_story"]
             f["eave_height_m"] = ann["eave_height_m"]

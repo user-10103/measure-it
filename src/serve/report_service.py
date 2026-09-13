@@ -87,7 +87,9 @@ _WHY = {"edges_typed": "roof edge structure not resolved",
         "facets_present": "no roof faces detected",
         "facet_table": "per-face detail missing",
         "facets_vs_lidar_planes": "roof appears under-segmented — elevation data "
-                                  "shows more roof faces than were detected"}
+                                  "shows more roof faces than were detected",
+        "facet_plane_fit": "roof surface is not a single plane — pitch and area "
+                           "would be averages across sections that disagree"}
 
 
 def incomplete_reason(qc: dict) -> Optional[str]:
