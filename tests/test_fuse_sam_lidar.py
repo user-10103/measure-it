@@ -225,3 +225,19 @@ def test_attribution_diagnostic_silent_on_the_happy_path(caplog):
     with caplog.at_level(logging.INFO, logger="src.roofs.fuse_sam_lidar"):
         assert annotate_facets_with_lidar([f], pts)
     assert not _attribution_records(caplog)
+
+
+def test_plane_fit_on_a_handful_of_inliers_is_rejected():
+    """A ratio can clear the sparse floor on very few points: 36 points at 41.7%
+    is 15 inliers. 1600 Sarno produced a 59.8-degree 'facet' that way on an 8-degree
+    roof, which then polluted the edge graph. Require an absolute inlier count."""
+    f = Facet(facet_id=1, polygon=box(0, 0, 6, 6))
+    rng = np.random.RandomState(11)
+    # 14 points on a steep plane + 22 scattered: ratio can pass, inliers cannot
+    n_in = 14
+    xs = rng.uniform(0, 6, n_in); ys = rng.uniform(0, 6, n_in)
+    good = np.column_stack([xs, ys, 1.7 * xs])
+    gx, gy = rng.uniform(0, 6, 22), rng.uniform(0, 6, 22)
+    junk = np.column_stack([gx, gy, rng.uniform(0, 12, 22)])
+    ann = annotate_facets_with_lidar([f], np.vstack([good, junk]), min_points=30)
+    assert ann == {}          # absent, not a bogus 60-degree roof plane

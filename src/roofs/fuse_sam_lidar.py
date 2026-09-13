@@ -42,6 +42,10 @@ MIN_ROOF_CLEARANCE_M = 1.0     # points within 1 m of ground are bare-earth / lo
                                # vegetation, not roof — exclude from fit + eave
 DENSE_FACET_POINTS = 80        # >= this points, use the full 25% inlier floor;
 SPARSE_INLIER_RATIO = 0.15     # smaller facets (3DEP sparsity) get a relaxed floor
+MIN_PLANE_INLIERS = 20         # ...but a RATIO alone is not enough: 36 points at
+                               # 41.7% is 15 inliers, which cannot define a plane.
+                               # 1600 Sarno produced a 59.8 deg "facet" that way on
+                               # an 8 deg roof, and it polluted the edge graph.
 
 # split_multiplane_facets thresholds (the complement to merge_coplanar_facets)
 SPLIT_RESIDUAL_M = 0.30        # a point this far off the primary plane is "off it"
@@ -167,6 +171,14 @@ def annotate_facets_with_lidar(
             plane = fit_plane_ransac(pts, min_inlier_ratio=floor)
         except Exception as e:  # noqa: BLE001 — annotation is best-effort
             logger.warning("facet %s: plane fit failed (%s)", f.facet_id, e)
+            continue
+        # A ratio can clear the floor on a handful of points; require an absolute
+        # inlier count too, or a noise plane fit to ~15 points is treated as roof
+        # geometry and reaches the edge classifier.
+        if plane.success and plane.inlier_count < MIN_PLANE_INLIERS:
+            logger.info("facet %s: plane fit has only %d inlier(s) (<%d) — "
+                        "leaving unspecified", f.facet_id, plane.inlier_count,
+                        MIN_PLANE_INLIERS)
             continue
         if not plane.success:
             # A flat roof with rooftop clutter (HVAC, parapets, ponding) rarely
