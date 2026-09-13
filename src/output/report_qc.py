@@ -118,6 +118,15 @@ def score_report(report_input: dict, model: ReportModel | None = None) -> dict:
         # (no overlap) + coverage (no gaps) together = a clean tiling, which is
         # what a world-class diagram shows.
         oxy = report_input.get("outline_xy")
+        if not (oxy and len(oxy) >= 3) and polys:
+            # sam_report sets outline_xy to [] when the zero-shot outline is
+            # missing, which used to drop this check ENTIRELY rather than fail
+            # it — the same vacuous-absence the LiDAR checks above guard
+            # against. Coverage is precisely the check that catches facets not
+            # spanning the roof, so its silent disappearance is the worst case.
+            # Record it as not-checked so it is visible in the report.
+            add("facets_coverage", WARN, True,
+                "coverage NOT checked — no roof outline to compare against")
         if oxy and len(oxy) >= 3 and polys:
             outline = Polygon(oxy)
             if not outline.is_valid:

@@ -34,7 +34,14 @@ DEFAULT_PITCH_X12 = 4
 # A facet is "flat" below this slope. Equivalent surface/plan area ratio cutoff
 # (1/cos) is ~1.02 at ~11 deg, which cleanly separates true-flat (~1.00) from a
 # 4:12 pitch (~1.054) even when the slope number itself is noisy.
-FLAT_SLOPE_DEG = 5.0
+# Single definition, imported rather than restated: this was declared here AND
+# in metrics.py, both at 5.0, so the two could drift apart silently and the
+# pipeline would classify a roof as flat in one stage and pitched in the next.
+# NOTE: 5.0 deg is 1.05:12. Roofing practice puts the low-slope line at 2:12
+# (9.5 deg) or 3:12 (14 deg), so this threshold is BELOW both conventions and
+# should be matched to the convention the report's readers actually use.
+from src.roofs.metrics import FLAT_SLOPE_DEG  # noqa: E402  (single source)
+
 FLAT_AREA_RATIO_MAX = 1.02
 
 # Below this within-roof slope spread, the facets agree well enough that we trust

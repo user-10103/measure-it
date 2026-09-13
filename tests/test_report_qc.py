@@ -183,3 +183,41 @@ def test_well_fitted_facets_pass_and_check_is_absent_without_lidar():
     assert score_report(ri)["passed"]
     ids = {c["id"] for c in score_report(_good())["checks"]}
     assert "facet_plane_fit" not in ids      # no LiDAR -> no vacuous pass
+
+
+def test_coverage_is_never_silently_absent_when_the_outline_is_missing():
+    """sam_report sets outline_xy=[] when the zero-shot outline fails, which used
+    to drop facets_coverage from the checklist entirely instead of failing it.
+    A check that vanishes reads exactly like a check that passed — the pattern
+    the LiDAR checks already guard against, and coverage is the one that catches
+    facets not spanning the roof."""
+    ri = _good()
+    for missing in ([], None):
+        r = dict(ri)
+        if missing is None:
+            r.pop("outline_xy", None)
+        else:
+            r["outline_xy"] = missing
+        cov = [c for c in score_report(r)["checks"] if c["id"] == "facets_coverage"]
+        assert cov, f"facets_coverage vanished for outline_xy={missing!r}"
+        assert "NOT checked" in cov[0]["detail"]
+        assert cov[0]["severity"] == "WARN"     # visible, but not a hard block
+
+
+def test_coverage_still_fails_hard_when_an_outline_is_present():
+    ri = _good()
+    ri["facets"] = [ri["facets"][0]]
+    ri["facets"][0]["polygon_xy"] = [[0, 0], [2, 0], [2, 1], [0, 1]]
+    cov = next(c for c in score_report(ri)["checks"] if c["id"] == "facets_coverage")
+    assert cov["severity"] == "FAIL" and not cov["ok"]
+
+
+def test_flat_slope_threshold_has_exactly_one_definition():
+    """It was declared in BOTH metrics.py and pitch_policy.py. Two copies of a
+    classification threshold can drift, and then a roof is flat in one stage and
+    pitched in the next. Identity, not equality: equality would still pass if
+    someone re-declared the same number."""
+    from src.roofs import metrics, pitch_policy
+    assert pitch_policy.FLAT_SLOPE_DEG is metrics.FLAT_SLOPE_DEG
+    src = open(pitch_policy.__file__).read()
+    assert "FLAT_SLOPE_DEG = " not in src, "pitch_policy re-declares the threshold"
