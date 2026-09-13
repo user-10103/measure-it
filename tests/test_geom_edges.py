@@ -127,3 +127,30 @@ def test_seam_survives_a_sub_centimetre_gap():
     assert _shared_seams([box(0, 0, 5, 10), box(10, 0, 15, 10)]) == []
     # nor should two facets that merely touch at a corner
     assert _shared_seams([box(0, 0, 5, 5), box(5, 5, 10, 10)]) == []
+
+
+def test_flat_sections_at_different_heights_type_as_parapet():
+    """On a commercial roof the seam between two FLAT sections is not a ridge —
+    neither side drains. What matters is whether they sit at different heights:
+    a step is a parapet / level change and a chargeable edge. 2725 Judge Fran
+    reported 43,029 sqft with zero internal edges of any kind."""
+    from shapely.geometry import box
+    from src.roofs.geom_edges import classify_internal_edges
+    from src.roofs.segment import Facet
+
+    lo = Facet(facet_id=1, polygon=box(0, 0, 10, 10))
+    hi = Facet(facet_id=2, polygon=box(10, 0, 20, 10))
+    seam = [{"edge_type": "ridge", "length_m": 10.0,
+             "geometry_xy": [[10, 0], [10, 10]]}]
+
+    def ann(z):
+        return {"is_flat": True, "aspect_deg": 0.0, "median_z": z,
+                "grad": (0.0, 0.0), "slope_deg": 0.0}
+
+    # 1.4 m step -> parapet
+    out = classify_internal_edges(list(seam), [lo, hi], {1: ann(5.0), 2: ann(6.4)})
+    assert {e["edge_type"] for e in out} == {"parapet"}
+
+    # same height -> just a segmentation seam, not a chargeable parapet
+    out = classify_internal_edges(list(seam), [lo, hi], {1: ann(5.0), 2: ann(5.05)})
+    assert {e["edge_type"] for e in out} == {"transition"}

@@ -34,6 +34,9 @@ def _reflex_flags(ring: List[tuple]) -> List[bool]:
     return flags
 
 
+LEVEL_STEP_M = 0.60        # two FLAT facets this far apart in height are separate
+                           # roof levels, so the seam between them is a parapet
+                           # (mirrors fuse_sam_lidar.FLAT_LEVEL_STEP_M)
 SEAM_TOL_M = 0.10          # facets this close are adjacent; see _shared_seams
 SEAM_MIN_M = 0.05          # below this it is a corner touch or a snap artefact,
                            # not a seam worth typing
@@ -218,7 +221,17 @@ def classify_internal_edges(edges: List[dict], facets, annotations,
                 if fl1 != fl2:
                     etype = "wall_flashing"
                 elif fl1 and fl2:
-                    etype = "transition"
+                    # Two FLAT sections. The downslope test below is meaningless
+                    # here (neither drains), so ask the only question that matters
+                    # on a commercial roof: are they at the same height? A real
+                    # step means a parapet / level change, which is a chargeable
+                    # edge; same height is just a segmentation seam.
+                    z1, z2 = a1.get("median_z"), a2.get("median_z")
+                    if (z1 is not None and z2 is not None
+                            and abs(z1 - z2) >= LEVEL_STEP_M):
+                        etype = "parapet"
+                    else:
+                        etype = "transition"
                 elif "aspect_deg" in a1 and "aspect_deg" in a2:
                     d1, d2 = _down(a1), _down(a2)
                     spread = abs(a1["aspect_deg"] - a2["aspect_deg"]) % 360

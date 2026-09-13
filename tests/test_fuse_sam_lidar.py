@@ -317,3 +317,36 @@ def test_pitched_roof_is_not_mistaken_for_two_levels():
     f = Facet(facet_id=1, polygon=box(0, 0, 20, 20))
     pts = _grid_points(f.polygon, lambda x, y: 0.5 * x + 3.0, step=0.4)
     assert detect_multiplane_facets([f], pts) == []
+
+
+def test_flat_roof_splits_at_a_level_change():
+    """A commercial roof at two heights is two sections. The angle split cannot
+    see it (parallel planes never intersect), so 2725 Judge Fran shipped 43,029
+    sqft as one facet with no internal edges at all."""
+    from src.roofs.fuse_sam_lidar import split_level_facets
+    f = Facet(facet_id=1, polygon=box(0, 0, 20, 20))
+    pts = _grid_points(f.polygon, lambda x, y: np.where(x < 10, 5.0, 6.4), step=0.4)
+    out, changed = split_level_facets([f], pts)
+    assert changed and len(out) == 2
+    assert abs(sum(g.polygon.area for g in out) - 400.0) < 2.0   # area conserved
+    assert all(g.polygon.area > 80 for g in out)                 # two real sections
+
+
+def test_single_level_flat_roof_is_not_split():
+    from src.roofs.fuse_sam_lidar import split_level_facets
+    f = Facet(facet_id=1, polygon=box(0, 0, 20, 20))
+    pts = _grid_points(f.polygon, lambda x, y: np.full_like(x, 5.0), step=0.4)
+    out, changed = split_level_facets([f], pts)
+    assert not changed and len(out) == 1
+
+
+def test_hvac_does_not_trigger_a_level_split():
+    from src.roofs.fuse_sam_lidar import split_level_facets
+    f = Facet(facet_id=1, polygon=box(0, 0, 20, 20))
+    deck = _grid_points(f.polygon, lambda x, y: np.full_like(x, 5.0), step=0.4)
+    rng = np.random.RandomState(41)
+    n = int(0.08 * len(deck))
+    hvac = np.column_stack([rng.uniform(0, 4, n), rng.uniform(0, 4, n),
+                            np.full(n, 6.6)])
+    out, changed = split_level_facets([f], np.vstack([deck, hvac]))
+    assert not changed and len(out) == 1

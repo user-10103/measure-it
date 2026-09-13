@@ -209,6 +209,9 @@ def annotate_facets_with_lidar(
                 compute_surface_area(poly.area, 0.0 if is_flat else slope)),
             "n_points": n,
             "residual_m": float(plane.residual_median),
+            # elevation of this facet, so the edge classifier can tell a PARAPET
+            # (two flat sections at different heights) from a mere transition
+            "median_z": float(np.median(pts[:, 2])),
         }
         # eave elevation = the facet's low edge (5th percentile rides outliers);
         # computed on the ground-filtered points so a driveway can't pull it down.
@@ -519,6 +522,100 @@ def _spans_two_levels(pts) -> bool:
     below, above = k + 1, len(core) - (k + 1)
     need = max(MIN_PLANE_INLIERS, int(FLAT_LEVEL_MIN_FRAC * len(core)))
     return min(below, above) >= need
+
+
+def _level_clusters(pts):
+    """Split a facet's points at its elevation gap -> (low, high) or None."""
+    z = np.sort(pts[:, 2])
+    lo, hi = int(0.05 * len(z)), int(0.95 * len(z))
+    core = z[lo:hi]
+    if len(core) < 2 * MIN_PLANE_INLIERS:
+        return None
+    gaps = np.diff(core)
+    k = int(np.argmax(gaps))
+    if gaps[k] < FLAT_LEVEL_STEP_M:
+        return None
+    cut = (core[k] + core[k + 1]) / 2.0
+    low, high = pts[pts[:, 2] <= cut], pts[pts[:, 2] > cut]
+    need = max(MIN_PLANE_INLIERS, int(FLAT_LEVEL_MIN_FRAC * len(core)))
+    if min(len(low), len(high)) < need:
+        return None
+    return low, high
+
+
+def split_level_facets(facets: List, points):
+    """Split a facet whose points sit at two roof LEVELS into one facet per level.
+
+    The complement to split_multiplane_facets for FLAT roofs. That one cuts along
+    the line where two planes intersect, which does not exist here: a commercial
+    roof's sections are PARALLEL, separated by a step and a parapet rather than a
+    crease. 2725 Judge Fran came back as 43,029 sqft in a single facet with no
+    internal edges at all, because nothing was looking for a step.
+
+    The cut is the perpendicular bisector between the two clusters' XY centroids —
+    the natural divide between two adjacent sections. Guards mirror the angle
+    split: exactly two pieces, both substantial, both carrying real point support,
+    or the facet is left whole. Area is conserved (polygon split).
+    """
+    import math
+
+    from shapely import contains_xy
+    from shapely.geometry import LineString
+    from shapely.ops import split as shp_split
+
+    from src.roofs.segment import Facet
+
+    xyz = _xyz(points)
+    out: List = []
+    changed = False
+    for f in facets:
+        poly = getattr(f, "polygon", None)
+        if poly is None or poly.is_empty:
+            out.append(f)
+            continue
+        pts = xyz[contains_xy(poly, xyz[:, 0], xyz[:, 1])]
+        clusters = _level_clusters(pts) if len(pts) >= 2 * MIN_FACET_POINTS else None
+        if clusters is None:
+            out.append(f)
+            continue
+        low, high = clusters
+        cx1, cy1 = float(low[:, 0].mean()), float(low[:, 1].mean())
+        cx2, cy2 = float(high[:, 0].mean()), float(high[:, 1].mean())
+        dx, dy = cx2 - cx1, cy2 - cy1
+        sep = math.hypot(dx, dy)
+        if sep < 1e-6:
+            out.append(f)                              # stacked, not side by side
+            continue
+        mx, my = (cx1 + cx2) / 2.0, (cy1 + cy2) / 2.0  # midpoint of the centroids
+        ux, uy = -dy / sep, dx / sep                   # perpendicular = the divide
+        minx, miny, maxx, maxy = poly.bounds
+        span = 2.0 * math.hypot(maxx - minx, maxy - miny)
+        line = LineString([(mx - span * ux, my - span * uy),
+                           (mx + span * ux, my + span * uy)])
+        try:
+            pieces = [g for g in shp_split(poly, line).geoms
+                      if g.geom_type == "Polygon" and g.area > 0]
+        except Exception:  # noqa: BLE001
+            out.append(f)
+            continue
+        if len(pieces) != 2 or min(g.area for g in pieces) < SPLIT_MIN_PIECE_FRAC * poly.area:
+            out.append(f)
+            continue
+        if any(int(contains_xy(g, xyz[:, 0], xyz[:, 1]).sum()) < MIN_FACET_POINTS
+               for g in pieces):
+            out.append(f)
+            continue
+        logger.info("facet %s split at a roof level change (step %.2f m)",
+                    f.facet_id, abs(float(high[:, 2].mean() - low[:, 2].mean())))
+        out.extend(Facet(facet_id=-1, points=None, label=-1, polygon=g) for g in pieces)
+        changed = True
+
+    if not changed:
+        return list(facets), False
+    final = [Facet(facet_id=i, points=None, label=i, polygon=g.polygon)
+             for i, g in enumerate(out, start=1)]
+    logger.info("level split: %d facet(s) -> %d", len(facets), len(final))
+    return final, True
 
 
 def detect_multiplane_facets(facets: List, points) -> List[int]:

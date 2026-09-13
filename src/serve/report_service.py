@@ -267,8 +267,13 @@ def generate_roof_report(
         # via MEASURE_IT_PLANE_SPLIT=0). Runs before the merge so a freshly split
         # facet can still be re-merged if it turns out coplanar with a neighbor.
         if _os.getenv("MEASURE_IT_PLANE_SPLIT", "1") == "1":
-            from src.roofs.fuse_sam_lidar import split_multiplane_facets
+            from src.roofs.fuse_sam_lidar import (split_level_facets,
+                                                  split_multiplane_facets)
             split, did_split = split_multiplane_facets(roof.facets, lidar_points)
+            # ...then the FLAT case: sections at different heights, which the
+            # angle split cannot see because parallel planes never intersect.
+            split, did_level = split_level_facets(split, lidar_points)
+            did_split = did_split or did_level
             if did_split:
                 roof.facets = split
                 annotations = annotate_facets_with_lidar(roof.facets, lidar_points,
