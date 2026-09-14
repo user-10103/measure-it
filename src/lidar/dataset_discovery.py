@@ -107,7 +107,14 @@ def _collection_year(name: str) -> int:
         if not (_YEAR_MIN <= y <= current + 1):
             continue
         prefix = name[: m.start()].rstrip("_-").upper()
-        if any(prefix.endswith(mark) for mark in _RELEASE_MARKERS):
+        # The marker must be its own TOKEN, not a word ending. "Pinellas" ends
+        # in the letters "LAS", so FL_Peninsular_Pinellas_2018 was read as a
+        # release year and scored 0 -- ranking Pinellas County's 2018 survey
+        # BELOW FL_PinellasCo_2007 and making every Pinellas report measure off
+        # eleven-year-old LiDAR at 2.8 pts/m2. Any county whose name ends in
+        # -las, -rel or -published hits this.
+        last = re.split(r"[_\-\s]", prefix)[-1] if prefix else ""
+        if last in _RELEASE_MARKERS:
             continue                      # release/publication year, not collection
         years.append(y)
     return max(years) if years else 0

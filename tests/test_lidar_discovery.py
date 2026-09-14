@@ -292,3 +292,28 @@ def test_max_candidates_caps_the_attempts(two_datasets, monkeypatch):
     assert ef.fetch_roof_points(28.0, -81.0, _fp_wgs84(), CRS_UTM,
                                 max_candidates=1) is None      # never reached 'good'
     assert not any("/good/" in u for u in two_datasets)
+
+
+def test_a_county_whose_name_ends_in_las_keeps_its_collection_year():
+    """The release-marker test matched mid-word: "PINELLAS" ends with the
+    letters "LAS", so FL_Peninsular_Pinellas_2018 scored 0 and ranked BELOW
+    FL_PinellasCo_2007. Every Pinellas report therefore measured off
+    eleven-year-old LiDAR at 2.8 pts/m2 — the density confound that broke the
+    GIS-vs-NAIP comparison, in the one county with 3-inch public imagery."""
+    from src.lidar.dataset_discovery import _collection_year
+
+    assert _collection_year("FL_Peninsular_Pinellas_2018") == 2018
+    assert _collection_year("FL_PinellasCo_2007") == 2007
+    # the original bug this marker logic exists for must still be caught
+    assert _collection_year("USGS_LPC_FL_Upper_Saint_Johns_2017_LAS_2019") == 2017
+    assert _collection_year("FL_Peninsular_FDEM_Brevard_2018") == 2018
+    assert _collection_year("FL_Elgin_2006_2008") == 2008
+
+
+def test_release_marker_must_be_its_own_token():
+    from src.lidar.dataset_discovery import _collection_year
+
+    assert _collection_year("SOMEWHERE_LAS_2019") == 0        # real release marker
+    assert _collection_year("SOMEWHERE_ATLAS_2019") == 2019   # word merely ending in las
+    assert _collection_year("COUNTY_REL_2020") == 0
+    assert _collection_year("LAUREL_2020") == 2020            # ends in "REL"
