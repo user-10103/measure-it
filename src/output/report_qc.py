@@ -26,6 +26,13 @@ FAIL, WARN, OK = "FAIL", "WARN", "OK"
 # and 755 E Eau Gallie at 77-97%.
 PLANE_EXPLAINS_MIN = 0.60
 
+# Roof plan area against the footprint of the building we actually selected.
+# Gross-error bounds, not calibration: a real roof runs ~1.0-1.3x its footprint
+# because of eave overhang, so these leave a wide margin on both sides and fire
+# only when the report is about a different building than the one requested.
+FOOTPRINT_RATIO_MIN = 0.35
+FOOTPRINT_RATIO_MAX = 3.00
+
 
 @dataclass
 class Check:
@@ -190,6 +197,31 @@ def score_report(report_input: dict, model: ReportModel | None = None) -> dict:
             "facet count agrees with the LiDAR plane count" if not mp else
             f"facet(s) {mp} still span MORE THAN ONE plane per LiDAR — the roof is "
             "under-segmented, so its surface area is under-reported")
+
+    # --- did we measure the building we SELECTED? ---
+    # Every check above asks whether the report is internally consistent. None
+    # asks whether it is about the right roof. The Don CeSar -- a large hotel --
+    # produced a 1,232 sqft two-facet roof, self-consistent in every way, and
+    # PASSED. A small plausible roof is exactly what passes.
+    #
+    # The MS Buildings footprint we selected is already fetched (it clips the
+    # LiDAR) and was simply never compared to the result. Bounds are deliberately
+    # GROSS-ERROR bounds, not tuning: a roof's plan area normally runs 1.0-1.3x
+    # its footprint (eave overhang). Below FOOTPRINT_RATIO_MIN we measured a
+    # fragment of the building; above FOOTPRINT_RATIO_MAX we swallowed
+    # neighbours. Anything in between passes without comment.
+    fpa = report_input.get("footprint_plan_area_m2")
+    if fpa and fpa > 0:
+        plan = sum(f.get("plan_area_m2") or 0.0 for f in facets)
+        ratio = plan / fpa
+        add("measures_selected_building", FAIL,
+            FOOTPRINT_RATIO_MIN <= ratio <= FOOTPRINT_RATIO_MAX,
+            f"roof plan area is {ratio:.2f}x the selected building footprint"
+            if FOOTPRINT_RATIO_MIN <= ratio <= FOOTPRINT_RATIO_MAX else
+            f"roof plan area is {ratio:.2f}x the selected building footprint "
+            f"({plan:.0f} m2 vs {fpa:.0f} m2) — the measured roof is not that "
+            "building: too small means a fragment of it, too large means "
+            "neighbouring structures were swallowed")
 
     # --- obstructions accounted when the FO detector ran ---
     if "foreign_objects" in report_input:

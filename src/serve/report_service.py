@@ -366,6 +366,23 @@ def generate_roof_report(
     # hips - geometrically impossible) printed a polished, confident PDF and only
     # logged a warning nobody reads.
     from src.output.report_qc import score_report, format_report_qc
+    # The footprint we SELECTED, so the gate can ask whether the roof we
+    # measured is that building. Fetched for the LiDAR clip and then never
+    # compared against the result: the Don CeSar (a large hotel) produced a
+    # 1,232 sqft two-facet roof and PASSED, because every gate check is about
+    # internal geometric self-consistency and none is about identity. A small,
+    # plausible, self-consistent roof is exactly what passes.
+    try:
+        import geopandas as _gpd
+        _fp = meta.get("footprint_wgs84")
+        if _fp is not None and meta.get("crs"):
+            _fpa = float(_gpd.GeoSeries([_fp], crs="EPSG:4326")
+                         .to_crs(meta["crs"]).area.iloc[0])
+            if _fpa > 0:
+                report_input["footprint_plan_area_m2"] = _fpa
+    except Exception as _fe:  # noqa: BLE001 - advisory
+        logger.info("footprint area unavailable (%s)", _fe)
+
     # Which imagery this roof was actually measured from. The facet model is
     # fine-tuned on GIS orthophotos, so a NAIP-sourced report is an out-of-domain
     # inference and must say so rather than look identical to an in-domain one.

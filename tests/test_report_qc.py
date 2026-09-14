@@ -246,3 +246,49 @@ def test_report_states_which_imagery_it_was_measured_from(tmp_path):
                          capture_output=True, text=True).stdout
     assert "Imagery source" in txt
     assert "NAIP" in txt
+
+
+def test_a_self_consistent_report_for_the_wrong_building_fails():
+    """The Don CeSar -- a large hotel -- produced a 1,232 sqft two-facet roof and
+    PASSED the gate. Every check the gate ran was about internal geometric
+    self-consistency, and a small plausible roof is internally consistent. None
+    of them asked whether it was the right building.
+
+    The MS Buildings footprint is already fetched (it clips the LiDAR) and was
+    never compared against the result."""
+    ri = _good()                      # two facets, 149 m2 of plan area
+    ri["footprint_plan_area_m2"] = 6000.0        # a hotel
+    r = score_report(ri)
+    failed = {c["id"] for c in r["checks"] if c["severity"] == "FAIL" and not c["ok"]}
+    assert "measures_selected_building" in failed
+    assert not r["passed"]
+    detail = next(c["detail"] for c in r["checks"]
+                  if c["id"] == "measures_selected_building")
+    assert "not that building" in detail
+
+
+def test_swallowing_the_neighbours_fails_too():
+    """The other direction: a roof far LARGER than its footprint means the
+    segmentation merged adjacent structures."""
+    ri = _good()
+    ri["footprint_plan_area_m2"] = 20.0
+    failed = {c["id"] for c in score_report(ri)["checks"]
+              if c["severity"] == "FAIL" and not c["ok"]}
+    assert "measures_selected_building" in failed
+
+
+def test_normal_overhang_passes_without_comment():
+    """A roof runs ~1.0-1.3x its footprint because of eave overhang. These are
+    gross-error bounds, not another Brevard-calibrated tripwire."""
+    ri = _good()
+    plan = sum(f["plan_area_m2"] for f in ri["facets"])
+    for mult in (0.8, 1.0, 1.15, 1.3):
+        ri["footprint_plan_area_m2"] = plan / mult
+        assert score_report(ri)["passed"], mult
+
+
+def test_check_is_absent_when_no_footprint_was_recorded():
+    """Never a vacuous pass: without a footprint there is no evidence, so the
+    check does not appear at all."""
+    ids = {c["id"] for c in score_report(_good())["checks"]}
+    assert "measures_selected_building" not in ids
