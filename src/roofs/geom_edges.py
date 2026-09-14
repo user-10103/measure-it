@@ -14,6 +14,8 @@ plan lengths; LiDAR upgrades these to true sloped lengths and splits eave/rake.
 """
 from __future__ import annotations
 
+import logging
+
 from typing import List
 
 from shapely.geometry import LineString, Point
@@ -37,6 +39,8 @@ def _reflex_flags(ring: List[tuple]) -> List[bool]:
 LEVEL_STEP_M = 0.60        # two FLAT facets this far apart in height are separate
                            # roof levels, so the seam between them is a parapet
                            # (mirrors fuse_sam_lidar.FLAT_LEVEL_STEP_M)
+logger = logging.getLogger(__name__)
+
 SEAM_TOL_M = 0.10          # facets this close are adjacent; see _shared_seams
 SEAM_MIN_M = 0.05          # below this it is a corner touch or a snap artefact,
                            # not a seam worth typing
@@ -259,6 +263,20 @@ def classify_internal_edges(edges: List[dict], facets, annotations,
             else:
                 runs.append((etype, [a, b]))
         for etype, pts in runs:
+            if etype != e["edge_type"]:
+                # 1250 Pineapple Ave reported 0 hips and 0 valleys on a 10-facet
+                # roof: the geometry stage found nine hips and a valley and this
+                # function overwrote every one, seven to wall_flashing. Which
+                # flanking pair was chosen, and why it decided what it decided,
+                # was unrecoverable from the output -- the same silence the LiDAR
+                # declines had. Say it, so the cause is one run away, not a
+                # guess. INFO because on a healthy roof this fires rarely.
+                logger.info(
+                    "edge relabel %s -> %s (%.1f m): flanks=%s is_flat=%s "
+                    "aspect=%s", e["edge_type"], etype,
+                    LineString(pts).length, near,
+                    [None if a is None else a.get("is_flat") for a in (a1, a2)],
+                    [None if a is None else a.get("aspect_deg") for a in (a1, a2)])
             out.append({"edge_type": etype,
                         "length_m": float(LineString(pts).length),
                         "geometry_xy": pts})

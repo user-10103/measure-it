@@ -154,3 +154,51 @@ def test_flat_sections_at_different_heights_type_as_parapet():
     # same height -> just a segmentation seam, not a chargeable parapet
     out = classify_internal_edges(list(seam), [lo, hi], {1: ann(5.0), 2: ann(5.05)})
     assert {e["edge_type"] for e in out} == {"transition"}
+
+
+def test_every_edge_relabel_says_why(caplog):
+    """1250 Pineapple Ave reported 0 hips and 0 valleys on a 10-facet roof. The
+    geometry stage had found nine hips and a valley; classify_internal_edges
+    overwrote all ten, seven of them to wall_flashing. WHICH flanking pair it
+    picked, and on what basis, was unrecoverable from the output -- so the cause
+    could only be guessed at. Same silence as the LiDAR declines, same fix."""
+    import logging
+
+    from shapely.geometry import Polygon
+    from src.roofs.geom_edges import classify_internal_edges
+
+    class _F:
+        def __init__(self, fid, poly):
+            self.facet_id, self.polygon = fid, poly
+
+    pitched = _F(1, Polygon([(0, 0), (2, 0), (2, 2), (0, 2)]))
+    flat = _F(2, Polygon([(2, 0), (4, 0), (4, 2), (2, 2)]))
+    ann = {1: {"aspect_deg": 270.0, "is_flat": False, "median_z": 10.0},
+           2: {"aspect_deg": 90.0, "is_flat": True, "median_z": 10.0}}
+    edges = [{"edge_type": "hip", "length_m": 2.0,
+              "geometry_xy": [[2.0, 0.0], [2.0, 2.0]]}]
+
+    with caplog.at_level(logging.INFO, logger="src.roofs.geom_edges"):
+        out = classify_internal_edges(edges, [pitched, flat], ann)
+    assert out[0]["edge_type"] == "wall_flashing"     # one flat, one pitched
+    msg = "\n".join(r.getMessage() for r in caplog.records)
+    assert "hip -> wall_flashing" in msg, msg
+    assert "is_flat=[False, True]" in msg, msg       # the reason, not just the fact
+
+
+def test_an_unchanged_edge_is_not_logged(caplog):
+    """The log is for relabels only, or a healthy roof drowns it in noise."""
+    import logging
+
+    from shapely.geometry import Polygon
+    from src.roofs.geom_edges import classify_internal_edges
+
+    class _F:
+        def __init__(self, fid, poly):
+            self.facet_id, self.polygon = fid, poly
+
+    edges = [{"edge_type": "eave", "length_m": 2.0,
+              "geometry_xy": [[0.0, 0.0], [2.0, 0.0]]}]
+    with caplog.at_level(logging.INFO, logger="src.roofs.geom_edges"):
+        classify_internal_edges(edges, [_F(1, Polygon([(0, 0), (2, 0), (2, 2)]))], {})
+    assert not [r for r in caplog.records if "edge relabel" in r.getMessage()]
