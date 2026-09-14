@@ -292,3 +292,20 @@ def test_check_is_absent_when_no_footprint_was_recorded():
     check does not appear at all."""
     ids = {c["id"] for c in score_report(_good())["checks"]}
     assert "measures_selected_building" not in ids
+
+
+def test_gate_printer_shows_the_outcome_not_the_severity_class():
+    """format_report_qc printed the check's SEVERITY CLASS in brackets, so a
+    passing check rendered as "ok [FAIL]". On a healthy report that is 15 lines
+    reading [FAIL] when 2 checks actually failed -- in the log that is the
+    primary debugging surface."""
+    from src.output.report_qc import format_report_qc
+
+    txt = format_report_qc(score_report(_good()))
+    assert "ok [PASS] area_positive" in txt, txt
+    assert "ok [FAIL]" not in txt, txt          # the bug: pass marked FAIL
+
+    ri = _good()
+    ri["facets"][0]["surface_area_m2"] = 5_000_000        # CRS/units bug
+    bad = format_report_qc(score_report(ri))
+    assert "XX [FAIL] area_sane" in bad, bad               # a real failure still reads FAIL

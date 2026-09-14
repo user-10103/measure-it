@@ -310,7 +310,12 @@ def generate_roof_report(
                 return
             from src.roofs.fuse_sam_lidar import (format_membership,
                                                   point_membership_matrix)
-            logger.info("point membership [%s, %d facets]:\n%s", stage,
+            # WARNING, not INFO: this only runs when someone explicitly asked
+            # for it with MEASURE_IT_MEMBERSHIP=1, and the loggers around it sit
+            # at WARNING (demo_lib.live_report drives every logger to ERROR).
+            # A diagnostic you switched on and then cannot see is worse than no
+            # diagnostic -- it reads as "the code did not run".
+            logger.warning("point membership [%s, %d facets]:\n%s", stage,
                         len(fset), format_membership(
                             point_membership_matrix(fset, lidar_points, anns)))
 

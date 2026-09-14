@@ -255,8 +255,14 @@ def format_report_qc(result: dict) -> str:
     lines = [f"WORLD-CLASS GATE: {'PASS' if result['passed'] else 'FAIL'}  "
              f"(score {result['score']:.0%}, {result['num_fail']} fail / {result['num_warn']} warn)"]
     for c in result["checks"]:
+        # The bracket used to print the check's SEVERITY CLASS, not its result,
+        # so a passing check rendered as "ok [FAIL]". On a healthy report that
+        # is 15 lines reading [FAIL] when 2 checks actually failed, in the log
+        # that is the primary debugging surface. Print the OUTCOME instead: a
+        # FAIL-class check that passed says PASS; one that failed says FAIL.
+        outcome = "PASS" if c["ok"] else c["severity"]
         mark = "ok " if c["ok"] else ("XX " if c["severity"] == "FAIL" else "!! ")
-        lines.append(f"  {mark}[{c['severity']}] {c['id']}: {c['detail']}")
+        lines.append(f"  {mark}[{outcome}] {c['id']}: {c['detail']}")
     return "\n".join(lines)
 
 
