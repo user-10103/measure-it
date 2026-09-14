@@ -318,6 +318,14 @@ def annotate_facets_with_lidar(
             "pitch_string": compute_pitch_string(0.0 if is_flat else slope),
             "aspect_deg": float(aspect),        # downslope compass deg (rake relabel)
             "grad": (float(plane.a), float(plane.b)),   # plane gradient (3D lengths, merging)
+            # The FULL fitted plane z = a*x + b*y + c, in the points' CRS.
+            # `grad` kept only (a, b), so the intercept -- the one number that
+            # places the plane in space -- was discarded at the moment it was
+            # measured. Anything wanting a real plane later (facet_reconstruct's
+            # arrangement, which intersects planes to get exactly straight
+            # seams) then had to reconstruct c from median_z at the centroid:
+            # a decent approximation, but an approximation of a number we HAD.
+            "plane_abc": (float(plane.a), float(plane.b), float(plane.c)),
             "aspect_bin": compute_aspect_bin(aspect),
             "is_flat": bool(is_flat),
             "surface_area_m2": float(

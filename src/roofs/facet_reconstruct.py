@@ -244,6 +244,76 @@ def _plane_intersection_segment(pi, pj, outline: Polygon):
     return seg if not seg.is_empty else None
 
 
+class _Plane:
+    """Minimal z = a*x + b*y + c, the shape _plane_intersection_segment needs."""
+
+    __slots__ = ("a", "b", "c")
+
+    def __init__(self, a, b, c):
+        self.a, self.b, self.c = float(a), float(b), float(c)
+
+
+def planes_from_annotations(facets, annotations):
+    """LiDAR annotations -> one real plane per facet, or None if any is missing.
+
+    The SAM path leaves ``Facet.plane`` as None on every facet -- the LiDAR fits
+    are never written back onto the Facet objects, they live in the annotations
+    dict keyed by facet_id. So arrangement_facets, which needs a, b and c per
+    facet, could not be handed SAM output at all.
+
+    Prefers the exact fitted plane (``plane_abc``, recorded by
+    annotate_facets_with_lidar). Falls back to reconstructing the intercept from
+    ``grad`` and ``median_z`` at the facet centroid, which is a genuine LiDAR
+    intercept rather than a synthesized c=0 -- the case the intersection code's
+    own docstring warns gives meaningless lines -- but is approximate, because
+    median_z is the median of the facet's point elevations while the centroid is
+    the polygon's. They coincide only for an evenly sampled facet.
+
+    Returns None if ANY facet lacks a plane: arrangement_facets requires
+    len(planes) == len(facet_polygons), and a partial list would silently
+    misalign planes with facets by index.
+    """
+    out = []
+    for f in facets:
+        ann = annotations.get(getattr(f, "facet_id", None))
+        if not ann:
+            return None
+        abc = ann.get("plane_abc")
+        if abc and len(abc) == 3:
+            out.append(_Plane(*abc))
+            continue
+        grad, mz = ann.get("grad"), ann.get("median_z")
+        poly = getattr(f, "polygon", None)
+        if not grad or mz is None or poly is None or poly.is_empty:
+            return None
+        a, b = float(grad[0]), float(grad[1])
+        cpt = poly.centroid
+        out.append(_Plane(a, b, float(mz) - a * cpt.x - b * cpt.y))
+    return out
+
+
+def arrangement_input_from_sam(facets, annotations):
+    """SAM facets + LiDAR annotations -> (facet_polygons, planes) for
+    arrangement_facets, or None when the roof cannot supply them.
+
+    arrangement_facets wants ``(facet_id, polygon)`` PAIRS; the SAM path holds
+    bare Polygons, which raised
+        TypeError: cannot unpack non-iterable Polygon object
+    at the ids comprehension. Both mismatches are handled here so the geometry
+    stage stays unaware of which segmentation produced its input.
+    """
+    pairs = [(f.facet_id, f.polygon) for f in facets
+             if getattr(f, "polygon", None) is not None and not f.polygon.is_empty]
+    if len(pairs) < 2:
+        return None
+    keep = {fid for fid, _ in pairs}
+    planes = planes_from_annotations(
+        [f for f in facets if getattr(f, "facet_id", None) in keep], annotations)
+    if planes is None or len(planes) != len(pairs):
+        return None
+    return pairs, planes
+
+
 def arrangement_facets(outline: Polygon, facet_polygons, planes):
     """Partition the outline by plane-intersection lines, then label each cell
     with a plane (the roofer/3DBAG pattern).

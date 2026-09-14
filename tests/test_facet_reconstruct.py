@@ -265,3 +265,86 @@ def test_phase2_to_phase4_integration(footprint):
     assert 1 <= len(edges) <= 12
     # the interior seam should still classify as a ridge (opposed planes)
     assert any(e.edge_type == EdgeType.RIDGE for e in edges)
+
+
+# --- SAM -> arrangement adapter ---------------------------------------------
+# arrangement_facets builds facets from plane-plane INTERSECTIONS, so seams come
+# out exactly straight by construction rather than inheriting a raster mask's
+# staircase. It could not be handed SAM output: the SAM path holds bare Polygons
+# where it wants (fid, polygon) pairs, and leaves Facet.plane None on every
+# facet because the LiDAR fits live in the annotations dict, not on the Facets.
+
+class _F:
+    def __init__(self, fid, poly):
+        self.facet_id, self.polygon, self.plane = fid, poly, None
+
+
+def _sam_pair():
+    from shapely.geometry import box
+    return [_F(1, box(0, 0, 10, 5)), _F(2, box(0, 5, 10, 10))]
+
+
+def test_exact_fitted_plane_is_used_when_present():
+    """annotate_facets_with_lidar now records plane_abc. The intercept is the
+    one number that places a plane in space and `grad` was dropping it."""
+    from src.roofs.facet_reconstruct import planes_from_annotations
+
+    ann = {1: {"plane_abc": (0.5, 0.0, 3.0), "grad": (0.5, 0.0), "median_z": 99.0},
+           2: {"plane_abc": (-0.5, 0.0, 4.0), "grad": (-0.5, 0.0), "median_z": 99.0}}
+    planes = planes_from_annotations(_sam_pair(), ann)
+    assert [(p.a, p.b, p.c) for p in planes] == [(0.5, 0.0, 3.0), (-0.5, 0.0, 4.0)]
+
+
+def test_intercept_is_reconstructed_from_median_z_when_plane_abc_is_absent():
+    """Older annotations carry only grad + median_z. Reconstructing c at the
+    centroid gives a REAL LiDAR intercept -- not the synthesized c=0 that
+    _plane_intersection_segment's docstring warns produces meaningless lines."""
+    from src.roofs.facet_reconstruct import planes_from_annotations
+
+    # facet 1 is box(0,0,10,5): centroid (5, 2.5); z = 0.5x + c, median_z 10
+    ann = {1: {"grad": (0.5, 0.0), "median_z": 10.0},
+           2: {"grad": (-0.5, 0.0), "median_z": 10.0}}
+    p1, p2 = planes_from_annotations(_sam_pair(), ann)
+    assert p1.c == pytest.approx(10.0 - 0.5 * 5.0)      # 7.5
+    assert p2.c == pytest.approx(10.0 + 0.5 * 5.0)      # 12.5
+    # and the reconstructed plane passes through (centroid, median_z) exactly
+    assert p1.a * 5.0 + p1.b * 2.5 + p1.c == pytest.approx(10.0)
+
+
+def test_a_facet_with_no_lidar_plane_aborts_rather_than_misaligning():
+    """arrangement_facets requires len(planes) == len(facet_polygons) and pairs
+    them BY INDEX. A partial list would silently attach the wrong plane to the
+    wrong facet, which is worse than not running."""
+    from src.roofs.facet_reconstruct import (arrangement_input_from_sam,
+                                             planes_from_annotations)
+
+    ann = {1: {"plane_abc": (0.5, 0.0, 3.0)}}            # facet 2 unmeasured
+    assert planes_from_annotations(_sam_pair(), ann) is None
+    assert arrangement_input_from_sam(_sam_pair(), ann) is None
+
+
+def test_adapter_emits_the_pairs_arrangement_facets_expects():
+    """The shape mismatch that raised
+    TypeError: cannot unpack non-iterable Polygon object"""
+    from src.roofs.facet_reconstruct import arrangement_input_from_sam
+
+    ann = {1: {"plane_abc": (0.5, 0.0, 3.0)}, 2: {"plane_abc": (-0.5, 0.0, 4.0)}}
+    pairs, planes = arrangement_input_from_sam(_sam_pair(), ann)
+    assert [fid for fid, _ in pairs] == [1, 2]           # unpackable, not bare
+    assert len(planes) == len(pairs)
+    ids = [fid for fid, _ in pairs]                      # the line that crashed
+    assert ids == [1, 2]
+
+
+def test_arrangement_runs_end_to_end_on_adapted_sam_output():
+    """The point of the adapter: real SAM-shaped input reaches the arrangement
+    and comes back with facets, instead of raising."""
+    from src.roofs.facet_reconstruct import (arrangement_facets,
+                                             arrangement_input_from_sam)
+    from shapely.geometry import box
+
+    ann = {1: {"plane_abc": (0.5, 0.0, 0.0)},
+           2: {"plane_abc": (-0.5, 0.0, 5.0)}}           # a ridge between them
+    pairs, planes = arrangement_input_from_sam(_sam_pair(), ann)
+    got = arrangement_facets(box(0, 0, 10, 10), pairs, planes)
+    assert got is None or len(got) == 3      # (facets, boundaries, planes)
