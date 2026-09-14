@@ -572,6 +572,24 @@ def absorb_unannotated_orphans(
         if best_id is None:
             keep[o.facet_id] = o.polygon        # nothing to join — keep it
             continue
+        # "Small" was measured against the whole ROOF and never against the
+        # RECIPIENT. On a 215 m2 roof, 5% is 10.75 m2 — so a 7.70 m2 orphan
+        # counted as small and was folded into a 0.40 m2 facet, a 19x gain. The
+        # result keeps the 0.40 m2 facet's identity AND its annotation: a plane
+        # fitted to 0.40 m2 of points, now describing 8.10 m2 of roof. That
+        # facet then reads as spanning more than one plane — a defect
+        # manufactured HERE, not by segmentation.
+        #
+        # An absorption is a minor correction, so the MEASURED part has to stay
+        # the majority. Anything else is the orphan swallowing the facet and
+        # inheriting its pitch.
+        if o.polygon.area > keep[best_id].area:
+            logger.info("facet %s: not absorbed — the orphan is %.2f m2 against "
+                        "a %.2f m2 measured neighbour; absorbing would leave the "
+                        "neighbour's plane describing mostly unmeasured area",
+                        o.facet_id, o.polygon.area, keep[best_id].area)
+            keep[o.facet_id] = o.polygon
+            continue
         merged = unary_union([keep[best_id].buffer(0.05),
                               o.polygon.buffer(0.05)]).buffer(-0.05)
         if merged.geom_type == "MultiPolygon":
@@ -623,14 +641,23 @@ def split_multiplane_facets(facets: List, points):
             out.append(f)
             continue
         if not p1.success:
+            logger.info("facet %s: no plane split — no primary plane fits "
+                        "(%d/%d inliers)", f.facet_id, p1.inlier_count, len(pts))
             out.append(f)
             continue
         if compute_slope_deg(p1) < FLAT_SLOPE_DEG:
+            logger.info("facet %s: no plane split — primary plane is flat "
+                        "(%.1f deg); residual is clutter, not a second surface",
+                        f.facet_id, compute_slope_deg(p1))
             out.append(f)                              # flat roof is ONE plane —
             continue                                   # residual is clutter, not a 2nd facet
         resid = np.abs(pts[:, 2] - (p1.a * pts[:, 0] + p1.b * pts[:, 1] + p1.c))
         off = resid > SPLIT_RESIDUAL_M
         if off.sum() < max(MIN_FACET_POINTS, SPLIT_MIN_OFF_FRAC * len(pts)):
+            logger.info("facet %s: no plane split — only %d of %d points are off "
+                        "the primary plane (need %d); essentially one plane",
+                        f.facet_id, int(off.sum()), len(pts),
+                        int(max(MIN_FACET_POINTS, SPLIT_MIN_OFF_FRAC * len(pts))))
             out.append(f)                              # essentially one plane
             continue
         try:
@@ -641,6 +668,14 @@ def split_multiplane_facets(facets: List, points):
         n1, n2 = np.array(p1.normal), np.array(p2.normal)
         ang = math.degrees(math.acos(min(1.0, abs(float(n1 @ n2)))))
         if not p2.success or ang < SPLIT_ANGLE_DEG:
+            # p2 fitted to scatter is the common case here: facet 4 on 1250
+            # Pineapple Ave logged 21.4% inliers for its second plane, and a
+            # plane fitted to canopy meets p1 wherever it likes.
+            logger.info("facet %s: no plane split — second plane %s (%d/%d "
+                        "inliers, %.0f deg from the primary; need %.0f deg)",
+                        f.facet_id,
+                        "did not fit" if not p2.success else "is too similar",
+                        p2.inlier_count, int(off.sum()), ang, SPLIT_ANGLE_DEG)
             out.append(f)                              # second "plane" too similar
             continue
 
@@ -648,6 +683,9 @@ def split_multiplane_facets(facets: List, points):
         #   (a1-a2)x + (b1-b2)y + (c1-c2) = 0
         da, db, dc = p1.a - p2.a, p1.b - p2.b, p1.c - p2.c
         if da == 0 and db == 0:
+            logger.info("facet %s: no plane split — the two planes are parallel, "
+                        "so they have no crease (a level change, not a fold)",
+                        f.facet_id)
             out.append(f)
             continue
         cx, cy = poly.centroid.x, poly.centroid.y
@@ -659,6 +697,25 @@ def split_multiplane_facets(facets: List, points):
         span = 2.0 * math.hypot(maxx - minx, maxy - miny)
         line = LineString([(fx - span * ux, fy - span * uy),
                            (fx + span * ux, fy + span * uy)])
+        # Distance from the facet's centroid to the crease. Measured across the
+        # six multiplane facets on 1250 Pineapple Ave, this is what separates a
+        # split that works from one that does not:
+        #     worked:  24 cm,  86 cm
+        #     failed: 366, 386, 420 and 1502 cm
+        # Facet 4's crease lands 15 METRES from its own centroid — nowhere near
+        # the polygon. A crease that far away is not a crease on this roof: it
+        # is where p1 happens to meet a plane fitted to scatter (that facet's p2
+        # logged 21.4% inliers). A plane fitted to canopy intersects p1 wherever
+        # it likes. Reject on the geometry rather than let the split quietly
+        # produce one piece and report it as "spans more than two planes".
+        crease_d = abs(t) * norm
+        if not line.intersects(poly):
+            logger.info("facet %s: no plane split — the second plane's crease "
+                        "falls %.1f m from the facet centroid and never crosses "
+                        "the polygon, so p2 is not a surface on this facet "
+                        "(scatter, most likely canopy)", f.facet_id, crease_d)
+            out.append(f)
+            continue
         try:
             pieces = [g for g in shp_split(poly, line).geoms
                       if g.geom_type == "Polygon" and g.area > 0]
@@ -676,8 +733,9 @@ def split_multiplane_facets(facets: List, points):
             # later by facets_vs_lidar_planes. That is a real limit of the
             # method, and it should read as a limit rather than as a mystery.
             logger.info("facet %s: no plane split — the cut produced %d piece(s), "
-                        "not 2; a facet spanning more than two planes cannot be "
-                        "split by a single line", f.facet_id, len(pieces))
+                        "not 2 (crease %.1f m from the centroid); a facet "
+                        "spanning more than two planes cannot be split by a "
+                        "single line", f.facet_id, len(pieces), crease_d)
             out.append(f)
             continue
         if min(g.area for g in pieces) < SPLIT_MIN_PIECE_FRAC * poly.area:

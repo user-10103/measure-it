@@ -613,3 +613,77 @@ def test_a_facet_spanning_three_planes_says_why_it_cannot_be_split(caplog):
     msg = "\n".join(r.getMessage() for r in caplog.records)
     # whatever it decided, it must not have decided it silently
     assert "facet 1" in msg, msg
+
+
+def test_an_orphan_cannot_swallow_the_facet_it_joins(caplog):
+    """1250 Pineapple Ave: facet 10 went 0.40 m2 -> 7.70 m2, a 19x gain, and
+    kept the 0.40 m2 facet's identity AND its annotation — a plane fitted to
+    0.40 m2 of points now describing 8.10 m2 of roof. It then read as spanning
+    more than one plane. That defect is manufactured by absorption, not by
+    segmentation.
+
+    Cause: "small" was measured against the whole ROOF (5% of 215 m2 = 10.75 m2)
+    and never against the recipient."""
+    import logging
+
+    from shapely.geometry import box
+
+    from src.roofs.fuse_sam_lidar import absorb_unannotated_orphans
+
+    tiny = Facet(facet_id=1, polygon=box(0, 0, 0.4, 1.0))        # 0.40 m2, measured
+    orphan = Facet(facet_id=2, polygon=box(0.4, 0, 8.1, 1.0))    # 7.70 m2, NOT measured
+    big = Facet(facet_id=3, polygon=box(0, 10, 20, 20))          # keeps roof total large
+    ann = {1: {"is_flat": False}, 3: {"is_flat": False}}
+
+    with caplog.at_level(logging.INFO, logger="src.roofs.fuse_sam_lidar"):
+        out, changed = absorb_unannotated_orphans([tiny, orphan, big], ann)
+    assert not changed, "the orphan swallowed its measured neighbour"
+    msg = "\n".join(r.getMessage() for r in caplog.records)
+    assert "not absorbed" in msg, msg
+    assert len(out) == 3
+
+
+def test_a_genuinely_minor_orphan_is_still_absorbed():
+    """The behaviour this function exists for must survive: a sliver folded into
+    a facet large enough that its measured plane still describes the result."""
+    from shapely.geometry import box
+
+    from src.roofs.fuse_sam_lidar import absorb_unannotated_orphans
+
+    big = Facet(facet_id=1, polygon=box(0, 0, 10, 10))           # 100 m2, measured
+    sliver = Facet(facet_id=2, polygon=box(10, 0, 10.3, 10))     # 3 m2, NOT measured
+    out, changed = absorb_unannotated_orphans([big, sliver], {1: {"is_flat": False}})
+    assert changed and len(out) == 1
+    assert out[0].polygon.area > 100          # the sliver joined the big facet
+
+
+def test_a_crease_that_never_crosses_the_facet_is_rejected_as_not_a_crease(caplog):
+    """Measured across the six multiplane facets on 1250 Pineapple Ave, distance
+    from the facet centroid to the crease is what separates a split that works
+    from one that does not — 24 and 86 cm for the two that worked, 366 to 1502
+    cm for the four that failed. Facet 4's crease lands 15 m from its own
+    centroid: that is where p1 meets a plane fitted to scatter (its p2 logged
+    21.4% inliers), not a crease on this roof.
+
+    Separability does NOT discriminate — successes sat at 0.82/0.79 and failures
+    at 0.69-0.84 — and neither does centring: world and centroid-local frames
+    agree to 0.1 cm, because float64 absorbs 1e6 intercepts without complaint."""
+    import logging
+
+    from shapely.geometry import box
+
+    from src.roofs.fuse_sam_lidar import split_multiplane_facets
+
+    f = Facet(facet_id=4, polygon=box(0, 0, 8, 8))
+    rng = np.random.RandomState(5)
+    # a real plane plus canopy-like scatter above it: p2 fits the scatter, and
+    # its crease with p1 lands far outside the facet
+    good = _grid_points(f.polygon, lambda x, y: 0.4 * x, step=0.35)
+    n = len(good) // 3
+    junk = np.column_stack([rng.uniform(0, 8, n), rng.uniform(0, 8, n),
+                            rng.uniform(6, 12, n)])
+    with caplog.at_level(logging.INFO, logger="src.roofs.fuse_sam_lidar"):
+        out, changed = split_multiplane_facets([f], np.vstack([good, junk]))
+    msg = "\n".join(r.getMessage() for r in caplog.records)
+    assert "facet 4" in msg, msg
+    assert "no plane split" in msg, msg          # never a silent bail-out
