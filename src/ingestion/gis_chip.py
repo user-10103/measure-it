@@ -39,20 +39,42 @@ def _utm_epsg(lat: float, lon: float) -> int:
     return (32600 if lat >= 0 else 32700) + zone
 
 
+# ArcGIS image responses we accept. "png" was demanded and anything else hard-
+# rejected, which threw away perfectly good imagery: most ImageServers serve
+# `jpgpng` and return JPEG whenever the tile needs no transparency. The Florida
+# statewide FCDOP set does exactly that, so the ONLY GIS source covering most of
+# Florida was failing on its content type and silently degrading to 30 cm NAIP.
+_IMAGE_MAGIC = (
+    (b"\x89PNG\r\n\x1a\n", "png"),
+    (b"\xff\xd8\xff", "jpeg"),
+    (b"II*\x00", "tiff"),
+    (b"MM\x00*", "tiff"),
+)
+
+
 def _export_image(endpoint: str, bounds, sr: int, w: int, h: int,
                   timeout: int = 60) -> bytes:
-    """ArcGIS ImageServer exportImage -> PNG bytes, with bbox and image in one
-    metric SR (so pixel<->world is a plain affine). Raises on a JSON error body."""
+    """ArcGIS ImageServer exportImage -> encoded image bytes, with bbox and
+    image in one metric SR (so pixel<->world is a plain affine).
+
+    Accepts any raster the server returns (PIL decodes it downstream); raises
+    only when the body is not an image at all, which is how ArcGIS reports an
+    error -- a JSON document with the reason in it. Surfacing that reason beats
+    the old "non-PNG response" for every case where the server is telling us
+    something useful.
+    """
     west, south, east, north = bounds
     q = urllib.parse.urlencode({
         "bbox": f"{west:.3f},{south:.3f},{east:.3f},{north:.3f}",
         "bboxSR": sr, "imageSR": sr, "size": f"{w},{h}",
-        "format": "png", "f": "image"})
+        "format": "jpgpng", "f": "image"})
     req = urllib.request.Request(f"{endpoint}/exportImage?{q}", headers=_UA)
-    png = urllib.request.urlopen(req, timeout=timeout).read()
-    if png[:8] != b"\x89PNG\r\n\x1a\n":
-        raise RuntimeError(f"non-PNG response from {endpoint}: {png[:200]!r}")
-    return png
+    blob = urllib.request.urlopen(req, timeout=timeout).read()
+    for magic, _kind in _IMAGE_MAGIC:
+        if blob[:len(magic)] == magic:
+            return blob
+    head = blob[:300].decode("utf-8", "replace").strip()
+    raise RuntimeError(f"not an image from {endpoint}: {head!r}")
 
 
 def fetch_chip_gis(lat: float, lon: float, state: str, out_dir,

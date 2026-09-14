@@ -65,6 +65,16 @@ def rank_candidates(
     return candidates
 
 
+# Selecting a building is the full MS Buildings path: index load, shard
+# download, dedup, ranking -- tens of seconds of network. The imagery resolver
+# tries sources in order and EVERY declined source re-does it from scratch, so a
+# single Melbourne report ran it twice (GIS attempt, then the NAIP fallback) and
+# a three-tier fallback would run it three times. The inputs are identical every
+# time, so cache the last few results for the life of the process.
+_SELECT_CACHE: Dict = {}
+_SELECT_CACHE_MAX = 8
+
+
 def select_building(
     lat: float,
     lon: float,
@@ -91,6 +101,13 @@ def select_building(
         >>> result = select_building(28.1178, -82.3951)
         >>> print(f"Distance: {result['dist_m']:.2f}m")
     """
+    key = (round(float(lat), 7), round(float(lon), 7), float(buffer_meters),
+           bool(auto_select))
+    hit = _SELECT_CACHE.get(key)
+    if hit is not None:
+        logger.info("select_building: cache hit for (%.5f, %.5f)", lat, lon)
+        return hit
+
     logger.info(f"Selecting building at ({lat:.6f}, {lon:.6f})")
     logger.info(f"Search radius: {buffer_meters}m")
 
@@ -125,20 +142,28 @@ def select_building(
         logger.info(f"Bounds: {selected.geometry.bounds}")
         logger.info("=" * 60)
 
-        return {
+        return _cache_put(key, {
             "selected": selected,
             "candidates": candidates,
             "dist_m": selected["dist_m"],
             "rank": 0
-        }
+        })
     else:
         logger.info(f"Returning {len(candidates)} candidates for manual selection")
-        return {
+        return _cache_put(key, {
             "selected": None,
             "candidates": candidates,
             "dist_m": None,
             "rank": None
-        }
+        })
+
+
+def _cache_put(key, value):
+    """Remember this selection; evict oldest when the cache is full."""
+    if len(_SELECT_CACHE) >= _SELECT_CACHE_MAX:
+        _SELECT_CACHE.pop(next(iter(_SELECT_CACHE)), None)
+    _SELECT_CACHE[key] = value
+    return value
 
 
 def export_candidates(
