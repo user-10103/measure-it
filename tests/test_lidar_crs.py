@@ -306,3 +306,42 @@ def test_explicit_out_srs_wins_over_what_the_reader_reports(monkeypatch):
         "https://example.com/ept.json", "POLYGON(...)/EPSG:4326",
         out_srs=UTM17N_WKT)
     assert srswkt == UTM17N_WKT
+
+
+def test_pdal_pipeline_excludes_vegetation_like_the_python_path_does():
+    """build_pdal_pipeline filtered "Classification[1:6]", commented
+    "building-relevant classifications (1-6)". The range is INCLUSIVE, so it
+    admitted classes 3, 4 and 5 — low, medium and high VEGETATION. Canopy was
+    not slipping past that filter, it was being let in by it.
+
+    Dormant on the serving path (report_service uses ept_fetch, pure Python,
+    which drops {2,3,4,5,7,9}) — but the two paths must not disagree about what
+    counts as a roof point."""
+    import json
+
+    cfg = ept_client.build_pdal_pipeline("https://e/ept.json", "POLYGON(...)")
+    limits = [st.get("limits", "") for st in cfg["pipeline"]
+              if isinstance(st, dict) and st.get("type") == "filters.range"]
+    blob = json.dumps(limits)
+    assert "Classification[1:6]" not in blob, blob
+    assert "Classification![2:5]" in blob, blob      # ground + all vegetation
+    assert "Classification![7:7]" in blob, blob      # noise
+    assert "Classification![9:9]" in blob, blob      # water
+
+
+def test_the_two_fetch_paths_agree_on_what_a_roof_point_is():
+    from src.lidar.ept_fetch import VEG_GROUND_CLASSES
+
+    import re
+
+    cfg = ept_client.build_pdal_pipeline("https://e/ept.json", "POLYGON(...)")
+    limits = " ".join(st.get("limits", "") for st in cfg["pipeline"]
+                      if isinstance(st, dict) and st.get("type") == "filters.range")
+    excluded = set()
+    for lo, hi in re.findall(r"Classification!\[(\d+):(\d+)\]", limits):
+        excluded.update(range(int(lo), int(hi) + 1))
+    assert VEG_GROUND_CLASSES <= excluded, (
+        f"PDAL path admits {sorted(VEG_GROUND_CLASSES - excluded)} that "
+        f"ept_fetch drops")
+    # and it must NOT exclude the two the python path keeps
+    assert 1 not in excluded and 6 not in excluded, sorted(excluded)

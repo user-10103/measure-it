@@ -49,7 +49,7 @@ def build_pdal_pipeline(
     Pipeline stages:
     1. Read EPT data for polygon bounds
     2. Remove statistical outliers
-    3. Filter to building-relevant classifications (1-6)
+    3. Filter OUT ground, vegetation, noise and water (keep classes 1 and 6)
     4. Reproject to `out_srs` (when given) — several FL EPTs are published in
        EPSG:3857 Web Mercator, where XY is NOT true meters at FL latitudes
        (areas +28%, lengths +13%, slopes -12% at 28N). Reprojecting to UTM at
@@ -77,10 +77,23 @@ def build_pdal_pipeline(
                 "mean_k": 12,
                 "multiplier": 2.0
             },
-            {
-                "type": "filters.range",
-                "limits": "Classification[1:6]"  # Unclassified through building
-            }
+            # ASPRS classes. The range is INCLUSIVE, so "Classification[1:6]"
+            # — commented "building-relevant classifications (1-6)" — admitted
+            # 3, 4 and 5: low, medium and HIGH VEGETATION. Canopy was not
+            # slipping past this filter, it was being let in by it, and a plane
+            # fitted to tree returns meets the roof plane wherever it likes.
+            #
+            # DORMANT on the serving path, which uses ept_fetch (pure Python,
+            # no PDAL) and drops {2,3,4,5,7,9} correctly. Fixed anyway, because
+            # the two paths must not disagree about what a roof point is — this
+            # is a trap set for whoever enables PDAL.
+            #
+            # Negation keeps it one stage per exclusion and readable: drop
+            # ground+vegetation (2-5), noise (7) and water (9); keep 1
+            # (unclassified) and 6 (building), matching ept_fetch exactly.
+            {"type": "filters.range", "limits": "Classification![2:5]"},
+            {"type": "filters.range", "limits": "Classification![7:7]"},
+            {"type": "filters.range", "limits": "Classification![9:9]"}
         ]
     }
     if out_srs:
