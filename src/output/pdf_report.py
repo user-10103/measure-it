@@ -177,7 +177,7 @@ def generate_report(report_input: dict, out_pdf: str,
 
     # ---- Page 8: summary ----
     _header(c, W, H, "Report summary", address)
-    _summary_tables(c, W, H, model)
+    _summary_tables(c, W, H, model, report_input)
     _pitch_table(c, 54, H - 130, model)    # areas-per-pitch (with % of roof)
     _obstructions(c, 54, H - 320, model)   # foreign objects (only if detector supplied any)
     _footer(c, W, 8)
@@ -239,7 +239,25 @@ def _structure_complexity(num_facets: int) -> str:
     return "Complex"
 
 
-def _summary_tables(c, W, H, model: ReportModel):
+def _imagery_label(report_input: dict) -> str:
+    """e.g. "County 3-inch (0.08 m/px, 2024)" or "NAIP (0.30 m/px)"."""
+    src = report_input.get("imagery_source")
+    if not src:
+        return "not recorded"
+    pretty = {"county-3in": "County 3-inch",
+              "county-3in-unverified": "County 3-inch",
+              "fl-statewide": "FL statewide ortho",
+              "naip": "NAIP"}.get(src, str(src))
+    gsd, year = report_input.get("imagery_gsd_m"), report_input.get("imagery_year")
+    bits = []
+    if gsd:
+        bits.append(f"{float(gsd):.2f} m/px")
+    if year:
+        bits.append(str(year))
+    return f"{pretty} ({', '.join(bits)})" if bits else pretty
+
+
+def _summary_tables(c, W, H, model: ReportModel, report_input: dict | None = None):
     e = model.edge_totals_ftin
     ft = model.edge_totals_ft
     stories = 2 if getattr(model, "two_story_area_sqft", 0.0) > 0 else 1
@@ -248,6 +266,11 @@ def _summary_tables(c, W, H, model: ReportModel):
             ("Total pitched area", f"{int(round(model.pitched_area_sqft))} sqft"),
             ("Total flat area", f"{int(round(model.flat_area_sqft))} sqft"),
             ("Total roof facets", f"{model.num_facets} facets"),
+            # What the roof was MEASURED FROM. Area and pitch accuracy depend
+            # materially on whether the chip was a 15 cm county ortho or a 30 cm
+            # NAIP tile, and the report said nothing -- two reports of very
+            # different reliability looked identical on the page.
+            ("Imagery source", _imagery_label(report_input or {})),
             ("Number of stories", f"{stories}"),
             ("Structure complexity", _structure_complexity(model.num_facets)),
             ("Predominant pitch", _pitch_slash(model.predominant_pitch)),

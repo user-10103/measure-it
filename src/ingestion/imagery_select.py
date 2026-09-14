@@ -150,8 +150,20 @@ def fetch_chip_best(lat: float, lon: float, state: str, out_dir,
         meta["imagery_year"] = year
         meta["imagery_county"] = county
         meta["imagery_attempts"] = attempts
-        logger.info("imagery: %s (%s m/px, %s) for (%.5f, %.5f) county=%s",
-                    tier, meta["imagery_gsd_m"], year, lat, lon, county)
+        if attempts:
+            # A DEGRADED source is a warning, not chatter: every better option
+            # failed and the report's area and pitch accuracy are now worse than
+            # they had to be. INFO was the wrong level -- demo_lib.live_report
+            # mutes every logger to ERROR, so the one message that explains a
+            # 30 cm chip where a 15 cm one was available was being emitted into
+            # silence and then discarded with the stdout buffer.
+            logger.warning(
+                "imagery DEGRADED to %s (%s m/px) at (%.5f, %.5f) county=%s "
+                "- declined: %s", tier, meta["imagery_gsd_m"], lat, lon,
+                county, "; ".join(attempts))
+        else:
+            logger.info("imagery: %s (%s m/px, %s) for (%.5f, %.5f) county=%s",
+                        tier, meta["imagery_gsd_m"], year, lat, lon, county)
         return chip, transform, png, anchor, meta
     raise RuntimeError(
         f"No imagery source succeeded at ({lat}, {lon}): " + "; ".join(attempts))

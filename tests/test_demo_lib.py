@@ -57,3 +57,41 @@ def test_show_table_renders_errors_without_raising():
         demo_lib.show_table(rows)
     text = out.getvalue()
     assert "ERR" in text and "ok" in text
+
+
+def test_escaped_exception_shows_its_message_not_just_its_class(monkeypatch):
+    """live_report has TWO error paths. Per-address failures are caught inside
+    run_sweep and reach the client with their message via _render_live. This is
+    the other one -- something escaping run_sweep entirely -- and it showed the
+    exception CLASS only, dropping str(exc) and the captured stdout buffer.
+
+    It is also the branch where the mute's justification breaks down: the
+    comment says silencing is acceptable because the PDF carries the verdict,
+    which is untrue when the exception means no PDF was produced."""
+    import sys
+    import types
+    import unittest.mock as mock
+
+    import demo_lib
+
+    shown = []
+    # live_report imports IPython.display inside the function; stub it so the
+    # branch is reachable in a plain test env (no notebook, no IPython).
+    disp = types.ModuleType("IPython.display")
+    disp.display = lambda x: shown.append(str(x))
+    disp.HTML = lambda h: h
+    disp.Image = mock.MagicMock()
+    ipy = types.ModuleType("IPython")
+    ipy.display = disp
+    monkeypatch.setitem(sys.modules, "IPython", ipy)
+    monkeypatch.setitem(sys.modules, "IPython.display", disp)
+
+    def _boom(*a, **kw):
+        raise RuntimeError("EPT tile fetch exhausted all retries")
+
+    monkeypatch.setattr(demo_lib, "run_sweep", _boom)
+    out = demo_lib.live_report("1 Any St", object(), object())
+    assert out is None
+    blob = "\n".join(shown)
+    assert "RuntimeError" in blob
+    assert "EPT tile fetch exhausted all retries" in blob, blob

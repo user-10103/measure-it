@@ -125,3 +125,39 @@ class _FakeResp:
 
     def __exit__(self, *a):
         return False
+
+
+def test_a_degraded_source_warns_rather_than_whispering(monkeypatch, tmp_path, caplog):
+    """imagery_attempts was recorded on meta and read by nothing -- not the
+    return value, not the PDF, not a visible log line. demo_lib.live_report
+    mutes every logger to ERROR, so an INFO message explaining why a 30 cm NAIP
+    chip was used where a 15 cm county ortho existed went nowhere at all."""
+    import logging
+
+    import src.ingestion.imagery_select as sel
+
+    def _boom(*a, **kw):
+        raise RuntimeError("ImageServer 503")
+
+    sentinel = ("chip", "transform", "png", "anchor", {"crs": "EPSG:26917"})
+    monkeypatch.setattr("src.ingestion.gis_chip.fetch_chip_gis", _boom)
+    monkeypatch.setattr("src.serve.report_service.fetch_chip",
+                        lambda *a, **kw: sentinel)
+    with caplog.at_level(logging.WARNING, logger="src.ingestion.imagery_select"):
+        sel.fetch_chip_best(27.9, -82.7, "FL", tmp_path, county="Pinellas")
+    msg = "\n".join(r.getMessage() for r in caplog.records)
+    assert "imagery DEGRADED to naip" in msg, msg
+    assert "ImageServer 503" in msg, msg          # and WHY the better one lost
+
+
+def test_the_best_source_does_not_warn(monkeypatch, tmp_path, caplog):
+    import logging
+
+    import src.ingestion.imagery_select as sel
+
+    sentinel = ("chip", "transform", "png", "anchor", {"crs": "EPSG:26917"})
+    monkeypatch.setattr("src.ingestion.gis_chip.fetch_chip_gis",
+                        lambda *a, **kw: sentinel)
+    with caplog.at_level(logging.WARNING, logger="src.ingestion.imagery_select"):
+        sel.fetch_chip_best(27.9, -82.7, "FL", tmp_path, county="Pinellas")
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]

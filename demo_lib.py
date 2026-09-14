@@ -284,9 +284,19 @@ def live_report(address, predict_facets, predict_outline, state=None,
             rows = run_sweep([address], predict_facets, predict_outline,
                              state=state, out_root=out_root, use_lidar=use_lidar)
     except Exception as exc:
+        # Per-address failures are caught inside run_sweep and DO reach the
+        # client with their message, via _render_live's row["error"] branch.
+        # This branch is the rarer one: something escaped run_sweep entirely.
+        # It used to show the exception CLASS only, discarding str(exc) and the
+        # captured buffer -- and it is exactly the branch where the mute's own
+        # justification fails, because "the delivered PDF carries the verdict"
+        # is untrue when the exception means there is no PDF.
+        tail = "\n".join(buf.getvalue().strip().splitlines()[-12:])
         display(HTML(
             "<h3 style='color:#b00'>Could not complete this address</h3>"
-            f"<div style='color:#777'>{type(exc).__name__}</div>"
+            f"<div style='color:#777'>{type(exc).__name__}: {exc}</div>"
+            + (f"<pre style='color:#999;font-size:11px;white-space:pre-wrap'>"
+               f"{tail}</pre>" if tail else "")
         ))
         return None
     return _render_live(rows[0] if rows else None, dpi)

@@ -221,3 +221,28 @@ def test_flat_slope_threshold_has_exactly_one_definition():
     assert pitch_policy.FLAT_SLOPE_DEG is metrics.FLAT_SLOPE_DEG
     src = open(pitch_policy.__file__).read()
     assert "FLAT_SLOPE_DEG = " not in src, "pitch_policy re-declares the threshold"
+
+
+def test_report_states_which_imagery_it_was_measured_from(tmp_path):
+    """A roof measured off a 30 cm NAIP tile and one measured off a 15 cm county
+    ortho produced identical-looking reports. The resolver recorded the source
+    on meta and the PDF printed nothing, so the reader could not tell which
+    reliability they were holding."""
+    import subprocess
+
+    from src.output.pdf_report import _imagery_label, generate_report
+
+    assert _imagery_label({}) == "not recorded"
+    assert _imagery_label({"imagery_source": "naip", "imagery_gsd_m": 0.3}) \
+        == "NAIP (0.30 m/px)"
+    assert _imagery_label({"imagery_source": "county-3in", "imagery_gsd_m": 0.0762,
+                           "imagery_year": 2024}) == "County 3-inch (0.08 m/px, 2024)"
+
+    ri = _good()
+    ri.update(imagery_source="naip", imagery_gsd_m=0.3)
+    out = tmp_path / "r.pdf"
+    generate_report(ri, str(out))
+    txt = subprocess.run(["pdftotext", str(out), "-"],
+                         capture_output=True, text=True).stdout
+    assert "Imagery source" in txt
+    assert "NAIP" in txt

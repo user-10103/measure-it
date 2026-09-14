@@ -165,6 +165,16 @@ class ReportResult:
     edge_totals_m: Dict[str, float] = field(default_factory=dict)
     num_pitched: int = 0         # facets with LiDAR pitch (0 = imagery-only report)
     qc: Dict = field(default_factory=dict)   # world-class gate result (report_qc.score_report)
+    # Which imagery this roof was measured from, and what was tried first. The
+    # resolver recorded both on `meta` and NOTHING read them: not the return
+    # value, not the PDF, not a visible log line -- so a report measured off a
+    # 30 cm NAIP chip was indistinguishable from one measured off a 15 cm
+    # county ortho, and the reason the better source was declined was
+    # unrecoverable. Area and pitch accuracy depend materially on which it was.
+    imagery_source: Optional[str] = None      # "county-3in" / "fl-statewide" / "naip"
+    imagery_gsd_m: Optional[float] = None
+    imagery_year: Optional[int] = None
+    imagery_attempts: list = field(default_factory=list)  # sources declined, with why
 
     def to_dict(self) -> dict:
         return {**self.__dict__}
@@ -384,6 +394,10 @@ def generate_roof_report(
                 label, len(report_input["facets"]), outline_found,
                 plan_area, "PASS" if qc["passed"] else "FAIL", pdf_path)
     return ReportResult(
+        imagery_source=meta.get("imagery_source"),
+        imagery_gsd_m=meta.get("imagery_gsd_m"),
+        imagery_year=meta.get("imagery_year"),
+        imagery_attempts=list(meta.get("imagery_attempts") or []),
         pdf_path=str(pdf_path), chip_path=chip_png, lat=lat, lon=lon,
         location_source=source, num_facets=len(report_input["facets"]),
         outline_found=outline_found, plan_area_m2=plan_area,
