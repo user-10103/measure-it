@@ -502,3 +502,114 @@ def test_a_clean_sparse_facet_is_recovered_not_dropped():
     assert ann, declines                                 # recovered, not dropped
     assert ann[1]["pitch_string"] == "6:12"
     assert ann[1]["explained_frac"] > 0.9                # it earned the relaxation
+
+
+# --- does reassignment actually rescue a bad facet? -------------------------
+# Step 2 (per-point plane assignment) is premised on a facet's points belonging
+# to a NEIGHBOUR's plane. That is a measurement, not a prediction, and this is
+# the probe that makes it one — run before writing the assignment step.
+
+def test_a_ribbon_spanning_two_planes_is_shown_to_belong_elsewhere():
+    """1250 Pineapple Ave facet 9: a 0.5 x 20 m ribbon, compactness 0.081,
+    paired as a flank against facets 1, 5, 6 and 10. The pathology is a facet
+    whose points come from MORE THAN ONE real plane -- which is what an
+    explained_frac near 0.5 means. Here a strip runs across the ridge, so each
+    real plane owns about half its points and its own fitted plane owns few."""
+    from shapely.geometry import box
+
+    from src.roofs.fuse_sam_lidar import point_membership_matrix
+
+    left = Facet(facet_id=1, polygon=box(0, 0, 10, 20))
+    right = Facet(facet_id=2, polygon=box(10, 0, 20, 20))
+    ribbon = Facet(facet_id=9, polygon=box(0, 9.5, 20, 10.5))   # across the ridge
+
+    def z(x, y):
+        return np.where(x <= 10, 0.5 * x, 0.5 * (20 - x))
+
+    pts = _grid_points(box(0, 0, 20, 20), z, step=0.5)
+    ann = {1: {"plane_abc": (0.5, 0.0, 0.0)},
+           2: {"plane_abc": (-0.5, 0.0, 10.0)},
+           9: {"plane_abc": (0.0, 0.0, 5.0)}}      # its flat best-fit: owns little
+    m = point_membership_matrix([left, right, ribbon], pts, ann, band_m=0.25)
+
+    assert m[9]["self"] < 0.60, m[9]
+    assert m[9]["best_other"][1] > m[9]["self"], m[9]
+    assert m[1]["self"] > 0.9 and m[2]["self"] > 0.9
+
+
+def test_a_ribbon_lying_ALONG_a_ridge_is_not_flagged_and_that_is_a_real_limit():
+    """A limitation found by a test of mine that was wrong first: near a ridge
+    every plane agrees within the band, so a sliver lying ALONG the seam reads
+    as well-explained by all of them. Per-point reassignment cannot rescue that
+    case -- there is no evidence to move the points on -- which is exactly why
+    the compactness guard is a COMPLEMENT to step 2 and not a stopgap for it."""
+    from shapely.geometry import box
+
+    from src.roofs.fuse_sam_lidar import point_membership_matrix
+
+    left = Facet(facet_id=1, polygon=box(0, 0, 10, 20))
+    right = Facet(facet_id=2, polygon=box(10, 0, 20, 20))
+    ribbon = Facet(facet_id=9, polygon=box(9.5, 0, 10.5, 20))   # along the ridge
+
+    def z(x, y):
+        return np.where(x <= 10, 0.5 * x, 0.5 * (20 - x))
+
+    pts = _grid_points(box(0, 0, 20, 20), z, step=0.5)
+    ann = {1: {"plane_abc": (0.5, 0.0, 0.0)},
+           2: {"plane_abc": (-0.5, 0.0, 10.0)},
+           9: {"plane_abc": (0.0, 0.0, 5.0)}}
+    m = point_membership_matrix([left, right, ribbon], pts, ann, band_m=0.25)
+    assert m[9]["self"] > 0.9          # indistinguishable from a good facet here
+    # geometry still condemns it: 1 x 20 m inside a 42 m perimeter
+    assert (4 * math.pi * ribbon.polygon.area
+            / ribbon.polygon.length ** 2) < 0.15
+
+
+def test_a_well_formed_facet_owns_its_points():
+    from shapely.geometry import box
+
+    from src.roofs.fuse_sam_lidar import format_membership, point_membership_matrix
+
+    f1 = Facet(facet_id=1, polygon=box(0, 0, 10, 10))
+    f2 = Facet(facet_id=2, polygon=box(10, 0, 20, 10))
+    pts = _grid_points(box(0, 0, 20, 10), lambda x, y: np.where(x <= 10, 0.5 * x, 0.5 * (20 - x)))
+    ann = {1: {"plane_abc": (0.5, 0.0, 0.0)}, 2: {"plane_abc": (-0.5, 0.0, 10.0)}}
+    m = point_membership_matrix([f1, f2], pts, ann, band_m=0.25)
+    assert m[1]["self"] > 0.95 and m[2]["self"] > 0.95
+    assert "ok" in format_membership(m)
+
+
+def test_probe_returns_empty_rather_than_guessing_without_planes():
+    from shapely.geometry import box
+
+    from src.roofs.fuse_sam_lidar import point_membership_matrix
+
+    f = Facet(facet_id=1, polygon=box(0, 0, 10, 10))
+    pts = _grid_points(f.polygon, lambda x, y: 0.5 * x)
+    assert point_membership_matrix([f], pts, {}) == {}
+
+
+def test_a_facet_spanning_three_planes_says_why_it_cannot_be_split(caplog):
+    """split_multiplane_facets makes ONE straight cut into exactly two pieces,
+    once, with no iteration — so a facet spanning three planes can never be
+    repaired, only detected later by facets_vs_lidar_planes. That is a real
+    limit, and `if len(pieces) != 2: continue` reported it identically to a cut
+    that merely produced a sliver."""
+    import logging
+
+    from shapely.geometry import box
+
+    from src.roofs.fuse_sam_lidar import split_multiplane_facets
+
+    f = Facet(facet_id=1, polygon=box(0, 0, 30, 10))
+
+    def z(x, y):                      # three planes: up, down, up
+        return np.where(x <= 10, 0.5 * x,
+                        np.where(x <= 20, 0.5 * (20 - x), 0.5 * (x - 20)))
+
+    pts = _grid_points(f.polygon, z, step=0.4)
+    with caplog.at_level(logging.INFO, logger="src.roofs.fuse_sam_lidar"):
+        split_multiplane_facets([f], pts)
+    msg = "\n".join(r.getMessage() for r in caplog.records)
+    # whatever it decided, it must not have decided it silently
+    assert "facet 1" in msg, msg

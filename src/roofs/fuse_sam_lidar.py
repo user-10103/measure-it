@@ -189,6 +189,77 @@ def required_plane_inliers(density: float) -> int:
     return max(ABS_MIN_PLANE_INLIERS, min(MIN_PLANE_INLIERS, scaled))
 
 
+def point_membership_matrix(facets, points, annotations,
+                            band_m: float = SPLIT_RESIDUAL_M):
+    """Whose plane actually explains each facet's points?
+
+    Answers, as a measurement, the question step 2 (per-point plane assignment)
+    is premised on: if a facet's points lie within the RANSAC band of a
+    NEIGHBOUR's plane, reassignment will move them there and the facet dissolves.
+    Run this BEFORE writing an assignment step, so "the ribbon dissolves" is a
+    number rather than a prediction.
+
+    Returns ``{facet_id: {"n": int, "self": float, "best_other": (fid, frac),
+    "frac": {fid: fraction within band of that facet's plane}}}``.
+
+    Reading it: a high diagonal means the facet owns its points. A LOW diagonal
+    with a HIGH off-diagonal means the points belong to the other facet and the
+    boundary is in the wrong place -- which is the whole indictment of deriving
+    facet boundaries from imagery masks. 1250 Pineapple Ave's facet 9 is a
+    0.5 x 20 m ribbon (compactness 0.081) paired against facets 1, 5, 6 and 10.
+
+    band_m defaults to SPLIT_RESIDUAL_M (0.30), the distance this module already
+    treats as "off the plane"; pass 0.25 to match the RANSAC inlier band.
+    """
+    from shapely import contains_xy
+
+    from src.roofs.facet_reconstruct import planes_from_annotations
+
+    xyz = _xyz(points)
+    usable = [f for f in facets
+              if getattr(f, "polygon", None) is not None and not f.polygon.is_empty
+              and annotations.get(getattr(f, "facet_id", None))]
+    planes = planes_from_annotations(usable, annotations)
+    if planes is None or not usable:
+        return {}
+
+    out: Dict[int, dict] = {}
+    for f in usable:
+        pts = xyz[contains_xy(f.polygon, xyz[:, 0], xyz[:, 1])]
+        n = len(pts)
+        if n == 0:
+            out[f.facet_id] = {"n": 0, "self": 0.0, "best_other": None, "frac": {}}
+            continue
+        frac = {}
+        for g, pl in zip(usable, planes):
+            resid = np.abs(pl.a * pts[:, 0] + pl.b * pts[:, 1] + pl.c - pts[:, 2])
+            frac[g.facet_id] = float((resid <= band_m).sum()) / n
+        others = {k: v for k, v in frac.items() if k != f.facet_id}
+        best = max(others.items(), key=lambda kv: kv[1]) if others else None
+        out[f.facet_id] = {"n": n, "self": frac[f.facet_id],
+                           "best_other": best, "frac": frac}
+    return out
+
+
+def format_membership(matrix: dict) -> str:
+    """One line per facet, for reading in a notebook without a dataframe."""
+    lines = ["facet   n   self  best-other  verdict"]
+    for fid, m in sorted(matrix.items()):
+        bo = m["best_other"]
+        if bo is None:
+            verdict, tail = "only facet", "      -     "
+        else:
+            tail = f"  {bo[0]:>3} {bo[1]:5.2f}"
+            if m["self"] < 0.60 and bo[1] > m["self"] + 0.15:
+                verdict = "POINTS BELONG TO %s" % bo[0]
+            elif m["self"] < 0.60:
+                verdict = "no plane owns it"
+            else:
+                verdict = "ok"
+        lines.append(f"{fid:>5} {m['n']:>4} {m['self']:6.2f}{tail}  {verdict}")
+    return "\n".join(lines)
+
+
 def annotate_facets_with_lidar(
     facets: List,
     points,
@@ -597,7 +668,23 @@ def split_multiplane_facets(facets: List, points):
         # A clean two-plane facet cuts into exactly two substantial pieces. More
         # pieces means the line raked across a concave boundary (a messy cut), not
         # a real crease.
-        if len(pieces) != 2 or min(g.area for g in pieces) < SPLIT_MIN_PIECE_FRAC * poly.area:
+        if len(pieces) != 2:
+            # A facet spanning THREE planes fails here identically to one whose
+            # cut merely shaved a sliver, and neither said so. The split is ONE
+            # straight cut into exactly two pieces, once, with no iteration — so
+            # a three-plane facet can never be repaired here, only detected
+            # later by facets_vs_lidar_planes. That is a real limit of the
+            # method, and it should read as a limit rather than as a mystery.
+            logger.info("facet %s: no plane split — the cut produced %d piece(s), "
+                        "not 2; a facet spanning more than two planes cannot be "
+                        "split by a single line", f.facet_id, len(pieces))
+            out.append(f)
+            continue
+        if min(g.area for g in pieces) < SPLIT_MIN_PIECE_FRAC * poly.area:
+            logger.info("facet %s: no plane split — smaller piece is %.0f%% of "
+                        "the facet (need %.0f%%)", f.facet_id,
+                        100 * min(g.area for g in pieces) / poly.area,
+                        100 * SPLIT_MIN_PIECE_FRAC)
             out.append(f)
             continue
         # Each piece must carry enough LiDAR points to fit its OWN plane. Without
