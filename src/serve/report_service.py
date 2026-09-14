@@ -72,7 +72,22 @@ def fetch_chip(lat: float, lon: float, state: str, out_dir: Path,
         dtype="uint8").astype(bool)
     png = out_dir / "chip.png"
     Image.fromarray(chip).save(png)
-    meta = {"crs": chip_crs, "footprint_wgs84": footprint.geometry.iloc[0]}
+    # Evidence about the SELECTION itself, which select_building computes and
+    # nobody keeps. measures_selected_building compares the roof against the
+    # footprint we picked, so if the PICK is wrong both sides are the same wrong
+    # building, the ratio is ~1.0, and the report ships clean. That check
+    # catches bad roof extraction given a good selection; it cannot catch a bad
+    # selection, and a wrong-building report is the one that ships confidently
+    # wrong rather than honestly stamped.
+    from shapely.geometry import Point as _Point
+    _pin = _Point(lon, lat)
+    _fp4326 = footprint.geometry.iloc[0]
+    meta = {"crs": chip_crs, "footprint_wgs84": _fp4326,
+            "select_dist_m": sel.get("dist_m"),
+            "select_rank": sel.get("rank"),
+            "select_n_candidates": (0 if sel.get("candidates") is None
+                                    else len(sel["candidates"])),
+            "pin_in_footprint": bool(_fp4326.contains(_pin))}
     return chip, transform, str(png), anchor, meta
 
 
@@ -412,7 +427,8 @@ def generate_roof_report(
     # inference and must say so rather than look identical to an in-domain one.
     # Survives the report_input rebuilds above by being set last.
     for _k in ("imagery_source", "imagery_gsd_m", "imagery_year",
-               "imagery_county"):
+               "imagery_county", "select_dist_m", "select_rank",
+               "select_n_candidates", "pin_in_footprint"):
         if _k in meta:
             report_input[_k] = meta[_k]
 

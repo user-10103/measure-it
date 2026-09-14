@@ -309,3 +309,35 @@ def test_gate_printer_shows_the_outcome_not_the_severity_class():
     ri["facets"][0]["surface_area_m2"] = 5_000_000        # CRS/units bug
     bad = format_report_qc(score_report(ri))
     assert "XX [FAIL] area_sane" in bad, bad               # a real failure still reads FAIL
+
+
+def test_selection_evidence_is_surfaced_because_the_area_check_cannot_see_it():
+    """measures_selected_building compares the roof against the footprint we
+    PICKED. If the pick is wrong, both sides are the same wrong building, the
+    ratio is ~1.0 and the report ships CLEAN — not stamped. That is the failure
+    that ends a client relationship, and the area check is structurally blind to
+    it. The selection's own evidence is the only independent signal."""
+    ri = _good()
+    ri.update(footprint_plan_area_m2=sum(f["plan_area_m2"] for f in ri["facets"]),
+              pin_in_footprint=False, select_dist_m=4.68, select_rank=1,
+              select_n_candidates=3)
+    r = score_report(ri)
+    sel = next(c for c in r["checks"] if c["id"] == "building_selection")
+    assert not sel["ok"]
+    assert "OUTSIDE" in sel["detail"] and "CLOSER building was passed over" in sel["detail"]
+    # the area check passes on the very same report — that is the whole point
+    area = next(c for c in r["checks"] if c["id"] == "measures_selected_building")
+    assert area["ok"]
+
+
+def test_a_clean_selection_does_not_warn():
+    ri = _good()
+    ri.update(pin_in_footprint=True, select_dist_m=0.0, select_rank=0,
+              select_n_candidates=1)
+    sel = next(c for c in score_report(ri)["checks"] if c["id"] == "building_selection")
+    assert sel["ok"], sel
+
+
+def test_selection_check_is_absent_without_the_evidence():
+    ids = {c["id"] for c in score_report(_good())["checks"]}
+    assert "building_selection" not in ids

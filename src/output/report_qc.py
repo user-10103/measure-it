@@ -223,6 +223,33 @@ def score_report(report_input: dict, model: ReportModel | None = None) -> dict:
             "building: too small means a fragment of it, too large means "
             "neighbouring structures were swallowed")
 
+    # --- was the right building SELECTED? ---
+    # measures_selected_building above compares the roof against the footprint
+    # we picked, so a wrong PICK makes both sides the same wrong building, the
+    # ratio lands near 1.0, and the report ships CLEAN. An under-segmented roof
+    # ships stamped and honest; a wrong-building roof ships confidently wrong.
+    #
+    # This is WARN, not FAIL, on purpose. The evidence it surfaces --
+    # pin-inside-footprint, distance from the geocoded pin, whether a closer
+    # candidate was passed over -- has never been recorded on a real run, so
+    # there is no basis yet for a threshold that would not be invented. Two
+    # false FAILs on legitimate addresses would be worse than the WARN. Collect
+    # the numbers across the probe set first, then tighten.
+    if "pin_in_footprint" in report_input:
+        inside = bool(report_input.get("pin_in_footprint"))
+        dist = report_input.get("select_dist_m")
+        rank = report_input.get("select_rank")
+        ncand = report_input.get("select_n_candidates")
+        suspicious = (not inside) or (rank not in (0, None))
+        bits = [f"pin {'inside' if inside else 'OUTSIDE'} the selected footprint"]
+        if dist is not None:
+            bits.append(f"{float(dist):.1f} m from it")
+        if rank not in (0, None):
+            bits.append(f"rank {rank} — a CLOSER building was passed over")
+        if ncand:
+            bits.append(f"{ncand} candidate(s) in range")
+        add("building_selection", WARN, not suspicious, "; ".join(bits))
+
     # --- obstructions accounted when the FO detector ran ---
     if "foreign_objects" in report_input:
         add("obstructions", WARN, model.num_obstructions >= 0,
