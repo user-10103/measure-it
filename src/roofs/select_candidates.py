@@ -134,10 +134,38 @@ def select_building(
         selected_idx = candidates["dist_m"].idxmin()
         selected = candidates.loc[selected_idx]
 
+        # MARGIN over the runner-up, which was computed and discarded. Absolute
+        # distance alone cannot tell a correct pick from a wrong one: address
+        # geocoders commonly return a street-front or parcel-centroid position,
+        # so 27 m is ordinary for a house set back on a deep lot AND is what a
+        # wrong building looks like. The margin separates them without inventing
+        # a distance threshold -- 27 m against a 60 m runner-up is unambiguous;
+        # 27 m against a 28 m runner-up is a coin toss that currently resolves
+        # silently, by float comparison, with no record that it was close.
+        #
+        # Note distance to a polygon CONTAINING the pin is 0, so a containing
+        # building always wins. A non-zero best distance therefore means NO
+        # candidate contains the pin -- 1250 Pineapple Ave selected at 26.86 m
+        # with 3 candidates in range.
+        dists = sorted(float(d) for d in candidates["dist_m"])
+        best = dists[0]
+        runner_up = dists[1] if len(dists) > 1 else None
+        margin = (runner_up - best) if runner_up is not None else None
+
         logger.info("=" * 60)
         logger.info("SELECTED BUILDING")
         logger.info("=" * 60)
         logger.info(f"Distance from pin: {selected['dist_m']:.2f}m")
+        if runner_up is None:
+            logger.info("Only candidate in range — nothing to disambiguate")
+        else:
+            logger.info(f"Runner-up: {runner_up:.2f}m (margin {margin:.2f}m)")
+            if margin < best:
+                logger.warning(
+                    "AMBIGUOUS building selection: best %.2f m, runner-up "
+                    "%.2f m — the margin is smaller than the distance itself, "
+                    "so the pick is not clearly the right building",
+                    best, runner_up)
         logger.info(f"Geometry type: {selected.geometry.geom_type}")
         logger.info(f"Bounds: {selected.geometry.bounds}")
         logger.info("=" * 60)
@@ -146,6 +174,8 @@ def select_building(
             "selected": selected,
             "candidates": candidates,
             "dist_m": selected["dist_m"],
+            "runner_up_m": runner_up,
+            "margin_m": margin,
             "rank": 0
         })
     else:

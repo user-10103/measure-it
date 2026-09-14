@@ -84,6 +84,8 @@ def fetch_chip(lat: float, lon: float, state: str, out_dir: Path,
     _fp4326 = footprint.geometry.iloc[0]
     meta = {"crs": chip_crs, "footprint_wgs84": _fp4326,
             "select_dist_m": sel.get("dist_m"),
+            "select_margin_m": sel.get("margin_m"),
+            "select_runner_up_m": sel.get("runner_up_m"),
             "select_rank": sel.get("rank"),
             "select_n_candidates": (0 if sel.get("candidates") is None
                                     else len(sel["candidates"])),
@@ -428,7 +430,8 @@ def generate_roof_report(
     # Survives the report_input rebuilds above by being set last.
     for _k in ("imagery_source", "imagery_gsd_m", "imagery_year",
                "imagery_county", "select_dist_m", "select_rank",
-               "select_n_candidates", "pin_in_footprint"):
+               "select_n_candidates", "pin_in_footprint",
+               "select_margin_m", "select_runner_up_m"):
         if _k in meta:
             report_input[_k] = meta[_k]
 

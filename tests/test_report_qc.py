@@ -341,3 +341,29 @@ def test_a_clean_selection_does_not_warn():
 def test_selection_check_is_absent_without_the_evidence():
     ids = {c["id"] for c in score_report(_good())["checks"]}
     assert "building_selection" not in ids
+
+
+def test_an_ambiguous_pick_is_flagged_even_when_the_pin_is_inside():
+    """Absolute distance cannot separate a correct pick from a wrong one:
+    address geocoders commonly return a street-front or parcel-centroid
+    position, so 27 m is ordinary for a house set back on a deep lot AND is
+    what a wrong building looks like. The MARGIN over the runner-up separates
+    them without inventing a distance threshold."""
+    ri = _good()
+    ri.update(pin_in_footprint=True, select_dist_m=26.9, select_rank=0,
+              select_n_candidates=3, select_runner_up_m=28.4,
+              select_margin_m=1.5)
+    sel = next(c for c in score_report(ri)["checks"] if c["id"] == "building_selection")
+    assert not sel["ok"], sel
+    assert "AMBIGUOUS" in sel["detail"], sel
+
+
+def test_a_clear_winner_is_not_flagged_for_distance_alone():
+    """27 m from the pin with the next building 60 m away is unambiguous — the
+    check must not fire merely because the geocoder sits at the street."""
+    ri = _good()
+    ri.update(pin_in_footprint=True, select_dist_m=26.9, select_rank=0,
+              select_n_candidates=3, select_runner_up_m=60.0,
+              select_margin_m=33.1)
+    sel = next(c for c in score_report(ri)["checks"] if c["id"] == "building_selection")
+    assert sel["ok"], sel

@@ -240,7 +240,14 @@ def score_report(report_input: dict, model: ReportModel | None = None) -> dict:
         dist = report_input.get("select_dist_m")
         rank = report_input.get("select_rank")
         ncand = report_input.get("select_n_candidates")
-        suspicious = (not inside) or (rank not in (0, None))
+        margin = report_input.get("select_margin_m")
+        # Ambiguous when the runner-up is about as close as the pick. Relative,
+        # so it needs no distance threshold: a geocoder that returns a
+        # street-front position makes 27 m ordinary, and the same 27 m is what
+        # a wrong building looks like. The margin tells them apart.
+        ambiguous = (margin is not None and dist is not None
+                     and float(margin) < float(dist))
+        suspicious = (not inside) or (rank not in (0, None)) or ambiguous
         bits = [f"pin {'inside' if inside else 'OUTSIDE'} the selected footprint"]
         if dist is not None:
             bits.append(f"{float(dist):.1f} m from it")
@@ -248,6 +255,11 @@ def score_report(report_input: dict, model: ReportModel | None = None) -> dict:
             bits.append(f"rank {rank} — a CLOSER building was passed over")
         if ncand:
             bits.append(f"{ncand} candidate(s) in range")
+        if ambiguous:
+            bits.append(f"AMBIGUOUS — runner-up at "
+                        f"{float(report_input['select_runner_up_m']):.1f} m, "
+                        f"margin {float(margin):.1f} m is smaller than the "
+                        f"distance itself")
         add("building_selection", WARN, not suspicious, "; ".join(bits))
 
     # --- obstructions accounted when the FO detector ran ---
