@@ -572,17 +572,21 @@ def absorb_unannotated_orphans(
         if best_id is None:
             keep[o.facet_id] = o.polygon        # nothing to join — keep it
             continue
-        # "Small" was measured against the whole ROOF and never against the
-        # RECIPIENT. On a 215 m2 roof, 5% is 10.75 m2 — so a 7.70 m2 orphan
-        # counted as small and was folded into a 0.40 m2 facet, a 19x gain. The
-        # result keeps the 0.40 m2 facet's identity AND its annotation: a plane
-        # fitted to 0.40 m2 of points, now describing 8.10 m2 of roof. That
-        # facet then reads as spanning more than one plane — a defect
-        # manufactured HERE, not by segmentation.
+        # "Small" is measured against the whole ROOF and never against the
+        # RECIPIENT. On a 215 m2 roof, 5% is 10.75 m2, so an orphan can be many
+        # times the area of the facet it joins — and the result keeps the
+        # RECIPIENT's id, so it inherits an annotation whose plane was fitted to
+        # a fraction of the merged area. An absorption is a minor correction:
+        # the MEASURED part has to stay the majority.
         #
-        # An absorption is a minor correction, so the MEASURED part has to stay
-        # the majority. Anything else is the orphan swallowing the facet and
-        # inheriting its pitch.
+        # NOTE ON PROVENANCE: this guard was added on the strength of a measured
+        # "0.40 m2 -> 7.70 m2, 19x" on 1250 Pineapple Ave. That number was an
+        # artefact — facet ids are RENUMBERED at the end of this function, and
+        # the probe tabulated before/after by id across that boundary, so it
+        # compared two different facets wearing the same label. On a re-run this
+        # guard does not fire on that roof and nothing was ever swallowed there.
+        # The guard is kept because it is correct on its own terms, not because
+        # it fixed an observed defect.
         if o.polygon.area > keep[best_id].area:
             logger.info("facet %s: not absorbed — the orphan is %.2f m2 against "
                         "a %.2f m2 measured neighbour; absorbing would leave the "
