@@ -87,6 +87,21 @@ def county_for(lat: float, lon: float, timeout: int = 30) -> Optional[str]:
     return state_county_for(lat, lon, timeout)[1]
 
 
+def _usable(ep: dict) -> bool:
+    """False for an endpoint that cannot answer without a token we do not have.
+
+    FCDOP was listed as public and returns 499 Token Required to everything, so
+    every Florida address outside the three registered counties spent a request
+    and a timeout on it before degrading to NAIP. Trying an endpoint that CAN
+    answer is worth a timeout; trying one that provably cannot is not.
+    """
+    import os
+
+    if not ep.get("requires_token"):
+        return True
+    return bool(os.getenv(ep.get("token_env") or ""))
+
+
 def candidate_sources(lat: float, lon: float, state: str,
                       county: Optional[str] = None) -> List[Tuple[str, dict]]:
     """Imagery sources to try, best resolution first.
@@ -105,7 +120,7 @@ def candidate_sources(lat: float, lon: float, state: str,
     if ep:
         tier = "county-3in" if ep.get("reachable", True) else "county-3in-unverified"
         ranked.append((tier, ep))
-    if str(state).upper() == "FL":
+    if str(state).upper() == "FL" and _usable(FCDOP_FALLBACK):
         ranked.append(("fl-statewide", FCDOP_FALLBACK))
     ranked.append(("naip", {}))
     return ranked
@@ -146,7 +161,17 @@ def fetch_chip_best(lat: float, lon: float, state: str, out_dir,
         chip, transform, png, anchor, meta = out
         meta = dict(meta)
         meta["imagery_source"] = tier
-        meta["imagery_gsd_m"] = gsd if gsd is not None else meta.get("gsd_m")
+        if gsd is None:
+            # NAIP's meta carries no gsd_m, so the warning that exists to say
+            # WHAT resolution we fell back to printed "(None m/px)". The pixel
+            # size is right there on the affine - transform.a is the x scale.
+            gsd = meta.get("gsd_m")
+            if gsd is None and transform is not None:
+                try:
+                    gsd = abs(float(transform.a))
+                except Exception:  # noqa: BLE001 - advisory
+                    gsd = None
+        meta["imagery_gsd_m"] = gsd
         meta["imagery_year"] = year
         meta["imagery_county"] = county
         meta["imagery_attempts"] = attempts

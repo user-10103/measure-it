@@ -10,9 +10,25 @@ import pytest
 from src.ingestion.imagery_select import candidate_sources, fetch_chip_best
 
 
-def test_registered_county_outranks_statewide_which_outranks_naip():
+def test_registered_county_outranks_naip():
     tiers = [t for t, _ in candidate_sources(27.9, -82.7, "FL", "Pinellas")]
-    assert tiers == ["county-3in", "fl-statewide", "naip"]
+    assert tiers == ["county-3in", "naip"]
+
+
+def test_token_gated_statewide_is_not_attempted_without_a_token(monkeypatch):
+    """FCDOP was listed as public and answers everything, including a bare
+    ?f=json, with {"error":{"code":499,"message":"Token Required"}} (verified
+    2026-09-14). So every Florida address outside the three registered counties
+    spent a request and a timeout on an endpoint that has never been able to
+    answer, before degrading to NAIP -- which is exactly what 1250 Pineapple Ave
+    was doing. Trying an endpoint that CAN answer is worth a timeout; trying one
+    that provably cannot is not."""
+    monkeypatch.delenv("FDEP_ARCGIS_TOKEN", raising=False)
+    assert [t for t, _ in candidate_sources(28.13, -80.63, "FL", "Brevard")] == ["naip"]
+    # ...but it is a credential gap, not a dead endpoint: supply one and it returns
+    monkeypatch.setenv("FDEP_ARCGIS_TOKEN", "x")
+    assert "fl-statewide" in [t for t, _ in
+                              candidate_sources(28.13, -80.63, "FL", "Brevard")]
 
 
 def test_county_flagged_as_blocking_is_still_attempted():
@@ -48,7 +64,7 @@ def test_falls_through_to_naip_when_gis_servers_fail(monkeypatch, tmp_path):
                                                county="Pinellas")
     assert meta["imagery_source"] == "naip"
     # and it says what it tried, so a silent downgrade is impossible
-    assert len(meta["imagery_attempts"]) == 2
+    assert len(meta["imagery_attempts"]) == 1     # statewide is token-gated, skipped
     assert "ImageServer 503" in meta["imagery_attempts"][0]
 
 
@@ -161,3 +177,29 @@ def test_the_best_source_does_not_warn(monkeypatch, tmp_path, caplog):
     with caplog.at_level(logging.WARNING, logger="src.ingestion.imagery_select"):
         sel.fetch_chip_best(27.9, -82.7, "FL", tmp_path, county="Pinellas")
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_degraded_warning_states_the_resolution_it_fell_back_to(monkeypatch, tmp_path, caplog):
+    """The warning printed "(None m/px)" — the one number it exists to give.
+    NAIP's meta carries no gsd_m, but the pixel size is on the affine."""
+    import logging
+
+    from affine import Affine
+
+    import src.ingestion.imagery_select as sel
+
+    def _boom(*a, **kw):
+        raise RuntimeError("503")
+
+    naip = ("chip", Affine(0.3, 0.0, 0.0, 0.0, -0.3, 0.0), "png", "anchor",
+            {"crs": "EPSG:26917"})
+    monkeypatch.setattr("src.ingestion.gis_chip.fetch_chip_gis", _boom)
+    monkeypatch.setattr("src.serve.report_service.fetch_chip",
+                        lambda *a, **kw: naip)
+    with caplog.at_level(logging.WARNING, logger="src.ingestion.imagery_select"):
+        _c, _t, _p, _a, meta = sel.fetch_chip_best(27.9, -82.7, "FL", tmp_path,
+                                                   county="Pinellas")
+    assert meta["imagery_gsd_m"] == pytest.approx(0.3)
+    msg = "\n".join(r.getMessage() for r in caplog.records)
+    assert "None m/px" not in msg, msg
+    assert "0.3 m/px" in msg, msg

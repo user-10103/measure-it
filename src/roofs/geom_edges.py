@@ -271,12 +271,31 @@ def classify_internal_edges(edges: List[dict], facets, annotations,
                 # was unrecoverable from the output -- the same silence the LiDAR
                 # declines had. Say it, so the cause is one run away, not a
                 # guess. INFO because on a healthy roof this fires rarely.
+                # Flank SHAPE, not just identity. On 1250 Pineapple Ave one
+                # 112 sqft flat facet (id 9) was named as a flank for seven
+                # separate hips against five different partners, scattered
+                # across a 2,318 sqft roof. That is either a bad pairing or a
+                # bad facet, and area+compactness tells them apart: a thin
+                # sliver snaking along real seams is legitimately "adjacent" to
+                # all of them, which would make the facet the defect rather
+                # than the algorithm. compactness = 4*pi*A/P^2 (1.0 = circle,
+                # -> 0 as a shape gets sliver-like).
+                shape = []
+                for fid in near:
+                    poly = dict(lookup).get(fid)
+                    if poly is None or poly.area <= 0:
+                        shape.append(None)
+                        continue
+                    p_len = poly.length or 1.0
+                    shape.append((round(poly.area, 1),
+                                  round(4 * math.pi * poly.area / (p_len ** 2), 3)))
                 logger.info(
                     "edge relabel %s -> %s (%.1f m): flanks=%s is_flat=%s "
-                    "aspect=%s", e["edge_type"], etype,
+                    "aspect=%s area_compactness=%s", e["edge_type"], etype,
                     LineString(pts).length, near,
                     [None if a is None else a.get("is_flat") for a in (a1, a2)],
-                    [None if a is None else a.get("aspect_deg") for a in (a1, a2)])
+                    [None if a is None else a.get("aspect_deg") for a in (a1, a2)],
+                    shape)
             out.append({"edge_type": etype,
                         "length_m": float(LineString(pts).length),
                         "geometry_xy": pts})

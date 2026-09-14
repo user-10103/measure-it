@@ -45,11 +45,19 @@ COUNTY_ENDPOINTS = {
 }
 
 # Statewide fallback: FL County Digital Orthoimagery Program (FCDOP), 6-inch
-# (0.15 m), 3-year cycle, public record. Covers any county lacking a 3-inch set.
+# (0.15 m), 3-year cycle. It was recorded here as reachable and public. It is
+# NOT: the service answers every request, including a bare ?f=json, with
+#     {"error":{"code":499,"message":"Token Required"}}
+# Verified 2026-09-14 against both the ImageServer and its parent folder. That
+# is why 1250 Pineapple Ave kept measuring off 30 cm NAIP -- the resolver was
+# correctly falling through to a statewide set that has never been able to
+# answer. Needs an ArcGIS token; skipped entirely unless one is configured,
+# rather than spending a request and a timeout on a guaranteed 499.
 FCDOP_FALLBACK = {
     "url": "https://ca.dep.state.fl.us/arcgis/rest/services/Imagery/"
            "Aerial_Imagery_2019/ImageServer",
-    "gsd_m": 0.15, "year": 2019, "reachable": True,
+    "gsd_m": 0.15, "year": 2019, "reachable": False,
+    "requires_token": True, "token_env": "FDEP_ARCGIS_TOKEN",
 }
 
 
