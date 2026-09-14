@@ -298,9 +298,26 @@ def generate_roof_report(
         # so "unspecified" had to be diagnosed by re-running the address. Cleared
         # before each re-annotation so it describes the FINAL facet set.
         lidar_declines: dict = {}
+
+        def _membership(stage, fset, anns):
+            """Which facet set the matrix is read on changes what it means: the
+            annotate stage holds the raw SAM facets, the split stage holds them
+            cut, the merge stage holds the final set the report ships. A "no
+            plane owns it" verdict on the FINAL set is measured against a
+            narrower plane set than an earlier stage offers, so the stage has to
+            be stated alongside the number."""
+            if _os.getenv("MEASURE_IT_MEMBERSHIP") != "1":
+                return
+            from src.roofs.fuse_sam_lidar import (format_membership,
+                                                  point_membership_matrix)
+            logger.info("point membership [%s, %d facets]:\n%s", stage,
+                        len(fset), format_membership(
+                            point_membership_matrix(fset, lidar_points, anns)))
+
         annotations = annotate_facets_with_lidar(roof.facets, lidar_points,
                                           ground_z=ground_z,
                                           declines=lidar_declines)
+        _membership("annotate (raw SAM facets)", roof.facets, annotations)
         # split facets that LiDAR proves span TWO planes (fixes model UNDER-
         # segmentation — a hip wing returned as one blob; area-conserving; off
         # via MEASURE_IT_PLANE_SPLIT=0). Runs before the merge so a freshly split
@@ -319,6 +336,7 @@ def generate_roof_report(
                 annotations = annotate_facets_with_lidar(roof.facets, lidar_points,
                                                   ground_z=ground_z,
                                                   declines=lidar_declines)
+                _membership("after split", roof.facets, annotations)
                 report_input = facets_to_report_input(
                     roof, label, aerial_image_path=chip_png)
         # merge facets LiDAR proves are one plane (fixes model over-
@@ -335,6 +353,7 @@ def generate_roof_report(
                 annotations = annotate_facets_with_lidar(merged, lidar_points,
                                               ground_z=ground_z,
                                               declines=lidar_declines)
+                _membership("after merge", merged, annotations)
                 report_input = facets_to_report_input(
                     roof, label, aerial_image_path=chip_png)
         # Independent check on FACET COUNT, which the gate cannot see for itself:
