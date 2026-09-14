@@ -42,7 +42,38 @@ COUNTY_ENDPOINTS = {
                "Aerials/Aerials2023/ImageServer",
         "gsd_m": 0.0762, "year": 2023, "reachable": False,  # blocks some IPs
     },
+    # Found via the ArcGIS Online public search API and verified live
+    # 2026-09-14: ?f=json returns the service (pixelSizeX below) and an
+    # anonymous exportImage returns real pixels. No token, no account.
+    "Sarasota": {
+        "url": "https://ags3.scgov.net/agsimg/rest/services/Imagery2020s/"
+               "SC2026WM/ImageServer",
+        "gsd_m": 0.0762, "year": 2026, "reachable": True,
+    },
+    "Broward": {
+        "url": "https://bcgishub.broward.org/image/rest/services/Imagery/"
+               "aerialscurrent/ImageServer",
+        "gsd_m": 0.1524, "year": 2025, "reachable": True,
+    },
 }
+
+# HOW TO GROW THIS REGISTRY (no token, no account):
+#
+#   curl -sG --data-urlencode 'q=<county> imagery type:"Image Service" access:public' \
+#        --data 'f=json&num=20' https://www.arcgis.com/sharing/rest/search
+#
+# then for each candidate url, GET "<url>?f=json" and read pixelSizeX for the
+# native GSD, and confirm an anonymous exportImage returns image bytes. Counties
+# publish these themselves, so coverage grows one verified endpoint at a time.
+#
+# Verified failures are worth recording too, so they are not re-probed:
+#   ca.dep.state.fl.us (FCDOP statewide) -- 499 Token Required on everything
+#   gis.brevardfl.gov                    -- does not resolve
+#   maps.brevardfl.gov                   -- Cloudflare challenge (403)
+#
+# NOTE these servers commonly answer with JPEG, not PNG. gis_chip._export_image
+# must keep accepting jpgpng: a PNG-only magic-number check silently discards
+# working 3-inch imagery.
 
 # Statewide fallback: FL County Digital Orthoimagery Program (FCDOP), 6-inch
 # (0.15 m), 3-year cycle. It was recorded here as reachable and public. It is

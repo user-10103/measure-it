@@ -130,3 +130,28 @@ def test_selection_cache_evicts_and_keys_on_location(monkeypatch):
         sc._cache_put((i, i, 100.0, True), {"n": i})
     assert len(sc._SELECT_CACHE) == sc._SELECT_CACHE_MAX
     assert (0, 0, 100.0, True) not in sc._SELECT_CACHE     # oldest evicted
+
+
+def test_registry_holds_the_verified_public_counties():
+    """Public county ImageServers at 3-6 inch exist and need no token at all --
+    found through the ArcGIS Online public search API and each verified live
+    (service ?f=json plus an anonymous exportImage returning real pixels) on
+    2026-09-14. Growing coverage does not depend on obtaining FCDOP credentials."""
+    from src.ingestion.county_imagery import COUNTY_ENDPOINTS, endpoint_for
+
+    for county, gsd in (("Sarasota", 0.0762), ("Broward", 0.1524),
+                        ("Pinellas", 0.0762)):
+        ep = COUNTY_ENDPOINTS[county]
+        assert ep["gsd_m"] == gsd
+        assert ep["reachable"] is True
+        assert ep["url"].endswith("ImageServer")
+    # every registered county beats the token-gated statewide fallback
+    assert endpoint_for("Sarasota")["gsd_m"] < endpoint_for("Nowhere")["gsd_m"]
+
+
+def test_statewide_fallback_is_marked_as_needing_a_token():
+    from src.ingestion.county_imagery import FCDOP_FALLBACK
+
+    assert FCDOP_FALLBACK["requires_token"] is True
+    assert FCDOP_FALLBACK["reachable"] is False
+    assert FCDOP_FALLBACK["token_env"] == "FDEP_ARCGIS_TOKEN"
