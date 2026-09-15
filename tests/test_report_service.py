@@ -158,3 +158,71 @@ def test_no_facets_still_produces_pdf(tmp_path):
     assert res.num_facets == 0
     with open(res.pdf_path, "rb") as fh:
         assert fh.read(5) == b"%PDF-"                # graceful, not a crash
+
+
+# --- the LiDAR-facet experiment actually fires ------------------------------
+# This session's recurring failure is a diagnostic that was emitted into
+# somewhere nobody reads, so the code "did not run" as far as anyone could tell.
+# Before spending a GPU run on MEASURE_IT_LIDAR_FACETS=1, prove the branch
+# executes and swaps the facets.
+
+def _hip_points(ox=500000.0, oy=3100000.0, step=0.5):
+    """A four-plane hip in the same metric CRS fake_chip uses."""
+    xs, ys = np.meshgrid(np.arange(12, 48, step), np.arange(12, 48, step))
+    x, y = xs.ravel(), ys.ravel()
+    z = np.minimum(np.minimum(x - 12, 48 - x), np.minimum(y - 12, 48 - y)) * 0.4
+    return np.column_stack([ox + x, oy - y, 10.0 + z])
+
+
+def test_lidar_facet_experiment_replaces_the_sam_facets(tmp_path, monkeypatch, caplog):
+    import logging
+
+    monkeypatch.setenv("MEASURE_IT_LIDAR_FACETS", "1")
+    with caplog.at_level(logging.WARNING, logger="src.serve.report_service"):
+        res = generate_roof_report(
+            (28.0303, -80.69809), "FL", fake_facets, fake_outline,
+            out_dir=tmp_path, label="experiment", chip_fetcher=fake_chip,
+            lidar_points=_hip_points(),
+        )
+    msg = "\n".join(r.getMessage() for r in caplog.records)
+    # "LIDAR FACETS" alone would also match the FAILURE message — assert the
+    # swap, not merely that the branch was entered. Loose assertions of exactly
+    # this shape are what let several of this session's diagnostics look like
+    # they had run when they had not.
+    assert "LIDAR FACETS: replacing" in msg, f"no swap happened: {msg}"
+    assert "keeping SAM facets" not in msg, msg
+    assert res.pdf_path and res.num_facets >= 1
+
+
+def test_the_experiment_is_off_unless_asked(tmp_path, monkeypatch, caplog):
+    """Default OFF: a normal run must be byte-identical in behaviour."""
+    import logging
+
+    monkeypatch.delenv("MEASURE_IT_LIDAR_FACETS", raising=False)
+    with caplog.at_level(logging.WARNING, logger="src.serve.report_service"):
+        res = generate_roof_report(
+            (28.0303, -80.69809), "FL", fake_facets, fake_outline,
+            out_dir=tmp_path, label="control", chip_fetcher=fake_chip,
+            lidar_points=_hip_points(),
+        )
+    assert "LIDAR FACETS" not in "\n".join(r.getMessage() for r in caplog.records)
+    assert res.num_facets == 4              # the SAM facets, untouched
+
+
+def test_a_failed_experiment_keeps_the_sam_facets(tmp_path, monkeypatch, caplog):
+    """An empty result means 'this did not work here'. It must never make a
+    report worse — the SAM facets stay and the run continues."""
+    import logging
+
+    monkeypatch.setenv("MEASURE_IT_LIDAR_FACETS", "1")
+    monkeypatch.setattr("src.roofs.lidar_facets.lidar_facets_from_points",
+                        lambda *a, **k: [])
+    with caplog.at_level(logging.WARNING, logger="src.serve.report_service"):
+        res = generate_roof_report(
+            (28.0303, -80.69809), "FL", fake_facets, fake_outline,
+            out_dir=tmp_path, label="fallback", chip_fetcher=fake_chip,
+            lidar_points=_hip_points(),
+        )
+    msg = "\n".join(r.getMessage() for r in caplog.records)
+    assert "keeping SAM facets" in msg, msg
+    assert res.num_facets == 4
