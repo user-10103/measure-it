@@ -150,14 +150,22 @@ def test_lidar_fetch_failure_degrades_gracefully(tmp_path, monkeypatch):
         assert fh.read(5) == b"%PDF-"
 
 
-def test_no_facets_still_produces_pdf(tmp_path):
-    res = generate_roof_report(
-        (28.0, -80.7), "FL", no_outline, no_outline,
-        out_dir=tmp_path, chip_fetcher=fake_chip,
-    )
-    assert res.num_facets == 0
-    with open(res.pdf_path, "rb") as fh:
-        assert fh.read(5) == b"%PDF-"                # graceful, not a crash
+def test_no_facets_refuses_rather_than_shipping_an_empty_pdf(tmp_path):
+    """CONTRACT CHANGE, deliberate. This used to assert a PDF was produced --
+    "graceful, not a crash". Field evidence says graceful-but-empty is the worse
+    failure: 425 NE 9 Ave, Fort Lauderdale shipped a PDF whose headline number
+    was 0 sqft, from 26 raw SAM masks of which none covered the footprint.
+
+    Not crashing is still the requirement, and a ValueError satisfies it -- it is
+    the same shape as select_building's "No buildings found within..." which
+    run_sweep already records as an ERROR row rather than dying. The difference
+    is that the client gets a stated refusal instead of a document asserting a
+    roof has no area."""
+    with pytest.raises(ValueError, match="No roof facets found"):
+        generate_roof_report(
+            (28.0, -80.7), "FL", no_outline, no_outline,
+            out_dir=tmp_path, chip_fetcher=fake_chip,
+        )
 
 
 # --- the LiDAR-facet experiment actually fires ------------------------------
@@ -226,3 +234,35 @@ def test_a_failed_experiment_keeps_the_sam_facets(tmp_path, monkeypatch, caplog)
     msg = "\n".join(r.getMessage() for r in caplog.records)
     assert "keeping SAM facets" in msg, msg
     assert res.num_facets == 4
+
+
+def test_a_roof_with_no_facets_refuses_instead_of_reporting_zero(tmp_path):
+    """425 NE 9 Ave, Fort Lauderdale: 26 raw SAM masks, none covering the
+    footprint ("no roof mask covers the footprint (best 0%)"), a PDF reporting
+    0 sqft, gate score 29%. The gate caught it and the document shipped anyway.
+
+    A PDF whose headline number is 0 sqft looks like a finished deliverable and
+    is worse than no PDF. Refusing is recoverable; a confident zero is not."""
+    def no_facets(chip, concept):
+        return np.zeros((0, H, W), bool), np.zeros((0,))
+
+    with pytest.raises(ValueError, match="No roof facets found"):
+        generate_roof_report(
+            (28.0303, -80.69809), "FL", no_facets, fake_outline,
+            out_dir=tmp_path, label="unmeasurable", chip_fetcher=fake_chip,
+        )
+
+
+def test_the_refusal_names_the_imagery_it_failed_on(tmp_path):
+    """Broward serves 0.1524 m/px against 0.0762 in the counties that worked --
+    roughly half the model's ~800 px training chip. The refusal has to carry the
+    imagery tier, or the resolution floor stays uncharacterised."""
+    def no_facets(chip, concept):
+        return np.zeros((0, H, W), bool), np.zeros((0,))
+
+    with pytest.raises(ValueError) as e:
+        generate_roof_report(
+            (28.0303, -80.69809), "FL", no_facets, fake_outline,
+            out_dir=tmp_path, label="unmeasurable", chip_fetcher=fake_chip,
+        )
+    assert "m/px" in str(e.value), str(e.value)

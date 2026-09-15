@@ -304,6 +304,24 @@ def generate_roof_report(
 
     # LiDAR fusion: annotate -> evidence-based coplanar merge -> pitch fields
     # -> edge refinements (rakes, flashing, true 3D lengths)
+    # A roof with NO facets is not a measurement, and a PDF reporting 0 sqft is
+    # worse than no PDF: it looks like a finished deliverable and its headline
+    # number is a lie. 425 NE 9 Ave, Fort Lauderdale produced exactly that -- 26
+    # raw SAM masks, none covering the footprint ("best 0%"), a 0 sqft report,
+    # and a gate score of 29%. The gate caught it; the document still shipped.
+    #
+    # This is the third of the three outcomes the pipeline owes a client:
+    # measured / measured-with-stated-limits / CANNOT MEASURE. Refusing is
+    # recoverable; a confident zero is not.
+    if not roof.facets:
+        raise ValueError(
+            f"No roof facets found at ({lat}, {lon}) — the segmentation "
+            f"produced nothing that covers the building footprint. This "
+            f"address cannot be measured from the available imagery "
+            f"({meta.get('imagery_source') or 'unknown'}, "
+            f"{meta.get('imagery_gsd_m') or '?'} m/px); no report is produced "
+            f"rather than one reporting 0 sqft.")
+
     if lidar_points is not None and roof.facets:
         from src.roofs.fuse_sam_lidar import (
             annotate_facets_with_lidar, fuse_into_report_input,
