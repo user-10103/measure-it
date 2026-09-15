@@ -336,6 +336,31 @@ def generate_roof_report(
                         len(fset), format_membership(
                             point_membership_matrix(fset, lidar_points, anns)))
 
+        # EXPERIMENT (MEASURE_IT_LIDAR_FACETS=1, default OFF): draw the facet
+        # boundaries from the LiDAR instead of from the SAM masks.
+        #
+        # The live architecture is "SAM for shape, LiDAR for pitch" (e60c1ee),
+        # formalized as read-only annotation of FROZEN SAM facets. Every defect
+        # chased on 1250 Pineapple Ave is downstream of that one decision: LiDAR
+        # can grade a facet, cut it once, or merge it, but it may never REDRAW
+        # it, so explained_frac is a metric instead of a correction and a
+        # 0.5 x 20 m ribbon survives everything.
+        #
+        # The premise was never tested. segment_facets_planes has no call site
+        # in the entire history, and the 56-facet fragmentation that condemned
+        # point clustering belonged to PEARL, a different algorithm.
+        if _os.getenv("MEASURE_IT_LIDAR_FACETS") == "1":
+            from src.roofs.lidar_facets import lidar_facets_from_points
+            _lf = lidar_facets_from_points(lidar_points, outline=roof.outline)
+            if _lf:
+                logger.warning("LIDAR FACETS: replacing %d SAM facet(s) with %d "
+                               "drawn from the point cloud", len(roof.facets), len(_lf))
+                roof.facets = _lf
+                report_input = facets_to_report_input(
+                    roof, label, aerial_image_path=chip_png)
+            else:
+                logger.warning("LIDAR FACETS: produced nothing — keeping SAM facets")
+
         annotations = annotate_facets_with_lidar(roof.facets, lidar_points,
                                           ground_z=ground_z,
                                           declines=lidar_declines)
