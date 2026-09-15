@@ -165,6 +165,41 @@ def score_report(report_input: dict, model: ReportModel | None = None) -> dict:
                 "multi-facet sloped roof has NO ridge or hip length -> edge typing failed")
         add("eaves_present", WARN, ef.get("eave", 0) > 0.5,
             "eaves present" if ef.get("eave", 0) > 0.5 else "no eave length")
+
+        # --- did we NAME the internal edges, or just find them? ---
+        # edges_typed above asks only whether ridge+hip exceeds half a foot.
+        # 3004 Marble Crest returned 0 ft of ridge and 13 ft of hip against an
+        # EagleView truth of 78 and 242 — and 13 > 0.5, so it passed. Measured
+        # against six EagleView Premium reports, our linear footage lands at
+        # 16-42% of truth while AREA is within 5-16%, because area is the
+        # integral of the outline and survives under-segmentation. Nothing in
+        # the gate looked at edge totals at all, so a report could lose 80% of
+        # its ridge and hip and still pass.
+        #
+        # This is the symmetric partner of pitch_resolved: unknown is tolerable
+        # when it is declared, never when it is silent. The logs show the
+        # mechanism — "ridge -> unspecified" with "aspect=[359.80, 359.80]",
+        # two flanks at the same azimuth. The classifier is right to refuse; the
+        # fault is upstream, adjacent facets handed the same plane.
+        #
+        # The bright line is RELATIVE and needs no invented constant: failing
+        # when we could not name more internal edge than we could name. A
+        # magnitude check ("hips should be the largest category, and ours are
+        # ~0") needs the benchmark distribution first and is deliberately not
+        # attempted here.
+        internal = sum(ef.get(k, 0.0) for k in
+                       ("ridge", "hip", "valley", "transition", "parapet",
+                        "wall_flashing", "step_flashing"))
+        unspec = ef.get("unspecified", 0.0)
+        if internal + unspec > 0.5:
+            share = unspec / (internal + unspec)
+            add("edges_resolved", FAIL, unspec <= internal,
+                f"{share:.0%} of internal edge length is unspecified"
+                if unspec <= internal else
+                f"{unspec:.0f} ft of internal edge could not be typed against "
+                f"{internal:.0f} ft that could ({share:.0%} unspecified) — the "
+                "report names less of the roof's edge structure than it fails "
+                "to name")
     else:
         add("edges_typed", WARN, True, "single-facet roof; ridge/hip N/A")
 

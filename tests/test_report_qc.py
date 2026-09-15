@@ -367,3 +367,48 @@ def test_a_clear_winner_is_not_flagged_for_distance_alone():
               select_margin_m=33.1)
     sel = next(c for c in score_report(ri)["checks"] if c["id"] == "building_selection")
     assert sel["ok"], sel
+
+
+def _edged(**totals):
+    ri = _good()
+    ri["edges"] = [{"edge_type": k, "length_m": v,
+                    "geometry_xy": [[0, i], [v, i]]}
+                   for i, (k, v) in enumerate(totals.items())]
+    return ri
+
+
+def test_a_roof_that_cannot_name_its_own_edges_fails():
+    """edges_typed only asks whether ridge+hip exceeds half a foot. 3004 Marble
+    Crest returned 0 ft of ridge and 13 ft of hip against an EagleView truth of
+    78 and 242 — and 13 > 0.5, so it passed. Across six EagleView Premium
+    reports our linear footage lands at 16-42% of truth while area is within
+    5-16%, because area is the integral of the outline and survives
+    under-segmentation. Nothing in the gate looked at edge totals at all."""
+    ri = _edged(ridge=2.0, unspecified=20.0, eave=16.0)
+    r = score_report(ri)
+    failed = {c["id"] for c in r["checks"] if c["severity"] == "FAIL" and not c["ok"]}
+    assert "edges_resolved" in failed, r["checks"]
+    detail = next(c["detail"] for c in r["checks"] if c["id"] == "edges_resolved")
+    assert "fails to name" in detail or "unspecified" in detail
+
+
+def test_a_roof_whose_edges_are_mostly_typed_passes():
+    ri = _edged(ridge=10.0, hip=20.0, valley=5.0, unspecified=2.0, eave=16.0)
+    chk = next(c for c in score_report(ri)["checks"] if c["id"] == "edges_resolved")
+    assert chk["ok"], chk
+
+
+def test_the_check_reports_the_share_even_when_it_passes():
+    """The magnitude problem — hips are the largest category in all six
+    EagleView reports and ours come back near zero — needs the benchmark
+    distribution before any threshold. Reporting the share on every run is how
+    that distribution gets collected."""
+    ri = _edged(ridge=10.0, hip=20.0, unspecified=2.0, eave=16.0)
+    chk = next(c for c in score_report(ri)["checks"] if c["id"] == "edges_resolved")
+    assert "%" in chk["detail"]
+
+
+def test_absent_when_there_are_no_internal_edges_to_judge():
+    ri = _edged(eave=16.0)
+    ids = {c["id"] for c in score_report(ri)["checks"]}
+    assert "edges_resolved" not in ids
