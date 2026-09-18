@@ -135,6 +135,57 @@ def cmd_remap(a):
         print("(already on the standard schema — nothing to do)")
 
 
+def cmd_verify(a):
+    """Assert a COCO corpus carries the facets and masks it is supposed to.
+
+    Image count and annotation TOTAL are useless as checks here. If the GIS
+    remap is skipped, Option A still yields 25,054 images and 247,774
+    annotations — only the roof_polygon/facet SPLIT moves, from
+    16,860/230,914 to 87,200/160,574. The facet number is the entire signal.
+
+    Mask coverage is the other half. Phase 1's checkpoint was trained box-only
+    because prep silently dropped segmentation, and the useful property is that
+    prep_sam3_facets never opens image pixels -- dimensions come from the COCO
+    json -- so mask survival can be asserted on annotations alone, on a CPU box,
+    with no images staged and no GPU rented.
+    """
+    bad = False
+    for split in ("train", "valid", "test"):
+        d = load(Path(a.dataset) / split)
+        if d is None:
+            continue
+        cats = {c["id"]: c.get("name", "") for c in d.get("categories", [])}
+        anns = d["annotations"]
+        n_facet = sum(1 for x in anns if x.get("category_id") == 2)
+        n_poly = sum(1 for x in anns if x.get("category_id") == 1)
+        with_seg = sum(1 for x in anns if x.get("segmentation"))
+        facet_seg = sum(1 for x in anns
+                        if x.get("category_id") == 2 and x.get("segmentation"))
+        print(f"  [{split}] {len(d['images'])} images | "
+              f"roof_polygon {n_poly} | facet {n_facet} | "
+              f"segmentation {with_seg}/{len(anns)} (facets {facet_seg}/{n_facet})")
+        if 1 in cats and cats[1].lower() in FACET_NAMES:
+            print(f"    STOP: category 1 is named {cats[1]!r} — this corpus has "
+                  f"NOT been remapped. Its facets will be read as roof_polygon "
+                  f"and dropped by prep.")
+            bad = True
+        if n_facet and facet_seg < n_facet:
+            print(f"    STOP: {n_facet - facet_seg} facet annotation(s) carry no "
+                  f"segmentation. This is exactly how the box-only checkpoint "
+                  f"was produced.")
+            bad = True
+        if a.expect_facets is not None and split == a.expect_split:
+            if n_facet != a.expect_facets:
+                print(f"    STOP: expected {a.expect_facets} facets in {split}, "
+                      f"found {n_facet}.")
+                bad = True
+            else:
+                print(f"    OK: facet count matches the expected {a.expect_facets}.")
+    if bad:
+        sys.exit(1)
+    print("\nPASS: schema remapped, masks present, counts as expected.")
+
+
 def held_out_ids(eval_dir: str, splits: tuple[str, ...]) -> set[str]:
     """Roofs that must never be trained on.
 
@@ -248,6 +299,9 @@ def main():
     p.add_argument("--splits", nargs="+", default=["test"]); p.set_defaults(fn=cmd_check)
     p = sub.add_parser("remap"); p.add_argument("--input", required=True)
     p.add_argument("--output", required=True); p.set_defaults(fn=cmd_remap)
+    p = sub.add_parser("verify"); p.add_argument("--dataset", required=True)
+    p.add_argument("--expect-facets", type=int, default=None)
+    p.add_argument("--expect-split", default="train"); p.set_defaults(fn=cmd_verify)
     p = sub.add_parser("plan"); p.add_argument("--dataset", required=True)
     p.add_argument("--max-repeat", type=int, default=6); p.set_defaults(fn=cmd_plan)
     a = ap.parse_args()
