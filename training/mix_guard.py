@@ -11,6 +11,24 @@ These three subcommands cover what it does not:
   plan    counts -> repeats that satisfy the targets  (rule 3)
 
 Roof identity is img["address_id"] when present, else the file_name stem.
+
+PROVENANCE. Drafted by the RunPod/AWS browser agent and relayed as text; it could
+not push from its sandbox. It was reviewed and re-typed here, and the load-bearing
+behaviour was verified against the REAL corpus rather than taken on trust:
+
+    $ mix_guard.py check --dataset training/roof_dataset \
+                         --eval training/roof_dataset_clean_eval
+    held-out roofs: 197   leaked into training: 240
+      [train] 913 roofs, 191 also held out
+      [valid] 266 roofs,  49 also held out
+
+That measurement, not the authorship, is why this is trusted. The four CLI-flag
+corrections reported alongside it were likewise checked against the scripts
+before the runbook was changed.
+
+NO UNIT TESTS YET. A test file exists in the browser agent's session and has not
+reached this repo. Until it lands, `check` is gating a paid GPU run on one live
+verification and nothing else.
 """
 from __future__ import annotations
 import argparse, itertools, json, os, sys
