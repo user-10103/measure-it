@@ -203,3 +203,69 @@ def test_degraded_warning_states_the_resolution_it_fell_back_to(monkeypatch, tmp
     msg = "\n".join(r.getMessage() for r in caplog.records)
     assert "None m/px" not in msg, msg
     assert "0.3 m/px" in msg, msg
+
+
+# --- a blocked county must not cost 45 s per address ------------------------
+
+def test_an_unverified_endpoint_gets_a_short_timeout(monkeypatch, tmp_path):
+    """The docstring used to claim "the cost of being wrong is one timeout".
+    Measured: a blocked county hangs the full 45 s while Sarasota answers in
+    1.1 s, and a sweep pays that on EVERY address in that county. The attempt
+    is still right — the flag was measured from one datacenter IP — but a
+    reachable county answers fast, so a long wait is evidence of a block."""
+    import src.ingestion.imagery_select as sel
+
+    sel._DEAD_ENDPOINTS.clear()
+    seen = {}
+
+    def _capture(*a, **kw):
+        seen["timeout"] = kw.get("timeout")
+        raise RuntimeError("timed out")
+
+    sentinel = ("chip", None, "png", "anchor", {"crs": "EPSG:26917"})
+    monkeypatch.setattr("src.ingestion.gis_chip.fetch_chip_gis", _capture)
+    monkeypatch.setattr("src.serve.report_service.fetch_chip",
+                        lambda *a, **kw: sentinel)
+    sel.fetch_chip_best(28.0, -82.5, "FL", tmp_path, county="Hillsborough")
+    assert seen["timeout"] == sel.UNVERIFIED_TIMEOUT_S, seen
+
+
+def test_a_verified_endpoint_keeps_the_long_timeout(monkeypatch, tmp_path):
+    import src.ingestion.imagery_select as sel
+
+    sel._DEAD_ENDPOINTS.clear()
+    seen = {}
+
+    def _capture(*a, **kw):
+        seen["timeout"] = kw.get("timeout")
+        raise RuntimeError("nope")
+
+    sentinel = ("chip", None, "png", "anchor", {"crs": "EPSG:26917"})
+    monkeypatch.setattr("src.ingestion.gis_chip.fetch_chip_gis", _capture)
+    monkeypatch.setattr("src.serve.report_service.fetch_chip",
+                        lambda *a, **kw: sentinel)
+    sel.fetch_chip_best(27.9, -82.7, "FL", tmp_path, county="Pinellas")
+    assert seen["timeout"] == sel.VERIFIED_TIMEOUT_S, seen
+
+
+def test_a_dead_endpoint_is_attempted_once_per_process(monkeypatch, tmp_path):
+    """A 20-address sweep must not pay the same dead endpoint twenty times.
+    The first failure is the measurement."""
+    import src.ingestion.imagery_select as sel
+
+    sel._DEAD_ENDPOINTS.clear()
+    calls = []
+
+    def _boom(*a, **kw):
+        calls.append(1)
+        raise RuntimeError("timed out")
+
+    sentinel = ("chip", None, "png", "anchor", {"crs": "EPSG:26917"})
+    monkeypatch.setattr("src.ingestion.gis_chip.fetch_chip_gis", _boom)
+    monkeypatch.setattr("src.serve.report_service.fetch_chip",
+                        lambda *a, **kw: sentinel)
+    for _ in range(4):
+        _c, _t, _p, _a, meta = sel.fetch_chip_best(28.0, -82.5, "FL", tmp_path,
+                                                   county="Hillsborough")
+    assert len(calls) == 1, f"attempted {len(calls)} times, should be 1"
+    assert any("skipped" in a for a in meta["imagery_attempts"]), meta

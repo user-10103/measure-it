@@ -79,7 +79,8 @@ def _export_image(endpoint: str, bounds, sr: int, w: int, h: int,
 
 def fetch_chip_gis(lat: float, lon: float, state: str, out_dir,
                    chip_buffer_m: Optional[float] = None,
-                   endpoint: Optional[dict] = None):
+                   endpoint: Optional[dict] = None,
+                   timeout: int = 60):
     """GIS aerial chip for a location, matching ``fetch_chip``'s 5-tuple.
 
     Returns ``(chip HxWx3 uint8, rasterio Affine (UTM), png_path, anchor bool
@@ -117,7 +118,7 @@ def fetch_chip_gis(lat: float, lon: float, state: str, out_dir,
     h = max(8, round((north - south) / gsd))
 
     # 3. fetch + decode; trust the requested grid (resize if the server rounded)
-    png = _export_image(ep["url"], bounds, utm, w, h)
+    png = _export_image(ep["url"], bounds, utm, w, h, timeout=timeout)
     img = np.asarray(Image.open(io.BytesIO(png)).convert("RGB"))
     if img.shape[:2] != (h, w):
         img = np.asarray(Image.fromarray(img).resize((w, h), Image.BILINEAR))

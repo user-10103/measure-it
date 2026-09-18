@@ -29,6 +29,17 @@ _CENSUS_COORD = ("https://geocoding.geo.census.gov/geocoder/geographies/"
                  "coordinates")
 _UA = {"User-Agent": "Mozilla/5.0 (measure-it imagery-select)"}
 
+# An endpoint flagged unreachable is still worth ONE fast attempt: the flag was
+# measured from a single datacenter IP. But a reachable county answers quickly
+# (Sarasota: 1.1 s), so a long wait is evidence of a block, not of slowness.
+# Six seconds distinguishes them and bounds the cost.
+UNVERIFIED_TIMEOUT_S = 6
+VERIFIED_TIMEOUT_S = 60
+
+# Endpoints that failed in THIS process. A 20-address sweep must not pay the
+# same dead endpoint twenty times; the first failure is the measurement.
+_DEAD_ENDPOINTS: set = set()
+
 _STATE_ABBR = {
     "Alabama": "AL", "Alaska": "AK", "Arizona": "AZ", "Arkansas": "AR",
     "California": "CA", "Colorado": "CO", "Connecticut": "CT",
@@ -109,9 +120,14 @@ def candidate_sources(lat: float, lon: float, state: str,
     ``reachable`` is a RANKING hint, not a veto: it was measured from one
     datacenter IP, and an endpoint that blocks that IP may well answer from
     the machine actually running this. So an unreachable-flagged county is
-    demoted below the statewide set but still attempted — the cost of being
-    wrong is one timeout, and the cost of skipping is serving NAIP to a model
-    that was never shown it.
+    still attempted, and the tier says so ("county-3in-unverified").
+
+    That rationale holds. What did NOT hold is the sentence this docstring used
+    to carry — "the cost of being wrong is one timeout". Measured: a blocked
+    county hangs for the full 45 s while Sarasota answers in 1.1 s, and a sweep
+    pays that on EVERY address in that county before degrading to NAIP. The
+    attempt is right; its cost was unbounded. See UNVERIFIED_TIMEOUT_S and the
+    per-process dead-endpoint memo in fetch_chip_best.
     """
     from src.ingestion.county_imagery import COUNTY_ENDPOINTS, FCDOP_FALLBACK
 
@@ -150,10 +166,21 @@ def fetch_chip_best(lat: float, lon: float, state: str, out_dir,
                                       chip_buffer_m=chip_buffer_m)
                 gsd, year = None, None
             else:
+                url = ep.get("url")
+                if url in _DEAD_ENDPOINTS:
+                    attempts.append(f"{tier}: skipped — failed earlier in this "
+                                    f"process")
+                    continue
+                # Bound the wait on an endpoint we already believe is blocked.
+                tmo = (UNVERIFIED_TIMEOUT_S if tier.endswith("-unverified")
+                       else VERIFIED_TIMEOUT_S)
                 out = fetch_chip_gis(lat, lon, state, out_dir,
-                                     chip_buffer_m=chip_buffer_m, endpoint=ep)
+                                     chip_buffer_m=chip_buffer_m, endpoint=ep,
+                                     timeout=tmo)
                 gsd, year = ep.get("gsd_m"), ep.get("year")
         except Exception as e:  # noqa: BLE001 - try the next source
+            if tier != "naip" and ep.get("url"):
+                _DEAD_ENDPOINTS.add(ep["url"])
             attempts.append(f"{tier}: {type(e).__name__}: {e}")
             logger.info("imagery %s unavailable at (%.5f, %.5f): %s",
                         tier, lat, lon, e)
