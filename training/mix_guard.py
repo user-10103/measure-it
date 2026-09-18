@@ -164,6 +164,23 @@ def cmd_verify(a):
         print(f"  [{split}] {len(d['images'])} images | "
               f"roof_polygon {n_poly} | facet {n_facet} | "
               f"segmentation {with_seg}/{len(anns)} (facets {facet_seg}/{n_facet})")
+        if a.sam3:
+            # prep_sam3_facets OUTPUT, not a merge input. It deliberately emits a
+            # SINGLE facet class at id 1 named "roof facet" (the concept prompt),
+            # so the remap check below would STOP on a perfectly correct corpus.
+            # What matters here instead: every annotation must carry a mask.
+            n_seg = sum(1 for x in anns if x.get("segmentation"))
+            print(f"    sam3 prep output: {n_seg}/{len(anns)} annotations carry a mask")
+            if anns and n_seg < len(anns):
+                print(f"    STOP: {len(anns)-n_seg} annotation(s) reached SAM3 "
+                      f"training data with NO mask. prep's own guard only fires "
+                      f"when seg_src>0 and seg_ok==0 — it cannot see masks that "
+                      f"were stripped UPSTREAM, which is this case.")
+                bad = True
+            elif not anns:
+                print("    STOP: prep produced zero annotations.")
+                bad = True
+            continue
         if 1 in cats and cats[1].lower() in FACET_NAMES:
             print(f"    STOP: category 1 is named {cats[1]!r} — this corpus has "
                   f"NOT been remapped. Its facets will be read as roof_polygon "
@@ -301,7 +318,11 @@ def main():
     p.add_argument("--output", required=True); p.set_defaults(fn=cmd_remap)
     p = sub.add_parser("verify"); p.add_argument("--dataset", required=True)
     p.add_argument("--expect-facets", type=int, default=None)
-    p.add_argument("--expect-split", default="train"); p.set_defaults(fn=cmd_verify)
+    p.add_argument("--expect-split", default="train")
+    p.add_argument("--sam3", action="store_true",
+                   help="dataset is prep_sam3_facets OUTPUT (single facet class at "
+                        "id 1); assert masks, skip the remap check")
+    p.set_defaults(fn=cmd_verify)
     p = sub.add_parser("plan"); p.add_argument("--dataset", required=True)
     p.add_argument("--max-repeat", type=int, default=6); p.set_defaults(fn=cmd_plan)
     a = ap.parse_args()
