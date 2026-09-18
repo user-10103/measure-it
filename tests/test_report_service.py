@@ -266,3 +266,49 @@ def test_the_refusal_names_the_imagery_it_failed_on(tmp_path):
             out_dir=tmp_path, label="unmeasurable", chip_fetcher=fake_chip,
         )
     assert "m/px" in str(e.value), str(e.value)
+
+
+# --- shared-boundary tiling on the serving path -----------------------------
+# geom_edges reads interior ridge/hip/valley edges from boundary.intersection of
+# adjacent facets, and facet polygons never come out exactly coincident. Its own
+# docstring records the result: "1600 Sarno shipped with edge_totals_m ==
+# {'eave': 65.28}" — every internal seam ABSENT rather than mislabelled.
+
+def test_tiling_runs_by_default_and_reports_what_it_moved(tmp_path, caplog):
+    import logging
+
+    with caplog.at_level(logging.INFO, logger="src.serve.report_service"):
+        res = generate_roof_report(
+            (28.0303, -80.69809), "FL", fake_facets, fake_outline,
+            out_dir=tmp_path, label="tiled", chip_fetcher=fake_chip,
+        )
+    msg = "\n".join(r.getMessage() for r in caplog.records)
+    assert "tiled seams" in msg, msg
+    assert res.num_facets == 4                 # count preserved, ids preserved
+    assert set(res.edge_totals_m) & {"ridge", "hip", "valley"}
+
+
+def test_tiling_can_be_disabled(tmp_path, monkeypatch, caplog):
+    import logging
+
+    monkeypatch.setenv("MEASURE_IT_TILE", "0")
+    with caplog.at_level(logging.INFO, logger="src.serve.report_service"):
+        generate_roof_report(
+            (28.0303, -80.69809), "FL", fake_facets, fake_outline,
+            out_dir=tmp_path, label="untiled", chip_fetcher=fake_chip,
+        )
+    assert "tiled seams" not in "\n".join(r.getMessage() for r in caplog.records)
+
+
+def test_tiling_failure_never_breaks_the_report(tmp_path, monkeypatch):
+    """tile_facets is a post-process. A failure must leave the facets as they
+    were and let the report continue — it can only ever improve seams."""
+    def _boom(*a, **kw):
+        raise RuntimeError("noding failed")
+
+    monkeypatch.setattr("src.roofs.tiling.tile_facets", _boom)
+    res = generate_roof_report(
+        (28.0303, -80.69809), "FL", fake_facets, fake_outline,
+        out_dir=tmp_path, label="tilefail", chip_fetcher=fake_chip,
+    )
+    assert res.num_facets == 4 and res.pdf_path

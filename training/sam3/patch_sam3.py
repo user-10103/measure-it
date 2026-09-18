@@ -72,8 +72,27 @@ def main():
     args = ap.parse_args()
     if not os.path.isdir(os.path.join(args.sam3_root, "sam3")):
         sys.exit(f"sam3 package not found under {args.sam3_root}")
-    for line in apply_all(args.sam3_root):
+    results = apply_all(args.sam3_root)
+    for line in results:
         print(line)
+    # FAIL LOUD. Every result was printed and the process exited 0 regardless —
+    # including "NOT FOUND (SKIPPED)" and "anchor not found (SKIPPED)". A caller
+    # checking the exit code, or a runbook saying "STOP if it reports no files
+    # changed", saw success on a run where NOTHING was patched.
+    #
+    # That is how the mix15 run reached the GPU without the matcher NaN guard:
+    # the word SKIPPED was in the output and nothing enforced it. The guard was
+    # credited twice, by two different readers, because the script said 0.
+    skipped = [r for r in results if "SKIPPED" in r]
+    if skipped:
+        sys.exit("\nFAILED: " + str(len(skipped)) + " patch(es) did not apply:\n  "
+                 + "\n  ".join(skipped)
+                 + "\n\nThe matcher NaN guard and/or the fused-MLP grad fallback are "
+                   "NOT in place. Training will run without them and can crash "
+                   "mid-run with no checkpoint beyond the last sync. Fix the "
+                   "--sam3-root path, or update the anchors for this sam3 version, "
+                   "before renting GPU time.")
+    print("\nOK: every patch applied or already present.")
 
 
 if __name__ == "__main__":

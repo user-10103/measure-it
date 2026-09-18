@@ -129,6 +129,15 @@ def _index_density(props: dict, geom) -> float:
     the actual parcel (one Tampa roof came back at ~1.3 pts/m2), and that cannot be
     known without fetching the tiles. Proper per-parcel density gating is future work.
     """
+    # NOTE the unit. `geom.area` here is SQUARE DEGREES (the entwine index is
+    # WGS84 geojson), so this is NOT points per square metre and never was — it
+    # is usable only as a relative tiebreak between overlapping surveys, and
+    # even that is distorted by latitude. The real figure is measured after the
+    # fetch by fuse_sam_lidar.survey_density.
+    #
+    # Consequence of ranking (-year, -density, name): a 30 pts/m2 2018 survey
+    # loses to a 1.3 pts/m2 2020 survey, and nothing rejects the sparse one --
+    # density decides ORDER, never admission.
     pts = props.get("points") or props.get("count")
     try:
         pts = float(pts)
@@ -188,6 +197,12 @@ def discover_ept_candidates(lat: float, lon: float,
         })
 
     out.sort(key=lambda d: (-d["year"], -d["density"], d["name"]))
+    if len(out) > 1:
+        logger.info("EPT candidates ranked newest-first: %s",
+                    ", ".join(f"{d['name'][:38]}({d['year']})" for d in out[:4]))
+        logger.info("NOTE density tiebreak is in square DEGREES, not pts/m2 — a "
+                    "denser older survey can lose to a sparser newer one; the "
+                    "real density is measured after the fetch")
     return out
 
 

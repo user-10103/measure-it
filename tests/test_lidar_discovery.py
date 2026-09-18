@@ -317,3 +317,35 @@ def test_release_marker_must_be_its_own_token():
     assert _collection_year("SOMEWHERE_ATLAS_2019") == 2019   # word merely ending in las
     assert _collection_year("COUNTY_REL_2020") == 0
     assert _collection_year("LAUREL_2020") == 2020            # ends in "REL"
+
+
+def test_an_entirely_unclassified_survey_warns_that_filtering_cannot_run():
+    """`if (c > 0).any()` guards the vegetation filter, so a survey that
+    classifies NOTHING — every point class 0 — skips filtering entirely and tree
+    canopy reaches the plane fits. That is the standing explanation for facets
+    whose plane explains 33-47% of their own points on a treed chip: the filter
+    is correct, it just never ran.
+
+    There is no safe automatic fix (with no classification there is no way to
+    tell canopy from roof), but such a report must not look identical to one
+    built on filtered returns."""
+    import inspect
+    from src.lidar import ept_fetch
+
+    src = inspect.getsource(ept_fetch)
+    assert "ENTIRELY UNCLASSIFIED" in src
+    assert "n_unclassified" in src
+    # the warning must precede the filter it explains
+    assert src.index("ENTIRELY UNCLASSIFIED") < src.index("if (c > 0).any()")
+
+
+def test_density_tiebreak_records_that_it_is_not_pts_per_m2():
+    """_index_density divides by geom.area in SQUARE DEGREES. It is a relative
+    tiebreak, not a density, and a 30 pts/m2 2018 survey can lose to a
+    1.3 pts/m2 2020 one — density decides ORDER, never admission."""
+    import inspect
+    from src.lidar import dataset_discovery
+
+    src = inspect.getsource(dataset_discovery)
+    assert "SQUARE DEGREES" in src
+    assert "never admission" in src

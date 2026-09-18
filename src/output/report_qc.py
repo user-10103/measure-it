@@ -309,6 +309,19 @@ def score_report(report_input: dict, model: ReportModel | None = None) -> dict:
         if (mostly_flat or model.predominant_pitch not in ("0:12", "unspecified"))
         else f"predominant pitch {model.predominant_pitch} on a mostly-sloped roof (pitch failure)")
 
+    # --- empirical roof grammar, from six EagleView Premium reports ---
+    # The first bounds in this gate derived from GROUND TRUTH rather than
+    # invented from a single address. All WARN: the sample is six FL
+    # hip-dominant tract homes from one contractor in one quarter (effective
+    # n~4, zero "Simple" roofs, zero parapets), padded 20%, and this pipeline is
+    # scoped USA-wide. A breach means look, not fail.
+    try:
+        from src.output.roof_grammar import grammar_findings
+        for f in grammar_findings(report_input, model):
+            add(f["id"], WARN, f["ok"], f["detail"])
+    except Exception as e:  # noqa: BLE001 - advisory, never fatal
+        add("roof_grammar", WARN, True, f"grammar not evaluated ({type(e).__name__})")
+
     # --- honesty: review load surfaced ---
     add("review_surfaced", WARN, True,
         f"{model.num_needs_review} of {model.num_facets} facets need review")

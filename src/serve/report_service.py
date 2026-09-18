@@ -155,6 +155,49 @@ def _lidar_clip_geometry(meta: dict, roof):
         return fp
 
 
+def _tile_seams(roof, where: str) -> None:
+    """Snap facets into a shared-boundary partition, in place.
+
+    THE DEFECT THIS FIXES. geom_edges reads interior ridge/hip/valley edges from
+    boundary.intersection of adjacent facets, and facet polygons never come out
+    exactly coincident: masks_to_facets runs Douglas-Peucker per facet
+    INDEPENDENTLY, and merge_coplanar_facets pushes them through union/buffer.
+    Its own docstring records the consequence -- "1600 Sarno shipped with
+    edge_totals_m == {"eave": 65.28}", every internal seam absent rather than
+    mislabelled. Today that is survived only by a 10 cm snap tolerance, and the
+    classifier still refuses on flanks that were handed the same plane.
+
+    tile_facets nodes and polygonizes one arrangement, so adjacent facets share
+    EXACT segments by construction. It returns a list parallel to its input --
+    same ids, same order -- so annotations keyed by facet_id stay aligned, and
+    it never raises: a facet that cannot be re-tiled keeps its original polygon.
+
+    Off via MEASURE_IT_TILE=0.
+    """
+    import os as _o
+    if _o.getenv("MEASURE_IT_TILE", "1") != "1":
+        return
+    pairs = [(f.facet_id, f.polygon) for f in roof.facets
+             if getattr(f, "polygon", None) is not None and not f.polygon.is_empty]
+    if len(pairs) < 2:
+        return
+    try:
+        from src.roofs.tiling import tile_facets
+        tiled = dict(tile_facets(pairs, outline=getattr(roof, "outline", None)))
+    except Exception as e:  # noqa: BLE001 - tiling is a post-process, never fatal
+        logger.warning("tiling skipped at %s (%s)", where, e)
+        return
+    moved = 0
+    for f in roof.facets:
+        new = tiled.get(f.facet_id)
+        if new is not None and not new.is_empty and new.geom_type == "Polygon":
+            if not new.equals(f.polygon):
+                moved += 1
+            f.polygon = new
+    logger.info("tiled seams [%s]: %d/%d facet(s) re-snapped to a shared "
+                "partition", where, moved, len(pairs))
+
+
 def _fallback_outline(roof):
     """Outline from the facet union when the zero-shot prompt missed — the
     report then still gets a perimeter (eaves) and the facets tile something."""
@@ -278,6 +321,7 @@ def generate_roof_report(
         if roof.outline is not None:
             logger.warning("zero-shot outline missed — using facet-union fallback")
 
+    _tile_seams(roof, "after segmentation")
     report_input = facets_to_report_input(roof, label, aerial_image_path=chip_png)
 
     # auto-fetch LiDAR when enabled (env MEASURE_IT_LIDAR=1 or use_lidar=True)
@@ -414,6 +458,9 @@ def generate_roof_report(
             merged, absorbed = absorb_unannotated_orphans(merged, annotations)
             if changed or absorbed:
                 roof.facets = merged
+                # merge_coplanar_facets unions through buffer(+0.05).buffer(-0.05),
+                # which is exactly what destroys coincidence again.
+                _tile_seams(roof, "after merge")
                 lidar_declines.clear()
                 annotations = annotate_facets_with_lidar(merged, lidar_points,
                                               ground_z=ground_z,

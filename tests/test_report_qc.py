@@ -412,3 +412,58 @@ def test_absent_when_there_are_no_internal_edges_to_judge():
     ri = _edged(eave=16.0)
     ids = {c["id"] for c in score_report(ri)["checks"]}
     assert "edges_resolved" not in ids
+
+
+# --- empirical roof grammar (six EagleView Premium reports) ------------------
+
+def test_grammar_flags_a_roof_with_too_few_eave_runs():
+    """The strongest rule in the reference data: almost every facet has exactly
+    ONE eave run (0.93-1.13, CV 0.060). 20 facets against 6 eave segments is
+    broken, and this says so WITHOUT any ground truth for that address — which
+    is what turns six measured roofs into a scorecard for every roof."""
+    ri = _good()
+    ri["facets"] = ri["facets"] * 10                      # 20 facets
+    ri["edges"] = [{"edge_type": "eave", "length_m": 5,
+                    "geometry_xy": [[0, i], [5, i]]} for i in range(6)]
+    chk = next(c for c in score_report(ri)["checks"]
+               if c["id"] == "grammar_eaves_per_facet")
+    assert not chk["ok"], chk
+    assert "OUTSIDE" in chk["detail"]
+    assert chk["severity"] == "WARN"          # never a hard fail on n~4
+
+
+def test_grammar_is_warn_only_and_says_where_the_bound_came_from():
+    """A USA-wide pipeline must not be failed by six Florida hip roofs. The
+    provenance has to travel with the number so nobody tightens it later."""
+    ri = _good()
+    ri["edges"] = [{"edge_type": "eave", "length_m": 5,
+                    "geometry_xy": [[0, i], [5, i]]} for i in range(2)]
+    g = [c for c in score_report(ri)["checks"] if c["id"].startswith("grammar_")]
+    assert g, "no grammar checks ran"
+    assert all(c["severity"] == "WARN" for c in g)
+    assert any("EagleView" in c["detail"] for c in g)
+    assert any("effective n~4" in c["detail"] for c in g)
+
+
+def test_hip_exceeding_ridge_is_an_inequality_not_a_ratio():
+    """hip > ridge held 6/6 (min 1.58x) but the magnitude ranges to 3.55, so the
+    direction is the signal and the ratio is not worth bounding."""
+    ri = _good()
+    ri["edges"] = [{"edge_type": "ridge", "length_m": 30, "geometry_xy": [[0, 0], [30, 0]]},
+                   {"edge_type": "hip", "length_m": 5, "geometry_xy": [[0, 1], [5, 1]]},
+                   {"edge_type": "eave", "length_m": 16, "geometry_xy": [[0, 2], [16, 2]]}]
+    chk = next(c for c in score_report(ri)["checks"]
+               if c["id"] == "grammar_hip_exceeds_ridge")
+    assert not chk["ok"]
+    assert "gable-dominant" in chk["detail"]   # names the legitimate exception
+
+
+def test_grammar_checks_are_absent_rather_than_vacuously_passed():
+    """An invariant whose inputs are missing must be OMITTED. A check that
+    silently disappears reads exactly like a check that passed — the failure
+    this gate has already made three times."""
+    ri = _good()
+    ri["edges"] = []
+    ids = {c["id"] for c in score_report(ri)["checks"]}
+    assert "grammar_ridgehip_over_eave" not in ids
+    assert "grammar_eaves_per_facet" not in ids

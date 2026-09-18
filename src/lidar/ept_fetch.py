@@ -146,7 +146,28 @@ def _fetch_one(
     if (c == 2).any():
         ground_z = float(np.median(z[c == 2]))
 
-    # drop ground/vegetation/noise when the dataset is classified at all
+    # drop ground/vegetation/noise when the dataset is classified at all.
+    #
+    # `(c > 0).any()` is the guard, and it has a hole: a survey that classifies
+    # NOTHING — every point class 0 — skips vegetation filtering entirely, and
+    # tree canopy goes straight into the plane fits. Older surveys do exactly
+    # that. This is the standing explanation for facets whose plane explains
+    # 33-47% of their own points on a heavily treed chip: the filter is correct,
+    # it just never ran.
+    #
+    # Say so. There is no safe automatic fix — with no classification there is
+    # no way to tell canopy from roof at this stage — but a report built on
+    # unclassified returns must not look identical to one built on filtered
+    # returns.
+    n_unclassified = int((c == 0).sum())
+    if n_unclassified == len(c) and len(c):
+        logger.warning(
+            "LiDAR survey is ENTIRELY UNCLASSIFIED (%d points, all class 0) — "
+            "vegetation/ground filtering CANNOT run, so tree canopy reaches the "
+            "plane fits. Expect low explained_frac on treed roofs.", len(c))
+    elif n_unclassified:
+        logger.info("%d/%d points unclassified (class 0) — kept, unfilterable",
+                    n_unclassified, len(c))
     if (c > 0).any() and not keep_all_classes:
         keep = ~np.isin(c, list(VEG_GROUND_CLASSES))
         x, y, z = x[keep], y[keep], z[keep]
