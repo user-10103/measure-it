@@ -51,7 +51,8 @@ def _to_rle(seg, h, w):
     return rle
 
 
-def prep_split(coco_json, images_dir, out_dir, concept, keep_names=None, link=False):
+def prep_split(coco_json, images_dir, out_dir, concept, keep_names=None, link=False,
+               outline_concept=None):
     os.makedirs(out_dir, exist_ok=True)
     d = json.load(open(coco_json))
     cats = d.get("categories", [])
@@ -90,6 +91,23 @@ def prep_split(coco_json, images_dir, out_dir, concept, keep_names=None, link=Fa
     facet_ids = {c["id"] for c in cats if c["name"].lower() in FACET_NAMES}
     if not facet_ids:                               # no explicit facet class -> keep all
         facet_ids = {c["id"] for c in cats}
+    # Optional SECOND concept: the roof outline. Serving currently gets the
+    # outline from ZERO-SHOT base SAM3 ("it nails this out of the box;
+    # fine-tuning on facets drifts the concept", 2026-07-04) and this prep drops
+    # every roof_polygon. Training both concepts explicitly is how you stop
+    # "roof" drifting toward facets -- the model learns to tell them apart
+    # instead of one bleeding into the other.
+    #
+    # Mind the imbalance: GIS carries ZERO outline annotations, so outlines come
+    # only from phase1/carecamp93/switzerland -- about 16,860 against 230,914
+    # facets, ~7%. That asymmetry is where the documented drift comes from.
+    outline_ids = set()
+    if outline_concept:
+        outline_ids = {c["id"] for c in cats
+                       if c["name"].lower() not in FACET_NAMES} - facet_ids
+        if not outline_ids:
+            print(f"  note: {coco_json} declares no outline class — facets only "
+                  f"(expected for the GIS export, which has 0 roof_polygon)")
 
     # FAIL LOUD if pycocotools is missing: a broken import here is what silently
     # dropped EVERY mask in the original prep run and produced box-only data that
@@ -101,7 +119,7 @@ def prep_split(coco_json, images_dir, out_dir, concept, keep_names=None, link=Fa
     seg_src = 0   # annotations that carried a source mask
     seg_ok = 0    # ... that successfully converted to RLE
     for a in d.get("annotations", []):
-        if a["category_id"] not in facet_ids:
+        if a["category_id"] not in facet_ids and a["category_id"] not in outline_ids:
             continue
         if keep_ids is not None and a["image_id"] not in keep_ids:
             continue
@@ -113,7 +131,8 @@ def prep_split(coco_json, images_dir, out_dir, concept, keep_names=None, link=Fa
         if bx is not None and (bx[2] < MIN_BOX_PX or bx[3] < MIN_BOX_PX):
             dropped += 1
             continue
-        a = dict(a); a["category_id"] = 1
+        is_facet = a["category_id"] in facet_ids
+        a = dict(a); a["category_id"] = 1 if is_facet else 2
         h, w = dims.get(a["image_id"], (None, None))
         if a.get("segmentation") is not None and h and w:
             seg_src += 1
@@ -172,7 +191,9 @@ def prep_split(coco_json, images_dir, out_dir, concept, keep_names=None, link=Fa
         imgs.append(im)
 
     out = {"images": imgs, "annotations": anns,
-           "categories": [{"id": 1, "name": concept, "supercategory": concept}]}
+           "categories": ([{"id": 1, "name": concept, "supercategory": concept}]
+                          + ([{"id": 2, "name": outline_concept,
+                               "supercategory": concept}] if outline_ids else []))}
     json.dump(out, open(os.path.join(out_dir, "_annotations.coco.json"), "w"))
     return len(imgs), len(anns)
 
@@ -186,6 +207,10 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--supercategory", default="roof")
     ap.add_argument("--concept", default="roof facet")
+    ap.add_argument("--outline-concept", default=None,
+                    help='also keep the roof OUTLINE class under this concept '
+                         'prompt (e.g. "roof"). Off by default: serving gets the '
+                         'outline from zero-shot base SAM3 today.')
     ap.add_argument("--keep", default=None,
                     help="readiness manifest {file_names:[...]} from "
                          "training.label_readiness; restricts to clean-facet roofs")
@@ -199,10 +224,12 @@ def main():
 
     base = os.path.join(args.out, args.supercategory)
     ni, na = prep_split(args.train_coco, args.train_images,
-                        os.path.join(base, "train"), args.concept, keep_names, link=args.link)
+                        os.path.join(base, "train"), args.concept, keep_names, link=args.link,
+                        outline_concept=args.outline_concept)
     print(f"train: {ni} images, {na} facet annotations")
     vi, va = prep_split(args.val_coco, args.val_images,
-                        os.path.join(base, "test"), args.concept, keep_names, link=args.link)
+                        os.path.join(base, "test"), args.concept, keep_names, link=args.link,
+                        outline_concept=args.outline_concept)
     print(f"test:  {vi} images, {va} facet annotations")
     print(f"\nReady: {base}/{{train,test}}  (concept='{args.concept}')")
     print(f"Set  paths.roboflow_vl_100_root: {os.path.abspath(args.out)}")

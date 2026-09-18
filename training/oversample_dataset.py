@@ -28,6 +28,9 @@ import json
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from training.coco_schema import count_facets   # noqa: E402
+
 CATEGORIES = [
     {"id": 1, "name": "roof_polygon"},
     {"id": 2, "name": "facet"},
@@ -49,6 +52,7 @@ def oversample(input_dir: Path, output_dir: Path, repeats: dict[str, int], dry_r
 
         src_images = coco["images"]
         src_anns   = coco["annotations"]
+        in_cats    = coco.get("categories") or []
 
         # Build annotation lookup by image_id
         anns_by_img: dict[int, list[dict]] = {}
@@ -93,7 +97,11 @@ def oversample(input_dir: Path, output_dir: Path, repeats: dict[str, int], dry_r
             pct  = 100 * count / total if total else 0
             tag  = f"×{mult}" if mult > 1 else "×1"
             print(f"    {src:<14} {count:>6} imgs  {pct:>5.1f}%  ({tag})")
-        n_facets = sum(1 for a in out_anns if a.get("category_id") == 2)
+        # Count by NAME, not `== 2`. A correct single-class dataset (prep's
+        # output declares one facet class at id 1) reported "facet
+        # annotations: 0" here, which is the false alarm that teaches people to
+        # ignore the line.
+        n_facets = count_facets(out_anns, in_cats)
         print(f"    {'TOTAL':<14} {total:>6} imgs  100.0%")
         print(f"    facet annotations: {n_facets}")
 
@@ -103,7 +111,16 @@ def oversample(input_dir: Path, output_dir: Path, repeats: dict[str, int], dry_r
         out_split.mkdir(parents=True, exist_ok=True)
 
         # Write merged JSON
-        merged = {"images": out_images, "annotations": out_anns, "categories": CATEGORIES}
+        # CARRY THE INPUT'S SCHEMA THROUGH. Writing the hardcoded block here
+        # renamed prep's "roof facet" class to "roof_polygon" in place, without
+        # touching a single annotation — and the COCO category NAME becomes
+        # SAM3's text prompt. Training would have learned "roof_polygon" from
+        # pictures of facets, converged, and then been prompted at inference
+        # with "roof facet", a string it never saw. No count anywhere would
+        # have been wrong. Falling back to CATEGORIES only when the input
+        # declares none is a no-op on merged two-class data.
+        merged = {"images": out_images, "annotations": out_anns,
+                  "categories": in_cats or CATEGORIES}
         with open(out_split / "_annotations.coco.json", "w") as f:
             json.dump(merged, f)
 
