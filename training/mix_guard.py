@@ -77,6 +77,64 @@ def cmd_dedupe(a):
     print(f"\ndeduped dataset written to {dst}")
 
 
+FACET_NAMES = {"facet", "roof_facet", "roof facet", "roof face"}
+STD_CATEGORIES = [{"id": 1, "name": "roof_polygon", "supercategory": "roof"},
+                  {"id": 2, "name": "facet", "supercategory": "roof"}]
+
+
+def cmd_remap(a):
+    """Force a corpus onto the standard schema BEFORE merging.
+
+    merge_datasets.py writes a HARDCODED categories block
+    [roof_polygon:1, facet:2] while copying each source's category_id UNCHANGED.
+    It never remaps. The GIS export declares a single class
+    [{id:1, name:'roof facet'}], so after merging its 14,068 facet annotations
+    still carry category_id 1 — which the merged file now calls roof_polygon.
+
+    prep_sam3_facets then resolves the facet class by NAME, gets {2}, and DELETES
+    every GIS annotation. The run trains with zero GIS data while the mix table
+    reports GIS at ~33%. Nothing errors.
+
+    Watch for the confirming symptom: merge_datasets counts facets as
+    category_id == 2, so an unremapped GIS source reports "0 facets" in its own
+    merge summary.
+    """
+    src, dst = Path(a.input), Path(a.output)
+    moved_total = 0
+    for split in ("train", "valid", "test"):
+        d = load(src / split)
+        if d is None:
+            continue
+        cats = d.get("categories", [])
+        facet_ids = {c["id"] for c in cats if c.get("name", "").lower() in FACET_NAMES}
+        if not facet_ids:
+            sys.exit(f"STOP: {src/split} declares no facet-named category "
+                     f"({[c.get('name') for c in cats]}). Refusing to guess which "
+                     f"class is the facet class.")
+        out = dict(d)
+        out["categories"] = STD_CATEGORIES
+        anns, moved = [], 0
+        for an in d["annotations"]:
+            an = dict(an)
+            if an["category_id"] in facet_ids:
+                if an["category_id"] != 2:
+                    moved += 1
+                an["category_id"] = 2
+            else:
+                an["category_id"] = 1
+            anns.append(an)
+        out["annotations"] = anns
+        moved_total += moved
+        (dst / split).mkdir(parents=True, exist_ok=True)
+        json.dump(out, open(dst / split / "_annotations.coco.json", "w"))
+        n2 = sum(1 for x in anns if x["category_id"] == 2)
+        print(f"  [{split}] {len(anns)} anns -> {n2} facet(id 2), "
+              f"{len(anns)-n2} outline(id 1); {moved} remapped")
+    print(f"\nremapped {moved_total} annotation(s) onto the standard schema -> {dst}")
+    if moved_total == 0:
+        print("(already on the standard schema — nothing to do)")
+
+
 def held_out_ids(eval_dir: str, splits: tuple[str, ...]) -> set[str]:
     """Roofs that must never be trained on.
 
@@ -188,6 +246,8 @@ def main():
     p = sub.add_parser("check"); p.add_argument("--dataset", required=True)
     p.add_argument("--eval", required=True)
     p.add_argument("--splits", nargs="+", default=["test"]); p.set_defaults(fn=cmd_check)
+    p = sub.add_parser("remap"); p.add_argument("--input", required=True)
+    p.add_argument("--output", required=True); p.set_defaults(fn=cmd_remap)
     p = sub.add_parser("plan"); p.add_argument("--dataset", required=True)
     p.add_argument("--max-repeat", type=int, default=6); p.set_defaults(fn=cmd_plan)
     a = ap.parse_args()
