@@ -61,6 +61,37 @@ def patch_matcher(root: str) -> str:
                   MATCH_OLD, MATCH_NEW, sentinel="non-finite cost entries")
 
 
+# INCOMPLETE COPY. A THIRD patch — the trainer NaN guard — exists only in S3:
+#   s3://measure-it-prod-017341176694/models/patch_sam3.py
+#   md5 507c023d029e55d062491f3f3a6cfc73   (this git copy: f0fca9a7…)
+# This file has zero occurrences of patch_trainer or nan-guard. Applying it and
+# training is what produced the epoch-6 crash: two of three patches land, the
+# script reports success, and the guard that stops the run dying mid-training is
+# simply not there.
+#
+# Until the S3 version is committed, this copy refuses to report success rather
+# than silently applying 2 of 3. Override only if you are deliberately patching
+# something that does not train.
+TRAINER_GUARD_SENTINEL = "nan-guard"
+S3_COMPLETE_COPY = ("s3://measure-it-prod-017341176694/models/patch_sam3.py "
+                    "(md5 507c023d029e55d062491f3f3a6cfc73)")
+
+
+def has_trainer_guard() -> bool:
+    """Does THIS file carry the trainer NaN guard? Currently: no.
+
+    Asks the MODULE NAMESPACE, never the source text. Two earlier versions
+    grepped this file — first for "patch_trainer", then for "def patch_trainer" —
+    and both returned True on a file that defines no such function, because the
+    search string is itself in the file doing the searching. A detector matching
+    its own source is the purest form of the failure this module exists to
+    prevent, and it took two goes to stop writing it.
+
+    A name is in globals() only if a def actually executed.
+    """
+    return "patch_trainer" in globals()
+
+
 def apply_all(root: str):
     return [patch_fused(root), patch_matcher(root)]
 
@@ -69,9 +100,23 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--sam3-root", default="/content/sam3repo",
                     help="clone root containing the sam3/ package")
+    ap.add_argument("--allow-missing-trainer-guard", action="store_true",
+                    help="proceed even though this copy lacks the trainer NaN "
+                         "guard (see S3_COMPLETE_COPY)")
     args = ap.parse_args()
     if not os.path.isdir(os.path.join(args.sam3_root, "sam3")):
         sys.exit(f"sam3 package not found under {args.sam3_root}")
+    if not has_trainer_guard() and not args.allow_missing_trainer_guard:
+        sys.exit(
+            "\nFAILED: this copy of patch_sam3.py does NOT carry the trainer "
+            "NaN guard.\n"
+            "  fused.py and matcher.py may have been patched above, but the "
+            "guard that\n"
+            "  keeps training alive mid-run is absent — which is exactly how the "
+            "epoch-6\n  run died.\n\n"
+            f"  Complete copy: {S3_COMPLETE_COPY}\n\n"
+            "  Fetch that, or pass --allow-missing-trainer-guard if you are "
+            "deliberately\n  patching something that will not train.")
     results = apply_all(args.sam3_root)
     for line in results:
         print(line)
