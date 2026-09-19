@@ -55,6 +55,26 @@ COUNTY_ENDPOINTS = {
                "aerialscurrent/ImageServer",
         "gsd_m": 0.1524, "year": 2025, "reachable": True,
     },
+    # Lee lived only in adresses/pipeline/utils/county_imagery.py — a SECOND
+    # copy of this registry that the pipeline does not import. So the finest
+    # imagery found in Florida (0.25 ft = 7.62 cm, hand-verified 2026-08-24 on
+    # a 1050x1050 Cape Coral fetch: solar panels countable, vents visible) was
+    # unreachable from the code that makes reports, and every Lee address was
+    # measured on 0.6 m NAIP. Re-verified live 2026-09-19: pixelSizeX 0.25,
+    # wkid 6443 (NAD83(2011) FL West ftUS), caps Image,Metadata,Catalog.
+    # NOTE the unit: 0.25 read as metres would call this 25 cm imagery.
+    "Lee": {
+        "url": "https://gisimageserver.leegov.com/imageserver/rest/services/"
+               "Aerials/Aerials2025/ImageServer",
+        "urls": [
+            "https://gisimageserver.leegov.com/imageserver/rest/services/"
+            "Aerials/Aerials2025/ImageServer",
+            "https://gisimageserver.leegov.com/imageserver/rest/services/"
+            "Aerials/Aerials2024/ImageServer",
+        ],
+        "gsd_m": 0.0762, "year": 2025, "reachable": True,
+        "maxImageWidth": 15000, "mosaic": False,
+    },
 }
 
 # HOW TO GROW THIS REGISTRY (no token, no account):

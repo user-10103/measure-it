@@ -200,3 +200,75 @@ def test_no_roof_mask_still_returns_facets():
     res = segment_roof_sam(predict_masks, chip, regularize=False, min_area_frac=0.0)
     assert res.outline is None
     assert len(res.facets) == 1
+
+
+def _three_building_scene():
+    """200x200 chip, three 40x40 roofs in a row, 20 px apart. Target = middle."""
+    h = w = 200
+    anchor = _rect(h, w, 80, 120, 80, 120)
+    target = _rect(h, w, 78, 122, 78, 122)              # middle roof + eaves
+    blob = np.zeros((h, w), bool)
+    for x0 in (20, 80, 140):
+        blob[80:120, x0:x0 + 40] = True                 # all three at once
+    return h, w, anchor, target, blob
+
+
+def test_outline_excludes_neighbours_when_the_blob_outscores_the_target():
+    """The failure the customer sees: three buildings measured as one roof.
+
+    The blob covers 100% of the target footprint, and so does the right mask —
+    the old `cover` rule could not tell them apart and broke the tie on SAM's
+    score, which the blob wins.
+    """
+    h, w, anchor, target, blob = _three_building_scene()
+    chip = np.zeros((h, w, 3), np.uint8)
+
+    def predict(chip_, concept):
+        if concept == "roof":
+            return np.asarray([target, blob]), np.asarray([0.71, 0.93])
+        return np.asarray([target]), np.asarray([0.9])
+
+    res = segment_roof_sam(predict, chip, anchor_mask=anchor,
+                           regularize=False, min_area_frac=0.0)
+    assert res.selection is not None
+    assert res.selection.index == 0                     # the target, not the blob
+    assert res.selection.overrode_top_score is True
+    # The outline must not reach the neighbours at x<80 or x>=120.
+    minx, _, maxx, _ = res.outline.bounds
+    assert minx >= 70 and maxx <= 130
+
+
+def test_a_blob_outline_does_not_tile_facets_across_the_neighbours():
+    """fill_to_outline TILES the outline — a blob doesn't just fail to exclude
+    the neighbours, it partitions them into facets and bills them."""
+    h, w, anchor, _target, blob = _three_building_scene()
+    chip = np.zeros((h, w, 3), np.uint8)
+
+    def predict(chip_, concept):
+        # The blob is the ONLY outline candidate, so nothing can be preferred
+        # over it — the detached neighbours have to be stripped from the mask.
+        if concept == "roof":
+            return np.asarray([blob]), np.asarray([0.93])
+        return np.asarray([blob]), np.asarray([0.9])
+
+    res = segment_roof_sam(predict, chip, anchor_mask=anchor,
+                           regularize=False, min_area_frac=0.0,
+                           fill_to_outline=True)
+    assert res.selection.components_dropped == 2
+    for f in res.facets:
+        minx, _, maxx, _ = f.polygon.bounds
+        assert minx >= 70 and maxx <= 130, "facet tiled onto a neighbour"
+
+
+def test_selection_is_none_without_an_anchor_so_qc_can_say_so():
+    """No footprint -> nothing constrains the outline. That must be visible."""
+    h, w, _anchor, target, blob = _three_building_scene()
+    chip = np.zeros((h, w, 3), np.uint8)
+
+    def predict(chip_, concept):
+        if concept == "roof":
+            return np.asarray([target, blob]), np.asarray([0.71, 0.93])
+        return np.asarray([target]), np.asarray([0.9])
+
+    res = segment_roof_sam(predict, chip, regularize=False, min_area_frac=0.0)
+    assert res.selection is None

@@ -40,6 +40,15 @@ VERIFIED_TIMEOUT_S = 60
 # same dead endpoint twenty times; the first failure is the measurement.
 _DEAD_ENDPOINTS: set = set()
 
+
+class NoGisImagery(RuntimeError):
+    """No GIS orthophoto source covers this location.
+
+    Raised only under ``require_gis``. It exists as its own type so a batch can
+    count GIS misses separately from network flakiness — the two are different
+    problems and lumping them made coverage look like reliability.
+    """
+
 _STATE_ABBR = {
     "Alabama": "AL", "Alaska": "AK", "Arizona": "AZ", "Arkansas": "AR",
     "California": "CA", "Colorado": "CO", "Connecticut": "CT",
@@ -114,7 +123,8 @@ def _usable(ep: dict) -> bool:
 
 
 def candidate_sources(lat: float, lon: float, state: str,
-                      county: Optional[str] = None) -> List[Tuple[str, dict]]:
+                      county: Optional[str] = None,
+                      require_gis: bool = False) -> List[Tuple[str, dict]]:
     """Imagery sources to try, best resolution first.
 
     ``reachable`` is a RANKING hint, not a veto: it was measured from one
@@ -138,13 +148,28 @@ def candidate_sources(lat: float, lon: float, state: str,
         ranked.append((tier, ep))
     if str(state).upper() == "FL" and _usable(FCDOP_FALLBACK):
         ranked.append(("fl-statewide", FCDOP_FALLBACK))
+    if require_gis:
+        # NAIP is 0.6 m/px 4-band. The facet model is fine-tuned on 7-15 cm
+        # three-band orthophotos, so a NAIP report is an OUT-OF-DOMAIN
+        # inference that looks exactly like an in-domain one — same six pages,
+        # same confident numbers. When the caller has asked for GIS, omitting
+        # the fallback is what makes its absence visible: fetch_chip_best then
+        # raises instead of quietly measuring the wrong pixels.
+        if not ranked:
+            raise NoGisImagery(
+                f"no GIS imagery source for county={county!r} state={state!r}; "
+                f"COUNTY_ENDPOINTS holds {len(COUNTY_ENDPOINTS)} counties and "
+                f"the statewide fallback needs "
+                f"${FCDOP_FALLBACK.get('token_env')}")
+        return ranked
     ranked.append(("naip", {}))
     return ranked
 
 
 def fetch_chip_best(lat: float, lon: float, state: str, out_dir,
                     chip_buffer_m: Optional[float] = None,
-                    county: Optional[str] = None):
+                    county: Optional[str] = None,
+                    require_gis: bool = False):
     """``fetch_chip``-compatible 5-tuple from the best available source.
 
     Tries each candidate in turn and falls through on failure, so a county
@@ -159,7 +184,7 @@ def fetch_chip_best(lat: float, lon: float, state: str, out_dir,
         resolved_state, county = state_county_for(lat, lon)
         state = state or resolved_state
     attempts = []
-    for tier, ep in candidate_sources(lat, lon, state, county):
+    for tier, ep in candidate_sources(lat, lon, state, county, require_gis):
         try:
             if tier == "naip":
                 out = fetch_chip_naip(lat, lon, state, out_dir,
@@ -217,5 +242,10 @@ def fetch_chip_best(lat: float, lon: float, state: str, out_dir,
             logger.info("imagery: %s (%s m/px, %s) for (%.5f, %.5f) county=%s",
                         tier, meta["imagery_gsd_m"], year, lat, lon, county)
         return chip, transform, png, anchor, meta
+    if require_gis:
+        raise NoGisImagery(
+            f"No GIS imagery source succeeded at ({lat}, {lon}) county={county}: "
+            + "; ".join(attempts)
+            + " — refusing to fall back to NAIP because require_gis is set")
     raise RuntimeError(
         f"No imagery source succeeded at ({lat}, {lon}): " + "; ".join(attempts))

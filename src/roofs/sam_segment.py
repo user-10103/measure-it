@@ -25,6 +25,7 @@ from typing import Callable, List, Optional, Tuple
 
 import numpy as np
 
+from src.roofs.building_select import select_building_mask
 from src.roofs.mask_facets import masks_to_facets, outline_polygon
 from src.roofs.segment import Facet
 
@@ -41,6 +42,11 @@ class SamRoof:
     facets: List[Facet] = field(default_factory=list)   # facet polygons, same CRS
     label_map: Optional[np.ndarray] = None  # int partition (pixel space) for viz
     georeferenced: bool = False            # True if mapped to world CRS
+    # Which candidate became the outline, and how well it fitted the target
+    # footprint. None when no anchor was supplied — and that is the state in
+    # which a multi-building outline goes unnoticed, so report_qc treats a
+    # missing selection as a finding rather than as nothing to say.
+    selection: object = None
 
 
 def _to_world(poly, transform):
@@ -106,6 +112,7 @@ def segment_roof_sam(
     # fine-tuning on facets can drift the "roof" concept). Falls back to the
     # facet predictor when a separate outline model isn't supplied.
     _outline_predict = predict_outline or predict_masks
+    selection = None
     roof_mask = None
     outline_px = None
     try:
@@ -115,20 +122,19 @@ def segment_roof_sam(
             r_scores = np.asarray(r_scores, dtype=float)
             idx = int(np.argmax(r_scores))
             if anchor_mask is not None and anchor_mask.any():
-                # fraction of the target footprint each candidate covers
+                # Rank by IoU against the footprint (dilated for eaves) and
+                # strip blobs not connected to it. The old rule ranked by
+                # `cover` alone — recall of the anchor, which a mask spanning
+                # the neighbours satisfies just as well as the right one — and
+                # then broke the 100%-vs-100% tie on SAM's score, which favours
+                # the big blob. See src/roofs/building_select.py.
                 anchor = np.asarray(anchor_mask, bool)
-                cover = np.array([(m & anchor).sum() / float(anchor.sum())
-                                  for m in r_masks])
-                best = int(np.lexsort((r_scores, cover))[-1])
-                if cover[best] >= 0.2:
-                    if best != idx:
-                        logger.info(
-                            "outline anchor override: mask %d (cover %.0f%%, "
-                            "score %.2f) over top-score mask %d (cover %.0f%%)",
-                            best, 100 * cover[best], r_scores[best],
-                            idx, 100 * cover[idx])
-                    idx = best
-                    roof_mask = r_masks[idx]
+                px_m = abs(float(transform.a)) if transform is not None else None
+                sel = select_building_mask(r_masks, r_scores, anchor, px_m)
+                selection = sel
+                if sel.index >= 0:
+                    idx = sel.index
+                    roof_mask = sel.mask      # neighbours already stripped
                 else:
                     # No candidate covers the target footprint (the muddy "best
                     # 19% mask" case, typically when the FACET model doubles as the
@@ -136,8 +142,9 @@ def segment_roof_sam(
                     # shadow-immune MS footprint as the outline directly instead of
                     # falling back to a top-score mask that's on the wrong building.
                     logger.info(
-                        "no roof mask covers the footprint (best %.0f%%) — using "
-                        "the MS footprint as the outline", 100 * cover.max())
+                        "no roof mask covers the footprint — using the MS "
+                        "footprint as the outline (%s)",
+                        "; ".join(sel.notes) or "no qualifying candidate")
                     roof_mask = anchor
             else:
                 roof_mask = r_masks[idx]
@@ -180,4 +187,5 @@ def segment_roof_sam(
     logger.info("segment_roof_sam: outline=%s, %d facet(s)%s",
                 "yes" if outline_px is not None else "none", len(facets),
                 " (world CRS)" if georef else " (pixel)")
-    return SamRoof(outline=outline_px, facets=facets, label_map=lbl, georeferenced=georef)
+    return SamRoof(outline=outline_px, facets=facets, label_map=lbl,
+                   georeferenced=georef, selection=selection)

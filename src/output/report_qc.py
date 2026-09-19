@@ -297,6 +297,38 @@ def score_report(report_input: dict, model: ReportModel | None = None) -> dict:
                         f"distance itself")
         add("building_selection", WARN, not suspicious, "; ".join(bits))
 
+    # --- did the OUTLINE land on the selected building? -------------------
+    # building_selection above checks which FOOTPRINT was picked. This checks
+    # the separate failure one stage later: the right footprint chosen, then an
+    # outline mask drawn across it AND its neighbours. masks_to_facets tiles
+    # whatever the outline covers, so that mask does not merely include the
+    # neighbours — it partitions them into facets and bills them.
+    spill = report_input.get("select_mask_spill")
+    if spill is not None:
+        dropped = report_input.get("select_mask_components_dropped") or 0
+        iou = report_input.get("select_mask_iou")
+        runner = report_input.get("select_mask_runner_up_iou")
+        bits = [f"outline {100 * float(spill):.0f}% outside the target footprint"]
+        if iou is not None:
+            bits.append(f"fit {float(iou):.2f}")
+        if dropped:
+            bits.append(f"{dropped} detached building(s) removed from the mask")
+        # Close runner-up means two candidates fit about equally well, which is
+        # what a target and its attached neighbour look like.
+        close = (iou is not None and runner is not None and float(iou) > 0
+                 and float(runner) >= 0.85 * float(iou))
+        if close:
+            bits.append(f"AMBIGUOUS — runner-up fit {float(runner):.2f}")
+        add("outline_on_target", WARN, float(spill) <= 0.35 and not close,
+            "; ".join(bits))
+    elif report_input.get("select_mask_candidates", "missing") is None:
+        # No anchor reached segmentation, so nothing constrained the outline to
+        # the customer's building. Silence here is the state in which a
+        # three-building report looks exactly like a correct one.
+        add("outline_on_target", WARN, False,
+            "no building footprint was supplied to segmentation — the outline "
+            "was unconstrained and may span neighbouring buildings")
+
     # --- obstructions accounted when the FO detector ran ---
     if "foreign_objects" in report_input:
         add("obstructions", WARN, model.num_obstructions >= 0,

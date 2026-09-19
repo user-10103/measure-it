@@ -118,7 +118,28 @@ def fetch_chip_gis(lat: float, lon: float, state: str, out_dir,
     h = max(8, round((north - south) / gsd))
 
     # 3. fetch + decode; trust the requested grid (resize if the server rounded)
-    png = _export_image(ep["url"], bounds, utm, w, h, timeout=timeout)
+    # An endpoint may list several service URLs newest-first. Counties retire
+    # the previous year's service when the new flight lands, and with a single
+    # hardcoded URL that retirement is indistinguishable from an outage: the
+    # fetch fails, fetch_chip_best falls through, and the county quietly starts
+    # being measured on NAIP. Walk the list so a rollover costs one failed
+    # request instead of a silent resolution downgrade.
+    urls = [u for u in (ep.get("urls") or []) if u] or [ep["url"]]
+    png = None
+    last = None
+    for i, _u in enumerate(urls):
+        try:
+            png = _export_image(_u, bounds, utm, w, h, timeout=timeout)
+            if i:
+                logger.warning("imagery: %s failed, using older service %s",
+                               urls[0], _u)
+            ep = {**ep, "url": _u}
+            break
+        except Exception as e:  # noqa: BLE001 - try the next service year
+            last = e
+    if png is None:
+        raise RuntimeError(f"all {len(urls)} service URL(s) failed for this "
+                           f"endpoint: {last}")
     img = np.asarray(Image.open(io.BytesIO(png)).convert("RGB"))
     if img.shape[:2] != (h, w):
         img = np.asarray(Image.fromarray(img).resize((w, h), Image.BILINEAR))

@@ -94,7 +94,8 @@ def fetch_chip(lat: float, lon: float, state: str, out_dir: Path,
 
 
 # plain-English wording for a client-facing cover; the check ids stay in the log
-_WHY = {"edges_typed": "roof edge structure not resolved",
+_WHY = {"outline_on_target": "the roof outline may cover more than this building",
+        "edges_typed": "roof edge structure not resolved",
         "pitch_resolved": "roof pitch could not be measured",
         "slope_applied": "sloped area not verified",
         "facets_partition": "overlapping roof faces",
@@ -315,6 +316,14 @@ def generate_roof_report(
         roof_concept="roof", facet_concept="roof facet",
         score_thr=score_thr, iou_thr=0.5,
     )
+    # Carry the building-selection evidence into the report. Without it a
+    # wrong-building report is indistinguishable from a right one: the QC
+    # compares the roof against the footprint we PICKED, so a bad pick makes
+    # both sides the same wrong building and every ratio reads ~1.0.
+    if getattr(roof, "selection", None) is not None:
+        meta.update(roof.selection.to_meta())
+    else:
+        meta["select_mask_candidates"] = None
     outline_found = roof.outline is not None
     if not outline_found:
         roof.outline = _fallback_outline(roof)
@@ -521,7 +530,13 @@ def generate_roof_report(
     for _k in ("imagery_source", "imagery_gsd_m", "imagery_year",
                "imagery_county", "select_dist_m", "select_rank",
                "select_n_candidates", "pin_in_footprint",
-               "select_margin_m", "select_runner_up_m"):
+               "select_margin_m", "select_runner_up_m",
+               # mask-level selection: which candidate became the outline and
+               # how much of it sits off the target building
+               "select_mask_cover", "select_mask_spill", "select_mask_iou",
+               "select_mask_runner_up_iou", "select_mask_candidates",
+               "select_mask_components_dropped",
+               "select_mask_overrode_top_score"):
         if _k in meta:
             report_input[_k] = meta[_k]
 
