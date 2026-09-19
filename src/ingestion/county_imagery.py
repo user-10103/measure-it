@@ -75,6 +75,28 @@ COUNTY_ENDPOINTS = {
         "gsd_m": 0.0762, "year": 2025, "reachable": True,
         "maxImageWidth": 15000, "mosaic": False,
     },
+    # Found by tools/discover_fl_imagery.py 2026-09-19 and VERIFIED with a real
+    # 512x512 exportImage over Palm Coast: 451 KB, pixel std 35.3 — imagery,
+    # not a blank tile. wkid 2881 = NAD83 HARN FL East ftUS, so pixelSizeX 0.25
+    # is 0.25 FEET; read as metres it would look like 25 cm.
+    "Flagler": {
+        "url": "https://maps.flaglercounty.gov/imagery/rest/services/"
+               "Orthoimagery/Aerials2023_Eagle_View/ImageServer",
+        "gsd_m": 0.0762, "year": 2023, "reachable": True,
+    },
+    # Verified over Bradenton: 446 KB, pixel std 55.2. NOTE wkid 3857 — the
+    # declared pixel size is in WEB MERCATOR units, which at 27.5 N are
+    # stretched by 1/cos(lat), so true ground resolution is ~6.8 cm, slightly
+    # BETTER than the 7.62 recorded here. Erring coarse is the safe direction:
+    # it never promises resolution the imagery does not have.
+    "Manatee": {
+        "url": "https://www.mymanatee.org/gisimg/rest/services/2024/"
+               "AERIAL_2024_RGB/ImageServer",
+        "gsd_m": 0.0762, "year": 2024, "reachable": True,
+    },
+    # Collier is NOT here on purpose: caps "Image,TilesOnly" at 15 cm. It has no
+    # exportImage and answers 400. Registering it would fail every Naples
+    # address into the NAIP fallback while the registry claimed coverage.
 }
 
 # HOW TO GROW THIS REGISTRY (no token, no account):

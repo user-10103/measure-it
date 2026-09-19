@@ -257,7 +257,13 @@ def probe(url: str, timeout: int = 15) -> dict:
         return out
     caps = d.get("capabilities") or ""
     out["capabilities"] = caps
-    out["exportImage"] = USABLE_CAP in caps
+    # "Image" is a SUBSTRING of "Image,TilesOnly", so `USABLE_CAP in caps`
+    # passed every tile-only service as exportImage-capable. Collier advertised
+    # caps "Image,TilesOnly" at 15 cm, was classified ADVERTISED, and returned
+    # HTTP 400 to the first real exportImage request. A tile cache needs a
+    # tile-mosaic path county_imagery.py does not have.
+    cap_set = {c.strip() for c in caps.split(",") if c.strip()}
+    out["exportImage"] = USABLE_CAP in cap_set and "TilesOnly" not in cap_set
     out["bands"] = d.get("bandCount")
     px = d.get("pixelSizeX")
     sr = (d.get("spatialReference") or {})

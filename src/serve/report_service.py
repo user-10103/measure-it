@@ -549,6 +549,27 @@ def generate_roof_report(
     pdf_path = out_dir / "roof_report.pdf"
     generate_report(report_input, str(pdf_path))
 
+    # 3D model. EagleView ships one off 45-degree obliques and our imagery is
+    # nadir-only, so "no obliques" has been carried as the reason we have none.
+    # It is not the reason: a roof surface needs plan polygons with exactly
+    # shared edges (tiling.py nodes and polygonizes, so we have them) and a
+    # plane per facet (plane_abc, which fuse_sam_lidar records). Obliques are
+    # for the oblique PHOTO pages, facades and storey counts — not the roof
+    # geometry. Written next to the PDF; failure is logged, never fatal, since
+    # a missing .obj must not cost the customer their report.
+    obj_path = None
+    try:
+        from src.output.roof_3d import build_roof_3d, to_obj
+        model = build_roof_3d(report_input["facets"])
+        if model.faces:
+            obj_path = out_dir / "roof_model.obj"
+            obj_path.write_text(to_obj(model, name=str(label)))
+            report_input["model_3d"] = model.manifest()
+            logger.info("3D: %s (%s)", obj_path, model.manifest())
+            obj_path = str(obj_path)
+    except Exception as e:  # noqa: BLE001 — the PDF is the deliverable
+        logger.warning("3D model not written (%s: %s)", type(e).__name__, e)
+
     edge_totals: Dict[str, float] = {}
     for e in report_input["edges"]:
         edge_totals[e["edge_type"]] = (
