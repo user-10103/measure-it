@@ -155,8 +155,27 @@ def fetch_chip_gis(lat: float, lon: float, state: str, out_dir,
     png_path = out_dir / "gis_chip.png"
     Image.fromarray(img).save(png_path)
 
-    meta = {"crs": f"EPSG:{utm}", "footprint_wgs84": fp4326.geometry.iloc[0],
-            "gsd_m": gsd, "source": ep["url"], "year": ep.get("year")}
+    # Building-SELECTION evidence. The NAIP path builds these (report_service
+    # fetch_chip); this one did not, and report_qc gates its whole
+    # building_selection check on `if "pin_in_footprint" in report_input`. So on
+    # the county-GIS path — the preferred path, taken for every registered
+    # county — the check that asks "did we measure the right building?" did not
+    # run at all. It was not failing or warning: it was absent, which reads on
+    # the page exactly like a pass.
+    #
+    # That is how 3400 Gulf Blvd (the Don CeSar, a large resort) shipped a
+    # clean 1336 sqft / 4-facet report for a small corner outbuilding.
+    from shapely.geometry import Point as _Point
+    _fp = fp4326.geometry.iloc[0]
+    meta = {"crs": f"EPSG:{utm}", "footprint_wgs84": _fp,
+            "gsd_m": gsd, "source": ep["url"], "year": ep.get("year"),
+            "select_dist_m": sel.get("dist_m"),
+            "select_margin_m": sel.get("margin_m"),
+            "select_runner_up_m": sel.get("runner_up_m"),
+            "select_rank": sel.get("rank"),
+            "select_n_candidates": (0 if sel.get("candidates") is None
+                                    else len(sel["candidates"])),
+            "pin_in_footprint": bool(_fp.contains(_Point(lon, lat)))}
     logger.info("GIS chip: %dx%d @ %.3f m/px (%s) UTM %d", w, h, gsd,
                 ep["url"], utm)
     return img, transform, str(png_path), anchor, meta

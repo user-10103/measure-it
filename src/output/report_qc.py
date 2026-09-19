@@ -270,6 +270,14 @@ def score_report(report_input: dict, model: ReportModel | None = None) -> dict:
     # there is no basis yet for a threshold that would not be invented. Two
     # false FAILs on legitimate addresses would be worse than the WARN. Collect
     # the numbers across the probe set first, then tighten.
+    if "pin_in_footprint" not in report_input:
+        # ABSENT IS NOT PASSED. This check was gated on evidence that only the
+        # NAIP chip fetcher produced, so on the county-GIS path it silently did
+        # not run -- and a check that disappears reads exactly like one that
+        # passed. Say so instead.
+        add("building_selection", WARN, False,
+            "no building-selection evidence recorded for this report — "
+            "whether the measured roof is the right building was never checked")
     if "pin_in_footprint" in report_input:
         inside = bool(report_input.get("pin_in_footprint"))
         dist = report_input.get("select_dist_m")
@@ -340,6 +348,22 @@ def score_report(report_input: dict, model: ReportModel | None = None) -> dict:
         f"predominant pitch {model.predominant_pitch}"
         if (mostly_flat or model.predominant_pitch not in ("0:12", "unspecified"))
         else f"predominant pitch {model.predominant_pitch} on a mostly-sloped roof (pitch failure)")
+
+    # --- is the partition a roof, or a picture cut into pieces? ---
+    # A roof is piecewise-planar, so a seam between two facets must be a place
+    # the surface actually creases. Two facets on one plane are one facet; two
+    # planes whose intersection line is nowhere near the seam mean we cut a
+    # single surface in half. 601 Gulf Way shipped four parallel strips at
+    # 1/12, 4/12 and 7/12 with zero ridge and zero hip, and passed clean.
+    pa = report_input.get("partition_audit")
+    if pa and pa.get("seams"):
+        unreal = pa.get("unreal_seam_fraction", 0.0)
+        add("partition_is_planar", WARN, unreal <= 0.25,
+            f"{pa['false_seams']} same-plane and {pa['fictional_seams']} "
+            f"non-creasing seam(s) of {pa['seams']} "
+            f"({unreal:.0%}, {pa['false_seam_m'] + pa['fictional_seam_m']:.1f} m) — "
+            f"these are not roof edges, and the facets either side of them are "
+            f"not separate roof planes")
 
     # --- empirical roof grammar, from six EagleView Premium reports ---
     # The first bounds in this gate derived from GROUND TRUTH rather than

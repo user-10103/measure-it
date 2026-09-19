@@ -95,6 +95,8 @@ def fetch_chip(lat: float, lon: float, state: str, out_dir: Path,
 
 # plain-English wording for a client-facing cover; the check ids stay in the log
 _WHY = {"outline_on_target": "the roof outline may cover more than this building",
+        "partition_is_planar": "some roof faces are not separate roof planes",
+        "building_selection": "we could not confirm this is the right building",
         "edges_typed": "roof edge structure not resolved",
         "pitch_resolved": "roof pitch could not be measured",
         "slope_applied": "sloped area not verified",
@@ -495,6 +497,24 @@ def generate_roof_report(
         # (ridge/hip/valley/flashing/transition — the Holland criterion)
         report_input["edges"] = classify_internal_edges(
             report_input["edges"], roof.facets, annotations)
+        # Re-type from the PLANES. classify_internal_edges reads only is_flat,
+        # aspect_deg and median_z — never plane_abc, which annotations has
+        # carried all along. Aspect is a compass bearing; it cannot say whether
+        # the two surfaces actually MEET at the seam we drew, and that is the
+        # question that separates a roof from a picture cut into pieces.
+        from src.roofs.roof_rules import apply_plane_rules
+        report_input["edges"], _partition = apply_plane_rules(
+            report_input["edges"], roof.facets, annotations)
+        report_input["partition_audit"] = _partition.to_dict()
+        if _partition.false_seams or _partition.fictional_seams:
+            logger.warning(
+                "partition: %d of %d seams are not real creases (%.1f m) — "
+                "%d same-plane, %d where the planes fold elsewhere. Areas and "
+                "pitches derived from this partition inherit that.",
+                _partition.false_seams + _partition.fictional_seams,
+                _partition.total_seams,
+                _partition.false_len_m + _partition.fictional_len_m,
+                _partition.false_seams, _partition.fictional_seams)
         # plan -> true sloped lengths (hips/valleys/rakes lengthen; level
         # eaves/ridges stay put)
         grads = {fid: a["grad"] for fid, a in annotations.items()}

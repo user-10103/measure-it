@@ -26,7 +26,8 @@ from typing import Callable, List, Optional, Tuple
 import numpy as np
 
 from src.roofs.building_select import select_building_mask
-from src.roofs.mask_facets import masks_to_facets, outline_polygon
+from src.roofs.mask_facets import (_outline_mask, masks_to_facets,
+                                   outline_polygon)
 from src.roofs.segment import Facet
 
 logger = logging.getLogger(__name__)
@@ -167,11 +168,36 @@ def segment_roof_sam(
             roof_mask = anchor
     if roof_mask is not None:
         outline_px = outline_polygon(roof_mask, simplify_px)
+        # WHAT WE DRAW IS WHAT WE MEASURED. outline_polygon returns the LARGEST
+        # polygon of the mask, while the clip below used the WHOLE mask — so a
+        # mask spanning four detached buildings drew ONE and measured FOUR. The
+        # facet count, every area, and every edge total carried the neighbours
+        # while the diagram showed the target alone. Measured on a synthetic
+        # four-building row: the report displayed 25% of what it measured, a 4x
+        # overstatement with nothing on the page to reveal it. It is also why
+        # 1845 Morrill St broke the perimeter-per-ksqft invariant at 30.6
+        # against a floor of 56 — area from four buildings, perimeter from one.
+        #
+        # Clipping to the polygon we actually draw makes the two agree by
+        # construction rather than by the mask happening to be single-part.
+        # (It also hands regularize the real polygon instead of making
+        # masks_to_facets re-derive it from a raster.)
+        if outline_px is not None:
+            dropped = int(roof_mask.sum()) - int(_outline_mask(
+                outline_px, roof_mask.shape[:2]).sum())
+            if dropped > 0.02 * roof_mask.sum():
+                logger.warning(
+                    "outline: %d px (%.0f%% of the roof mask) lie outside the "
+                    "drawn outline and will NOT be measured — the mask is "
+                    "multi-part, most likely neighbouring buildings",
+                    dropped, 100 * dropped / roof_mask.sum())
 
     # 2. facets — "roof facet" masks -> clean partition, clipped to the outline
+    # we draw (outline_px), never the raw mask.
     f_masks, f_scores = predict_masks(chip, facet_concept)
     facets, lbl = masks_to_facets(
-        f_masks, f_scores, outline=roof_mask,
+        f_masks, f_scores, outline=(outline_px if outline_px is not None
+                                    else roof_mask),
         score_thr=score_thr, iou_thr=iou_thr, min_area_frac=min_area_frac,
         max_area_frac=max_area_frac, simplify_px=simplify_px,
         fill_to_outline=fill_to_outline, regularize=regularize, snap_px=snap_px,

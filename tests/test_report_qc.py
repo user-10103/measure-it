@@ -338,9 +338,22 @@ def test_a_clean_selection_does_not_warn():
     assert sel["ok"], sel
 
 
-def test_selection_check_is_absent_without_the_evidence():
-    ids = {c["id"] for c in score_report(_good())["checks"]}
-    assert "building_selection" not in ids
+def test_missing_selection_evidence_warns_rather_than_vanishing():
+    """A check that disappears reads exactly like a check that passed.
+
+    This used to assert the OPPOSITE — that with no evidence the check is
+    simply absent. That was the defect: the county-GIS chip fetcher never
+    recorded pin_in_footprint, so on the preferred imagery path the question
+    "is this the right building?" was never asked, and the report page looked
+    identical to one where it had been asked and answered. 3400 Gulf Blvd (the
+    Don CeSar) shipped a clean 1336 sqft report for a corner outbuilding that
+    way.
+    """
+    checks = {c["id"]: c for c in score_report(_good())["checks"]}
+    assert "building_selection" in checks
+    sel = checks["building_selection"]
+    assert not sel["ok"]
+    assert "never checked" in sel["detail"]
 
 
 def test_an_ambiguous_pick_is_flagged_even_when_the_pin_is_inside():

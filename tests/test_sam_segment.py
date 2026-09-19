@@ -272,3 +272,39 @@ def test_selection_is_none_without_an_anchor_so_qc_can_say_so():
 
     res = segment_roof_sam(predict, chip, regularize=False, min_area_frac=0.0)
     assert res.selection is None
+
+
+def test_the_report_measures_exactly_what_it_draws():
+    """1845 Morrill St: outline drawn around ONE building, facets on FOUR.
+
+    outline_polygon returns the LARGEST polygon of the mask; the clip used the
+    WHOLE mask. A four-building mask therefore drew one and measured four —
+    area, facet count and every edge total carried the neighbours while the
+    diagram showed the target alone. Nothing on the page revealed it.
+    """
+    from shapely.geometry import box
+    h = w = 200
+    blob = np.zeros((h, w), bool)
+    facet_masks = []
+    for x0 in (10, 60, 110, 160):
+        blob[80:120, x0:x0 + 30] = True
+        for y0, y1 in ((80, 100), (100, 120)):
+            m = np.zeros((h, w), bool)
+            m[y0:y1, x0:x0 + 30] = True
+            facet_masks.append(m)
+
+    def predict(chip_, concept):
+        if concept == "roof":
+            return np.asarray([blob]), np.asarray([0.95])
+        return np.asarray(facet_masks), np.full(len(facet_masks), 0.9)
+
+    res = segment_roof_sam(predict, np.zeros((h, w, 3), np.uint8),
+                           regularize=False, min_area_frac=0.0)
+    drawn = res.outline.area
+    measured = sum(f.polygon.area for f in res.facets)
+    # Every measured facet must lie inside the outline we print.
+    assert measured <= drawn * 1.02, (
+        f"measured {measured:.0f} px but drew {drawn:.0f} px — the report is "
+        f"billing area it does not show")
+    for f in res.facets:
+        assert res.outline.buffer(1.0).contains(f.polygon.representative_point())
