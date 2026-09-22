@@ -1,81 +1,166 @@
 #!/usr/bin/env python3
-"""Build the RF-DETR-Seg training dataset from the cleaned Label Studio export.
-
-Runs LOCALLY (CPU) -- dataset prep doesn't belong on the GPU. Produces the
-Roboflow/RF-DETR COCO layout:
-
-  roof_dataset/
-    train/_annotations.coco.json   + chips_needed.txt
-    valid/_annotations.coco.json   + chips_needed.txt
-    test/_annotations.coco.json    + chips_needed.txt
-
-Only TWO categories are emitted -- roof_outline + facet. Pitch is applied by the
-deliverable's policy and aspect is derived geometrically, so the model never has
-to learn them (much easier target, and it matches what we proved about the
-labels). Then fetch the chip PNGs into each split dir (see README) and upload
-roof_dataset/ to RunPod.
-
-Usage (with measure-it importable):
-  PYTHONPATH=/home/salter/Desktop/measure-it/measure-it-main \
-    python build_dataset.py --ls /path/to/project-1-export.json --out roof_dataset
 """
-import argparse
-import json
-import os
+Multi-source dataset builder for RF-DETR training.
+Downloads phase1+carecamp93+switzerland from S3, merges into roof_dataset_v2.
+IDEMPOTENT - safe to re-run.
+Usage: python training/build_dataset.py
+"""
+# ============================================================
+# CELL 2 — Build Full Dataset (ALL sources)
+# Sources:  phase1      ~2710 imgs  (NAIP Florida chips)
+#           carecamp93  ~1143 imgs  (Florida carecamp chips)
+#           switzerland ~7668 imgs  (Switzerland buildings)
+# Downloads annotations from S3, downloads missing images,
+# merges all into roof_dataset_v2 with one COCO JSON per split.
+# IDEMPOTENT — skips sources already present on disk.
+# ============================================================
+import boto3, json, os, sys
+from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from src.data.ls_to_coco import ls_export_to_coco, make_splits
+os.chdir('/content/measure-it')
 
+S3_BUCKET  = 'florida-roofs-v4'
+DATASET    = Path('training/roof_dataset_v2')
+s3         = boto3.client('s3')
 
-def _subset(coco, image_ids):
-    keep = set(image_ids)
-    imgs = [im for im in coco["images"] if im["id"] in keep]
-    anns = [a for a in coco["annotations"] if a["image_id"] in keep]
-    # re-index image + annotation ids to be contiguous per split
-    id_map = {im["id"]: i + 1 for i, im in enumerate(imgs)}
-    for im in imgs:
-        im["id"] = id_map[im["id"]]
-    for j, a in enumerate(anns):
-        a["id"] = j + 1
-        a["image_id"] = id_map[a["image_id"]]
-    return {"images": imgs, "annotations": anns, "categories": coco["categories"]}
+# ── Source definitions ────────────────────────────────────
+# Each entry: (name, ann_key_template, img_s3_prefix, img_s3_bucket)
+SOURCES = [
+    {
+        'name':    'phase1',
+        'ann':     {'train': 'annotations/phase1/train/_annotations.coco.json',
+                    'valid': 'annotations/phase1/valid/_annotations.coco.json',
+                    'test':  'annotations/phase1/test/_annotations.coco.json'},
+        'img_bucket': S3_BUCKET,
+        'img_prefix': 'phase1/',          # phase1/{filename}
+    },
+    {
+        'name':    'carecamp93',
+        'ann':     {'train': 'carecamp93/annotations/train.json',
+                    'valid': 'carecamp93/annotations/valid.json',
+                    'test':  'carecamp93/annotations/test.json'},
+        'img_bucket': S3_BUCKET,
+        'img_prefix': 'carecamp93/',      # carecamp93/{filename}
+    },
+    {
+        'name':    'switzerland',
+        'ann':     {'train': 'switzerland/annotations/train.json',
+                    'valid': 'switzerland/annotations/valid.json',
+                    'test':  None},        # no test split
+        'img_bucket': S3_BUCKET,
+        'img_prefix': 'switzerland/',     # switzerland/{filename}
+    },
+]
 
+# ── Helpers ───────────────────────────────────────────────
+def download_img(args):
+    bucket, key, dst = args
+    if Path(dst).exists():
+        return 'skip'
+    try:
+        s3.download_file(bucket, key, str(dst))
+        return 'ok'
+    except Exception as e:
+        return f'err:{e}'
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--ls", required=True, help="Label Studio JSON export")
-    ap.add_argument("--out", default="roof_dataset")
-    ap.add_argument("--seed", type=int, default=42)
-    args = ap.parse_args()
+def load_coco(bucket, key):
+    try:
+        obj = s3.get_object(Bucket=bucket, Key=key)
+        return json.loads(obj['Body'].read())
+    except Exception as e:
+        print(f'  WARN: could not load {key}: {e}')
+        return None
 
-    coco = ls_export_to_coco(json.load(open(args.ls)))
-    print(f"full: {len(coco['images'])} images, {len(coco['annotations'])} anns, "
-          f"cats={[c['name'] for c in coco['categories']]}")
+# ── Per-split merge ───────────────────────────────────────
+for split in ['train', 'valid', 'test']:
+    out_dir  = DATASET / split
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_json = out_dir / '_annotations.coco.json'
 
-    # --- corrected split: group by unique chip stem, not per-annotation image id ---
-    # make_splits dedupes internally (sorted(set(...))), so passing chip stems
-    # produces 956 unique chips split 80/10/10 with no chip crossing splits.
-    chip_stems = [os.path.splitext(im["file_name"])[0] for im in coco["images"]]
-    stem_splits = make_splits(chip_stems, seed=args.seed)
-    # convert back to image-id sets so subset() still works
-    stem_to_ids = {}
-    for im in coco["images"]:
-        stem = os.path.splitext(im["file_name"])[0]
-        stem_to_ids.setdefault(stem, []).append(im["id"])
-    splits = {sp: [iid for stem in stems for iid in stem_to_ids.get(stem, [])]
-              for sp, stems in stem_splits.items()}
-    # RF-DETR expects folder names train/valid/test
-    name_map = {"train": "train", "val": "valid", "test": "test"}
-    for split, ids in splits.items():
-        folder = name_map.get(split, split)
-        d = os.path.join(args.out, folder)
-        os.makedirs(d, exist_ok=True)
-        sub = _subset(json.loads(json.dumps(coco)), ids)
-        json.dump(sub, open(os.path.join(d, "_annotations.coco.json"), "w"))
-        with open(os.path.join(d, "chips_needed.txt"), "w") as f:
-            f.write("\n".join(im["file_name"] for im in sub["images"]))
-        print(f"  {folder}: {len(sub['images'])} images, {len(sub['annotations'])} anns")
-    print(f"\nwrote {args.out}/  -> next: fetch chip PNGs into each split dir (see README)")
+    merged = {'info': {}, 'licenses': [], 'categories': [], 'images': [], 'annotations': []}
+    next_img_id = 1
+    next_ann_id = 1
+    seen_files  = set()
 
+    for src in SOURCES:
+        ann_key = src['ann'].get(split)
+        if ann_key is None:
+            continue
 
-if __name__ == "__main__":
-    main()
+        print(f'  [{split}] loading {src["name"]} annotations...')
+        coco = load_coco(S3_BUCKET, ann_key)
+        if coco is None:
+            continue
+
+        # Adopt categories from first source (all identical)
+        if not merged['categories']:
+            merged['categories'] = coco.get('categories', [])
+
+        # Remap IDs and collect download tasks
+        tasks = []
+        id_map = {}
+        for img in coco.get('images', []):
+            fname = img['file_name']
+            dst   = out_dir / fname
+            if fname in seen_files:
+                continue          # deduplicate across sources
+            seen_files.add(fname)
+
+            s3_key = src['img_prefix'] + fname
+            tasks.append((src['img_bucket'], s3_key, str(dst)))
+
+            new_img    = dict(img)
+            new_img['id'] = next_img_id
+            id_map[img['id']] = next_img_id
+            merged['images'].append(new_img)
+            next_img_id += 1
+
+        for ann in coco.get('annotations', []):
+            if ann['image_id'] not in id_map:
+                continue
+            new_ann = dict(ann)
+            new_ann['id']       = next_ann_id
+            new_ann['image_id'] = id_map[ann['image_id']]
+            merged['annotations'].append(new_ann)
+            next_ann_id += 1
+
+        # Download missing images (parallel, 32 workers)
+        to_download = [(b, k, d) for b, k, d in tasks if not Path(d).exists()]
+        if to_download:
+            print(f'  [{split}] downloading {len(to_download)} {src["name"]} images...')
+            ok = skip = err = 0
+            with ThreadPoolExecutor(max_workers=32) as pool:
+                futures = {pool.submit(download_img, t): t for t in to_download}
+                for fut in as_completed(futures):
+                    r = fut.result()
+                    if r == 'ok':    ok   += 1
+                    elif r == 'skip': skip += 1
+                    else:            err  += 1
+                    if (ok + err) % 200 == 0:
+                        print(f'    {ok} downloaded, {err} failed...')
+            print(f'  [{split}] {src["name"]}: {ok} downloaded, {err} failed')
+        else:
+            print(f'  [{split}] {src["name"]}: all images already on disk')
+
+    # Write merged COCO JSON
+    with open(out_json, 'w') as f:
+        json.dump(merged, f)
+    print(f'\n[{split}] DONE: {len(merged["images"])} images, '
+          f'{len(merged["annotations"])} annotations → {out_json}\n')
+
+# ── Final summary ─────────────────────────────────────────
+print('\n' + '='*60)
+print('DATASET SUMMARY')
+print('='*60)
+for split in ['train', 'valid', 'test']:
+    out_dir  = DATASET / split
+    n_pngs   = len(list(out_dir.glob('*.png')))
+    coco_f   = out_dir / '_annotations.coco.json'
+    if coco_f.exists():
+        d = json.loads(coco_f.read_text())
+        print(f'  {split:5s}  {n_pngs:5d} PNGs on disk  '
+              f'{len(d["images"]):5d} in COCO  {len(d["annotations"]):6d} annotations')
+    else:
+        print(f'  {split:5s}  {n_pngs:5d} PNGs  NO COCO JSON')
+print('\n✓ Run Cell 3 to start training.')

@@ -8,6 +8,7 @@ from src.output.report_data import build_report_model
 from src.output.pdf_report import generate_report
 from src.output.json_export import export_report_json
 from src.output.csv_export import export_facets_csv, export_edges_csv
+from src.rgb_pipeline import build_report_input
 
 
 def _report_input():
@@ -58,6 +59,81 @@ def test_report_model_totals():
     # edge totals present for ridge + eave
     assert m.edge_totals_ftin["ridge"].endswith("in")
     assert m.edge_totals_ftin["eave"].endswith("in")
+
+
+def test_surface_area_used_in_model():
+    """Facet dicts with surface_area_m2 must drive report totals, not plan_area_m2."""
+    plan_m2 = 50.0
+    slope_deg = 18.43  # 4:12
+    surface_m2 = plan_m2 / math.cos(math.radians(slope_deg))
+    ri = {
+        "address": "test", "building_id": "t", "aerial_image_path": None,
+        "north_angle_deg": 0.0,
+        "facets": [
+            {"facet_id": 0, "polygon_xy": [[0, 0], [10, 0], [10, 5], [0, 5]],
+             "plan_area_m2": plan_m2, "surface_area_m2": surface_m2,
+             "slope_deg": slope_deg, "pitch_string": "4:12",
+             "aspect_bin": "S", "is_flat": False},
+        ],
+        "edges": [],
+    }
+    model = build_report_model(ri)
+    expected = m2_to_sqft(surface_m2)
+    assert math.isclose(model.total_area_sqft, expected, rel_tol=0.001)
+    assert model.total_area_sqft > m2_to_sqft(plan_m2)
+
+
+def test_flat_facets_surface_equals_plan():
+    """Flat facets must not have a slope correction applied."""
+    plan_m2 = 100.0
+    ri = {
+        "address": "test", "building_id": "t", "aerial_image_path": None,
+        "north_angle_deg": 0.0,
+        "facets": [
+            {"facet_id": 0, "polygon_xy": [[0, 0], [10, 0], [10, 10], [0, 10]],
+             "plan_area_m2": plan_m2, "surface_area_m2": plan_m2,
+             "slope_deg": 0.0, "pitch_string": "0:12",
+             "aspect_bin": "flat", "is_flat": True},
+        ],
+        "edges": [],
+    }
+    model = build_report_model(ri)
+    assert math.isclose(model.flat_area_sqft, m2_to_sqft(plan_m2), abs_tol=0.1)
+    assert math.isclose(model.pitched_area_sqft, 0.0, abs_tol=0.1)
+
+
+def test_build_report_input_surface_area_correction():
+    """build_report_input must set surface_area_m2 > plan_area_m2 for pitched facets."""
+    from shapely.geometry import Polygon
+    from src.roofs.segment import Facet
+    from src.roofs.plane_fit import plane_from_pitch_aspect
+
+    slope_deg = 20.0
+    poly = Polygon([(0, 0), (10, 0), (10, 5), (0, 5)])
+    plane = plane_from_pitch_aspect(slope_deg, aspect_bin="S")
+    f = Facet(facet_id=0, polygon=poly, plane=plane, slope_deg=slope_deg, aspect_bin="S")
+
+    ri = build_report_input("test addr", "bld", [f], [])
+    facet = ri["facets"][0]
+    assert "surface_area_m2" in facet
+    assert facet["surface_area_m2"] > facet["plan_area_m2"]
+    expected_ratio = 1.0 / math.cos(math.radians(slope_deg))
+    actual_ratio = facet["surface_area_m2"] / facet["plan_area_m2"]
+    assert math.isclose(actual_ratio, expected_ratio, rel_tol=0.01)
+
+
+def test_build_report_input_flat_no_surface_correction():
+    from shapely.geometry import Polygon
+    from src.roofs.segment import Facet
+    from src.roofs.plane_fit import plane_from_pitch_aspect
+
+    poly = Polygon([(0, 0), (10, 0), (10, 5), (0, 5)])
+    plane = plane_from_pitch_aspect(0.0, aspect_bin="flat")
+    f = Facet(facet_id=0, polygon=poly, plane=plane, slope_deg=0.0, aspect_bin="flat")
+
+    ri = build_report_input("test addr", "bld", [f], [])
+    facet = ri["facets"][0]
+    assert math.isclose(facet["surface_area_m2"], facet["plan_area_m2"], rel_tol=0.001)
 
 
 def test_generate_pdf_and_exports(tmp_path):

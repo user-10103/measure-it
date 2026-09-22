@@ -1,0 +1,314 @@
+"""End-to-end service test: injected predictors + chip -> 6-page PDF + facts."""
+import numpy as np
+import pytest
+from affine import Affine
+
+from src.serve.report_service import generate_roof_report
+
+
+def _rect(h, w, y0, y1, x0, x1):
+    m = np.zeros((h, w), bool)
+    m[y0:y1, x0:x1] = True
+    return m
+
+
+H = W = 100
+ROOF = _rect(H, W, 20, 80, 20, 80)
+QUADS = [_rect(H, W, 20, 50, 20, 50), _rect(H, W, 20, 50, 50, 80),
+         _rect(H, W, 50, 80, 20, 50), _rect(H, W, 50, 80, 50, 80)]
+
+
+def fake_facets(chip, concept):
+    # emits a whole-roof mask too — the service must not collapse to 1 facet
+    return np.asarray([ROOF] + QUADS), np.asarray([0.92, 0.7, 0.68, 0.66, 0.64])
+
+
+def fake_outline(chip, concept):
+    return np.asarray([ROOF]), np.asarray([0.95])
+
+
+def no_outline(chip, concept):
+    return np.zeros((0, H, W), bool), np.zeros((0,))
+
+
+def fake_chip(lat, lon, state, out_dir, chip_buffer_m=18.0):
+    from PIL import Image
+    chip = np.full((H, W, 3), 120, np.uint8)
+    png = out_dir / "chip.png"
+    Image.fromarray(chip).save(png)
+    # 0.6 m/px NAIP-like metric transform
+    return chip, Affine(0.6, 0, 500000.0, 0, -0.6, 3100000.0), str(png)
+
+
+def test_end_to_end_pdf_and_facts(tmp_path):
+    res = generate_roof_report(
+        (28.0303, -80.69809), "FL", fake_facets, fake_outline,
+        out_dir=tmp_path, label="909 Spring Island Way",
+        chip_fetcher=fake_chip,
+    )
+    assert res.num_facets == 4                       # whole-roof mask dropped
+    assert res.outline_found
+    with open(res.pdf_path, "rb") as fh:
+        assert fh.read(5) == b"%PDF-"
+    # metric CRS: 60x60 px roof at 0.6 m/px ~ 1296 m2
+    assert 1000 < res.plan_area_m2 < 1600
+    assert "eave" in res.edge_totals_m               # typed edge graph present
+    assert set(res.edge_totals_m) & {"ridge", "hip", "valley"}
+
+
+def test_coords_string_input(tmp_path):
+    res = generate_roof_report(
+        "28.0303, -80.69809", "FL", fake_facets, fake_outline,
+        out_dir=tmp_path, chip_fetcher=fake_chip,
+    )
+    assert res.location_source == "coordinates"
+    assert abs(res.lat - 28.0303) < 1e-6
+
+
+def test_outline_fallback_from_facet_union(tmp_path):
+    res = generate_roof_report(
+        (28.0, -80.7), "FL", fake_facets, no_outline,
+        out_dir=tmp_path, chip_fetcher=fake_chip,
+    )
+    assert not res.outline_found                     # zero-shot missed...
+    assert res.edge_totals_m.get("eave", 0) > 0      # ...but eaves still exist
+    with open(res.pdf_path, "rb") as fh:
+        assert fh.read(5) == b"%PDF-"
+
+
+def test_lidar_fusion_adds_pitch(tmp_path):
+    # LiDAR grid over the roof in the fake chip's WORLD CRS (0.6 m/px,
+    # origin 500000/3100000, y down); z = 0.5*(x-x0) -> every facet "6:12"
+    xs, ys = np.meshgrid(np.arange(500010.0, 500050.0, 0.5),
+                         np.arange(3099950.0, 3099990.0, 0.5))
+    x, y = xs.ravel(), ys.ravel()
+    pts = np.column_stack([x, y, 0.5 * (x - 500000.0)])
+    res = generate_roof_report(
+        (28.0303, -80.69809), "FL", fake_facets, fake_outline,
+        out_dir=tmp_path, chip_fetcher=fake_chip, lidar_points=pts,
+    )
+    # the 4 quads lie on ONE plane -> the coplanar merge correctly makes 1 facet
+    assert res.num_facets == 1
+    assert res.num_pitched == 1
+    with open(res.pdf_path, "rb") as fh:
+        assert fh.read(5) == b"%PDF-"
+
+
+def test_without_lidar_num_pitched_zero(tmp_path):
+    res = generate_roof_report(
+        (28.0303, -80.69809), "FL", fake_facets, fake_outline,
+        out_dir=tmp_path, chip_fetcher=fake_chip,
+    )
+    assert res.num_pitched == 0                       # imagery-only floor
+
+
+def test_use_lidar_autofetch(tmp_path, monkeypatch):
+    """use_lidar=True fetches points via ept_fetch and pitches the facets."""
+    from shapely.geometry import box as shp_box
+
+    def fake_chip_with_meta(lat, lon, state, out_dir, chip_buffer_m=18.0):
+        chip, tr, png = fake_chip(lat, lon, state, out_dir, chip_buffer_m)[:3]
+        return chip, tr, png, None, {"crs": "EPSG:32617",
+                                     "footprint_wgs84": shp_box(-80.7, 28.0, -80.699, 28.001)}
+
+    def fake_fetch(lat, lon, fp, crs, **kw):
+        xs, ys = np.meshgrid(np.arange(500010.0, 500050.0, 0.5),
+                             np.arange(3099950.0, 3099990.0, 0.5))
+        x, y = xs.ravel(), ys.ravel()
+        pts = np.column_stack([x, y, 0.5 * (x - 500000.0)])
+        return (pts, None) if kw.get("with_ground") else pts
+
+    import src.lidar.ept_fetch as ef
+    monkeypatch.setattr(ef, "fetch_roof_points", fake_fetch)
+    res = generate_roof_report(
+        (28.0303, -80.69809), "FL", fake_facets, fake_outline,
+        out_dir=tmp_path, chip_fetcher=fake_chip_with_meta, use_lidar=True,
+    )
+    # 4 coplanar quads merge to 1 facet; it gets a pitch
+    assert res.num_pitched == 1 and res.num_facets == 1
+    # slope runs east -> the east-west perimeter runs relabel to RAKE
+    assert res.edge_totals_m.get("rake", 0) > 0
+    assert res.edge_totals_m.get("eave", 0) > 0        # north-south runs stay
+
+
+def test_lidar_fetch_failure_degrades_gracefully(tmp_path, monkeypatch):
+    def fake_chip_with_meta(lat, lon, state, out_dir, chip_buffer_m=18.0):
+        from shapely.geometry import box as shp_box
+        chip, tr, png = fake_chip(lat, lon, state, out_dir, chip_buffer_m)[:3]
+        return chip, tr, png, None, {"crs": "EPSG:32617",
+                                     "footprint_wgs84": shp_box(0, 0, 1, 1)}
+
+    import src.lidar.ept_fetch as ef
+    monkeypatch.setattr(ef, "fetch_roof_points",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("net down")))
+    res = generate_roof_report(
+        (28.0, -80.7), "FL", fake_facets, fake_outline,
+        out_dir=tmp_path, chip_fetcher=fake_chip_with_meta, use_lidar=True,
+    )
+    assert res.num_pitched == 0                        # imagery-only, no crash
+    with open(res.pdf_path, "rb") as fh:
+        assert fh.read(5) == b"%PDF-"
+
+
+def test_no_facets_refuses_rather_than_shipping_an_empty_pdf(tmp_path):
+    """CONTRACT CHANGE, deliberate. This used to assert a PDF was produced --
+    "graceful, not a crash". Field evidence says graceful-but-empty is the worse
+    failure: 425 NE 9 Ave, Fort Lauderdale shipped a PDF whose headline number
+    was 0 sqft, from 26 raw SAM masks of which none covered the footprint.
+
+    Not crashing is still the requirement, and a ValueError satisfies it -- it is
+    the same shape as select_building's "No buildings found within..." which
+    run_sweep already records as an ERROR row rather than dying. The difference
+    is that the client gets a stated refusal instead of a document asserting a
+    roof has no area."""
+    with pytest.raises(ValueError, match="No roof facets found"):
+        generate_roof_report(
+            (28.0, -80.7), "FL", no_outline, no_outline,
+            out_dir=tmp_path, chip_fetcher=fake_chip,
+        )
+
+
+# --- the LiDAR-facet experiment actually fires ------------------------------
+# This session's recurring failure is a diagnostic that was emitted into
+# somewhere nobody reads, so the code "did not run" as far as anyone could tell.
+# Before spending a GPU run on MEASURE_IT_LIDAR_FACETS=1, prove the branch
+# executes and swaps the facets.
+
+def _hip_points(ox=500000.0, oy=3100000.0, step=0.5):
+    """A four-plane hip in the same metric CRS fake_chip uses."""
+    xs, ys = np.meshgrid(np.arange(12, 48, step), np.arange(12, 48, step))
+    x, y = xs.ravel(), ys.ravel()
+    z = np.minimum(np.minimum(x - 12, 48 - x), np.minimum(y - 12, 48 - y)) * 0.4
+    return np.column_stack([ox + x, oy - y, 10.0 + z])
+
+
+def test_lidar_facet_experiment_replaces_the_sam_facets(tmp_path, monkeypatch, caplog):
+    import logging
+
+    monkeypatch.setenv("MEASURE_IT_LIDAR_FACETS", "1")
+    with caplog.at_level(logging.WARNING, logger="src.serve.report_service"):
+        res = generate_roof_report(
+            (28.0303, -80.69809), "FL", fake_facets, fake_outline,
+            out_dir=tmp_path, label="experiment", chip_fetcher=fake_chip,
+            lidar_points=_hip_points(),
+        )
+    msg = "\n".join(r.getMessage() for r in caplog.records)
+    # "LIDAR FACETS" alone would also match the FAILURE message — assert the
+    # swap, not merely that the branch was entered. Loose assertions of exactly
+    # this shape are what let several of this session's diagnostics look like
+    # they had run when they had not.
+    assert "LIDAR FACETS: replacing" in msg, f"no swap happened: {msg}"
+    assert "keeping SAM facets" not in msg, msg
+    assert res.pdf_path and res.num_facets >= 1
+
+
+def test_the_experiment_is_off_unless_asked(tmp_path, monkeypatch, caplog):
+    """Default OFF: a normal run must be byte-identical in behaviour."""
+    import logging
+
+    monkeypatch.delenv("MEASURE_IT_LIDAR_FACETS", raising=False)
+    with caplog.at_level(logging.WARNING, logger="src.serve.report_service"):
+        res = generate_roof_report(
+            (28.0303, -80.69809), "FL", fake_facets, fake_outline,
+            out_dir=tmp_path, label="control", chip_fetcher=fake_chip,
+            lidar_points=_hip_points(),
+        )
+    assert "LIDAR FACETS" not in "\n".join(r.getMessage() for r in caplog.records)
+    assert res.num_facets == 4              # the SAM facets, untouched
+
+
+def test_a_failed_experiment_keeps_the_sam_facets(tmp_path, monkeypatch, caplog):
+    """An empty result means 'this did not work here'. It must never make a
+    report worse — the SAM facets stay and the run continues."""
+    import logging
+
+    monkeypatch.setenv("MEASURE_IT_LIDAR_FACETS", "1")
+    monkeypatch.setattr("src.roofs.lidar_facets.lidar_facets_from_points",
+                        lambda *a, **k: [])
+    with caplog.at_level(logging.WARNING, logger="src.serve.report_service"):
+        res = generate_roof_report(
+            (28.0303, -80.69809), "FL", fake_facets, fake_outline,
+            out_dir=tmp_path, label="fallback", chip_fetcher=fake_chip,
+            lidar_points=_hip_points(),
+        )
+    msg = "\n".join(r.getMessage() for r in caplog.records)
+    assert "keeping SAM facets" in msg, msg
+    assert res.num_facets == 4
+
+
+def test_a_roof_with_no_facets_refuses_instead_of_reporting_zero(tmp_path):
+    """425 NE 9 Ave, Fort Lauderdale: 26 raw SAM masks, none covering the
+    footprint ("no roof mask covers the footprint (best 0%)"), a PDF reporting
+    0 sqft, gate score 29%. The gate caught it and the document shipped anyway.
+
+    A PDF whose headline number is 0 sqft looks like a finished deliverable and
+    is worse than no PDF. Refusing is recoverable; a confident zero is not."""
+    def no_facets(chip, concept):
+        return np.zeros((0, H, W), bool), np.zeros((0,))
+
+    with pytest.raises(ValueError, match="No roof facets found"):
+        generate_roof_report(
+            (28.0303, -80.69809), "FL", no_facets, fake_outline,
+            out_dir=tmp_path, label="unmeasurable", chip_fetcher=fake_chip,
+        )
+
+
+def test_the_refusal_names_the_imagery_it_failed_on(tmp_path):
+    """Broward serves 0.1524 m/px against 0.0762 in the counties that worked --
+    roughly half the model's ~800 px training chip. The refusal has to carry the
+    imagery tier, or the resolution floor stays uncharacterised."""
+    def no_facets(chip, concept):
+        return np.zeros((0, H, W), bool), np.zeros((0,))
+
+    with pytest.raises(ValueError) as e:
+        generate_roof_report(
+            (28.0303, -80.69809), "FL", no_facets, fake_outline,
+            out_dir=tmp_path, label="unmeasurable", chip_fetcher=fake_chip,
+        )
+    assert "m/px" in str(e.value), str(e.value)
+
+
+# --- shared-boundary tiling on the serving path -----------------------------
+# geom_edges reads interior ridge/hip/valley edges from boundary.intersection of
+# adjacent facets, and facet polygons never come out exactly coincident. Its own
+# docstring records the result: "1600 Sarno shipped with edge_totals_m ==
+# {'eave': 65.28}" — every internal seam ABSENT rather than mislabelled.
+
+def test_tiling_runs_by_default_and_reports_what_it_moved(tmp_path, caplog):
+    import logging
+
+    with caplog.at_level(logging.INFO, logger="src.serve.report_service"):
+        res = generate_roof_report(
+            (28.0303, -80.69809), "FL", fake_facets, fake_outline,
+            out_dir=tmp_path, label="tiled", chip_fetcher=fake_chip,
+        )
+    msg = "\n".join(r.getMessage() for r in caplog.records)
+    assert "tiled seams" in msg, msg
+    assert res.num_facets == 4                 # count preserved, ids preserved
+    assert set(res.edge_totals_m) & {"ridge", "hip", "valley"}
+
+
+def test_tiling_can_be_disabled(tmp_path, monkeypatch, caplog):
+    import logging
+
+    monkeypatch.setenv("MEASURE_IT_TILE", "0")
+    with caplog.at_level(logging.INFO, logger="src.serve.report_service"):
+        generate_roof_report(
+            (28.0303, -80.69809), "FL", fake_facets, fake_outline,
+            out_dir=tmp_path, label="untiled", chip_fetcher=fake_chip,
+        )
+    assert "tiled seams" not in "\n".join(r.getMessage() for r in caplog.records)
+
+
+def test_tiling_failure_never_breaks_the_report(tmp_path, monkeypatch):
+    """tile_facets is a post-process. A failure must leave the facets as they
+    were and let the report continue — it can only ever improve seams."""
+    def _boom(*a, **kw):
+        raise RuntimeError("noding failed")
+
+    monkeypatch.setattr("src.roofs.tiling.tile_facets", _boom)
+    res = generate_roof_report(
+        (28.0303, -80.69809), "FL", fake_facets, fake_outline,
+        out_dir=tmp_path, label="tilefail", chip_fetcher=fake_chip,
+    )
+    assert res.num_facets == 4 and res.pdf_path

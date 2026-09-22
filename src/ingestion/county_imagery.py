@@ -42,14 +42,95 @@ COUNTY_ENDPOINTS = {
                "Aerials/Aerials2023/ImageServer",
         "gsd_m": 0.0762, "year": 2023, "reachable": False,  # blocks some IPs
     },
+    # Found via the ArcGIS Online public search API and verified live
+    # 2026-09-14: ?f=json returns the service (pixelSizeX below) and an
+    # anonymous exportImage returns real pixels. No token, no account.
+    "Sarasota": {
+        "url": "https://ags3.scgov.net/agsimg/rest/services/Imagery2020s/"
+               "SC2026WM/ImageServer",
+        "gsd_m": 0.0762, "year": 2026, "reachable": True,
+    },
+    "Broward": {
+        "url": "https://bcgishub.broward.org/image/rest/services/Imagery/"
+               "aerialscurrent/ImageServer",
+        "gsd_m": 0.1524, "year": 2025, "reachable": True,
+    },
+    # Lee lived only in adresses/pipeline/utils/county_imagery.py — a SECOND
+    # copy of this registry that the pipeline does not import. So the finest
+    # imagery found in Florida (0.25 ft = 7.62 cm, hand-verified 2026-08-24 on
+    # a 1050x1050 Cape Coral fetch: solar panels countable, vents visible) was
+    # unreachable from the code that makes reports, and every Lee address was
+    # measured on 0.6 m NAIP. Re-verified live 2026-09-19: pixelSizeX 0.25,
+    # wkid 6443 (NAD83(2011) FL West ftUS), caps Image,Metadata,Catalog.
+    # NOTE the unit: 0.25 read as metres would call this 25 cm imagery.
+    "Lee": {
+        "url": "https://gisimageserver.leegov.com/imageserver/rest/services/"
+               "Aerials/Aerials2025/ImageServer",
+        "urls": [
+            "https://gisimageserver.leegov.com/imageserver/rest/services/"
+            "Aerials/Aerials2025/ImageServer",
+            "https://gisimageserver.leegov.com/imageserver/rest/services/"
+            "Aerials/Aerials2024/ImageServer",
+        ],
+        "gsd_m": 0.0762, "year": 2025, "reachable": True,
+        "maxImageWidth": 15000, "mosaic": False,
+    },
+    # Found by tools/discover_fl_imagery.py 2026-09-19 and VERIFIED with a real
+    # 512x512 exportImage over Palm Coast: 451 KB, pixel std 35.3 — imagery,
+    # not a blank tile. wkid 2881 = NAD83 HARN FL East ftUS, so pixelSizeX 0.25
+    # is 0.25 FEET; read as metres it would look like 25 cm.
+    "Flagler": {
+        "url": "https://maps.flaglercounty.gov/imagery/rest/services/"
+               "Orthoimagery/Aerials2023_Eagle_View/ImageServer",
+        "gsd_m": 0.0762, "year": 2023, "reachable": True,
+    },
+    # Verified over Bradenton: 446 KB, pixel std 55.2. NOTE wkid 3857 — the
+    # declared pixel size is in WEB MERCATOR units, which at 27.5 N are
+    # stretched by 1/cos(lat), so true ground resolution is ~6.8 cm, slightly
+    # BETTER than the 7.62 recorded here. Erring coarse is the safe direction:
+    # it never promises resolution the imagery does not have.
+    "Manatee": {
+        "url": "https://www.mymanatee.org/gisimg/rest/services/2024/"
+               "AERIAL_2024_RGB/ImageServer",
+        "gsd_m": 0.0762, "year": 2024, "reachable": True,
+    },
+    # Collier is NOT here on purpose: caps "Image,TilesOnly" at 15 cm. It has no
+    # exportImage and answers 400. Registering it would fail every Naples
+    # address into the NAIP fallback while the registry claimed coverage.
 }
 
+# HOW TO GROW THIS REGISTRY (no token, no account):
+#
+#   curl -sG --data-urlencode 'q=<county> imagery type:"Image Service" access:public' \
+#        --data 'f=json&num=20' https://www.arcgis.com/sharing/rest/search
+#
+# then for each candidate url, GET "<url>?f=json" and read pixelSizeX for the
+# native GSD, and confirm an anonymous exportImage returns image bytes. Counties
+# publish these themselves, so coverage grows one verified endpoint at a time.
+#
+# Verified failures are worth recording too, so they are not re-probed:
+#   ca.dep.state.fl.us (FCDOP statewide) -- 499 Token Required on everything
+#   gis.brevardfl.gov                    -- does not resolve
+#   maps.brevardfl.gov                   -- Cloudflare challenge (403)
+#
+# NOTE these servers commonly answer with JPEG, not PNG. gis_chip._export_image
+# must keep accepting jpgpng: a PNG-only magic-number check silently discards
+# working 3-inch imagery.
+
 # Statewide fallback: FL County Digital Orthoimagery Program (FCDOP), 6-inch
-# (0.15 m), 3-year cycle, public record. Covers any county lacking a 3-inch set.
+# (0.15 m), 3-year cycle. It was recorded here as reachable and public. It is
+# NOT: the service answers every request, including a bare ?f=json, with
+#     {"error":{"code":499,"message":"Token Required"}}
+# Verified 2026-09-14 against both the ImageServer and its parent folder. That
+# is why 1250 Pineapple Ave kept measuring off 30 cm NAIP -- the resolver was
+# correctly falling through to a statewide set that has never been able to
+# answer. Needs an ArcGIS token; skipped entirely unless one is configured,
+# rather than spending a request and a timeout on a guaranteed 499.
 FCDOP_FALLBACK = {
     "url": "https://ca.dep.state.fl.us/arcgis/rest/services/Imagery/"
            "Aerial_Imagery_2019/ImageServer",
-    "gsd_m": 0.15, "year": 2019, "reachable": True,
+    "gsd_m": 0.15, "year": 2019, "reachable": False,
+    "requires_token": True, "token_env": "FDEP_ARCGIS_TOKEN",
 }
 
 

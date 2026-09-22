@@ -5,6 +5,7 @@ Queries USGS 3DEP WESM spatial index to find LiDAR coverage for a location.
 Single responsibility: find the best available LiDAR dataset and construct EPT URL.
 """
 
+import datetime as _dt
 import logging
 import os
 import re
@@ -20,6 +21,207 @@ from shapely.geometry import Point
 from src.config import WESM_INDEX_PATH
 
 logger = logging.getLogger(__name__)
+
+ENTWINE_RESOURCES_URL = "https://usgs.entwine.io/boundaries/resources.geojson"
+ENTWINE_CACHE = Path(__file__).resolve().parents[2] / "data" / "ept_resources.geojson"
+ENTWINE_TTL_DAYS = 30        # refresh the coverage index after this many days
+USGS_EPT_BASE = "https://s3-us-west-2.amazonaws.com/usgs-lidar-public"
+_YEAR_MIN = 1990             # no 3DEP-era survey predates this
+# a year sitting immediately after one of these is a RELEASE year, not a
+# collection year (e.g. ..._2017_LAS_2019 was collected 2017, released 2019)
+_RELEASE_MARKERS = ("LAS", "PUBLISHED", "REL")
+
+
+def _ensure_entwine_cache(refresh: Optional[bool] = None) -> bool:
+    """Make sure the entwine coverage index on disk is present and fresh enough.
+
+    Returns True when a usable cache exists.
+
+    This used to be ``if not ENTWINE_CACHE.exists()`` — fetched once and then kept
+    forever, so every survey USGS published after the first run was invisible and
+    "newest dataset covering this point" silently meant "newest as of first run".
+    Now it refreshes after ``ENTWINE_TTL_DAYS`` (override with
+    MEASURE_IT_ENTWINE_TTL_DAYS); MEASURE_IT_ENTWINE_REFRESH=1 or ``refresh=True``
+    forces it.
+
+    A FAILED refresh deliberately falls back to the stale cache: an out-of-date
+    index still finds LiDAR, whereas a hard failure loses pitch for the whole
+    report. Only a missing cache AND a failed download is fatal.
+    """
+    import time
+
+    if refresh is None:
+        refresh = os.getenv("MEASURE_IT_ENTWINE_REFRESH", "0") == "1"
+    try:
+        ttl_days = float(os.getenv("MEASURE_IT_ENTWINE_TTL_DAYS", ENTWINE_TTL_DAYS))
+    except (TypeError, ValueError):
+        ttl_days = ENTWINE_TTL_DAYS
+
+    exists = ENTWINE_CACHE.exists()
+    age_s = (time.time() - ENTWINE_CACHE.stat().st_mtime) if exists else 0.0
+    stale = exists and age_s > ttl_days * 86400.0
+    if exists and not stale and not refresh:
+        return True
+
+    why = "forced" if refresh else ("stale" if stale else "missing")
+    logger.info("Refreshing entwine EPT index (%s) -> %s", why, ENTWINE_CACHE)
+    try:
+        import requests
+        resp = requests.get(ENTWINE_RESOURCES_URL, timeout=120)
+        resp.raise_for_status()
+        ENTWINE_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        ENTWINE_CACHE.write_bytes(resp.content)
+        return True
+    except Exception as e:  # noqa: BLE001 — a stale index beats no LiDAR
+        if exists:
+            logger.warning("entwine index refresh failed (%s) — using stale cache "
+                           "(%.0f days old)", e, age_s / 86400.0)
+            return True
+        logger.error("entwine index unavailable and nothing cached: %s", e)
+        return False
+
+
+def _collection_year(name: str) -> int:
+    r"""Best estimate of the COLLECTION year from a USGS/entwine dataset name.
+
+    Dataset names mix two different quantities, which the previous
+    ``re.search(r"(\d{4})$", name)`` compared against each other:
+
+        USGS_LPC_FL_Upper_Saint_Johns_2017_LAS_2019   collected 2017, released 2019
+        FL_Peninsular_FDEM_Brevard_2018               collected 2018
+        FL_Elgin_2006_2008                            collected across 2006-2008
+
+    Taking the trailing year reads 2019 for the first and 2018 for the second, so a
+    2017 survey outranks a 2018 one purely because its LAS release was later. That
+    is how 1600 Sarno Rd drew Upper-Saint-Johns instead of Brevard.
+
+    Rule: ignore any year directly preceded by a release marker (LAS/PUBLISHED/REL),
+    then take the MAX of what remains — so a collection RANGE is represented by the
+    year it finished, which is the fair thing to compare against a single-year name.
+    Returns 0 when the name carries no plausible year.
+    """
+    current = _dt.date.today().year
+    years: List[int] = []
+    for m in re.finditer(r"(?<!\d)(\d{4})(?!\d)", name):
+        y = int(m.group(1))
+        if not (_YEAR_MIN <= y <= current + 1):
+            continue
+        prefix = name[: m.start()].rstrip("_-").upper()
+        # The marker must be its own TOKEN, not a word ending. "Pinellas" ends
+        # in the letters "LAS", so FL_Peninsular_Pinellas_2018 was read as a
+        # release year and scored 0 -- ranking Pinellas County's 2018 survey
+        # BELOW FL_PinellasCo_2007 and making every Pinellas report measure off
+        # eleven-year-old LiDAR at 2.8 pts/m2. Any county whose name ends in
+        # -las, -rel or -published hits this.
+        last = re.split(r"[_\-\s]", prefix)[-1] if prefix else ""
+        if last in _RELEASE_MARKERS:
+            continue                      # release/publication year, not collection
+        years.append(y)
+    return max(years) if years else 0
+
+
+def _index_density(props: dict, geom) -> float:
+    """Cheap quality proxy: indexed point count per unit of footprint area.
+
+    Only meaningful when the entwine index carries a point count; returns 0.0
+    otherwise, in which case ranking falls through to the name tiebreak. This is a
+    COARSE signal — the real number that matters is points per square metre over
+    the actual parcel (one Tampa roof came back at ~1.3 pts/m2), and that cannot be
+    known without fetching the tiles. Proper per-parcel density gating is future work.
+    """
+    # NOTE the unit. `geom.area` here is SQUARE DEGREES (the entwine index is
+    # WGS84 geojson), so this is NOT points per square metre and never was — it
+    # is usable only as a relative tiebreak between overlapping surveys, and
+    # even that is distorted by latitude. The real figure is measured after the
+    # fetch by fuse_sam_lidar.survey_density.
+    #
+    # Consequence of ranking (-year, -density, name): a 30 pts/m2 2018 survey
+    # loses to a 1.3 pts/m2 2020 survey, and nothing rejects the sparse one --
+    # density decides ORDER, never admission.
+    pts = props.get("points") or props.get("count")
+    try:
+        pts = float(pts)
+    except (TypeError, ValueError):
+        return 0.0
+    try:
+        area = float(geom.area)
+    except Exception:  # noqa: BLE001
+        return 0.0
+    return pts / area if area > 0 else 0.0
+
+
+def discover_ept_candidates(lat: float, lon: float,
+                            refresh: Optional[bool] = None) -> List[dict]:
+    """Every EPT dataset covering a point, best first.
+
+    Returns dicts of ``{name, url, year, density}``. Ranked by collection year
+    (newest first), then indexed point density (densest first), then name ascending.
+
+    The name is the LAST tiebreak and exists only to make the order deterministic.
+    Previously ``max((year, name))`` fell through to comparing names whenever years
+    tied, which quietly made an alphabetical accident the selection criterion.
+
+    Callers that want resilience should walk this list rather than taking [0] — a
+    dataset can cover a point and still yield no usable returns over the building.
+    """
+    import json as _json
+
+    from shapely.geometry import shape as _shape
+
+    if not _ensure_entwine_cache(refresh):
+        return []
+    try:
+        data = _json.load(open(ENTWINE_CACHE))
+    except Exception as e:  # noqa: BLE001
+        logger.error("entwine index unreadable (%s)", e)
+        return []
+
+    pt = Point(lon, lat)
+    out: List[dict] = []
+    for feat in data.get("features", []):
+        props = feat.get("properties", {}) or {}
+        name = props.get("name", "")
+        if not name:
+            continue
+        try:
+            geom = _shape(feat["geometry"])
+            if not geom.contains(pt):
+                continue
+        except Exception:  # noqa: BLE001 — a broken feature shouldn't kill discovery
+            continue
+        out.append({
+            "name": name,
+            "url": f"{USGS_EPT_BASE}/{name}/ept.json",
+            "year": _collection_year(name),
+            "density": _index_density(props, geom),
+        })
+
+    out.sort(key=lambda d: (-d["year"], -d["density"], d["name"]))
+    if len(out) > 1:
+        logger.info("EPT candidates ranked newest-first: %s",
+                    ", ".join(f"{d['name'][:38]}({d['year']})" for d in out[:4]))
+        logger.info("NOTE density tiebreak is in square DEGREES, not pts/m2 — a "
+                    "denser older survey can lose to a sparser newer one; the "
+                    "real density is measured after the fetch")
+    return out
+
+
+def discover_ept_from_entwine(lat: float, lon: float,
+                              refresh: Optional[bool] = None) -> Optional[str]:
+    """Newest EPT dataset covering a point -> ept.json URL, or None.
+
+    Thin wrapper over :func:`discover_ept_candidates` kept for callers that only
+    want one answer. Prefer the candidate list where a fallback is possible.
+    """
+    cands = discover_ept_candidates(lat, lon, refresh=refresh)
+    if not cands:
+        logger.warning(f"No entwine EPT coverage at ({lat:.5f}, {lon:.5f})")
+        return None
+    best = cands[0]
+    logger.info("Entwine EPT for (%.5f, %.5f): %s (%s)%s", lat, lon, best["name"],
+                best["year"] or "year?",
+                f" [+{len(cands) - 1} more covering]" if len(cands) > 1 else "")
+    return best["url"]
 
 
 def discover_lidar_dataset(lat: float, lon: float, index_path: str = None) -> Optional[dict]:

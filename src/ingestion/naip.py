@@ -67,23 +67,27 @@ def latlon_to_naip_quadrangle(lat: float, lon: float) -> str:
 # Pure logic functions (no I/O, no side effects)
 # ============================================================================
 
-def _prioritize_years(available_years: list, preferred_year: Optional[str] = None) -> list:
+def _prioritize_years(available_years: list, preferred_year=None) -> list:
     """
-    Sort years with preferred year first, then newest to oldest.
+    Sort years with preferred year(s) first, then newest to oldest.
 
     Args:
         available_years: List of year strings
-        preferred_year: Year to place first if present
+        preferred_year: Year string, int, or list of year strings/ints to try first
 
     Returns:
         Sorted list of years
     """
     prioritized = []
 
-    if preferred_year and preferred_year in available_years:
-        prioritized.append(preferred_year)
+    if preferred_year is not None:
+        candidates = preferred_year if isinstance(preferred_year, (list, tuple)) else [preferred_year]
+        for y in candidates:
+            y = str(y)
+            if y in available_years and y not in prioritized:
+                prioritized.append(y)
 
-    other_years = [y for y in available_years if y != preferred_year]
+    other_years = [y for y in available_years if y not in prioritized]
     prioritized.extend(sorted(other_years, reverse=True))
 
     return prioritized
@@ -359,6 +363,35 @@ def list_naip_tiles(
     return tiles
 
 
+# Persisted tile-bounds index: each NAIP COG's CRS+bounds, recorded whenever a
+# tile header is read. Makes the per-quad S3 header sweep a one-time cost.
+_TILE_BOUNDS_PATH = DATA_CACHE_DIR / "naip_tile_bounds.json"
+
+
+def _load_tile_bounds_index() -> dict:
+    try:
+        import json as _json
+        return _json.load(open(_TILE_BOUNDS_PATH))
+    except Exception:
+        return {}
+
+
+def _index_tile_bounds(index: dict, tile_key: str, src) -> None:
+    if tile_key not in index:
+        b = src.bounds
+        index[tile_key] = {"crs": str(src.crs),
+                           "bounds": [b.left, b.bottom, b.right, b.top]}
+
+
+def _save_tile_bounds_index(index: dict) -> None:
+    try:
+        import json as _json
+        _TILE_BOUNDS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _json.dump(index, open(_TILE_BOUNDS_PATH, "w"))
+    except Exception as e:
+        logger.debug(f"tile bounds index write failed: {e}")
+
+
 def find_tile_containing_point(
     tiles: list,
     lat: float,
@@ -386,6 +419,50 @@ def find_tile_containing_point(
         >>> tile = find_tile_containing_point(tiles, 28.1178, -82.3951)
     """
     building_wgs84 = Point(lon, lat)
+
+    # Fast path 1: persisted bounds index — every tile bounds ever read
+    # (remotely or locally) is recorded, so each quad's S3 header sweep
+    # happens at most once. Critical with windowed S3 clipping, which no
+    # longer leaves tiles on disk for the local-cache fast path to find.
+    bounds_index = _load_tile_bounds_index()
+    for tile_key in tiles:
+        rec = bounds_index.get(tile_key)
+        if not rec:
+            continue
+        try:
+            tr = Transformer.from_crs("EPSG:4326", rec["crs"], always_xy=True)
+            pt = shp_transform(tr.transform, building_wgs84)
+            if box(*rec["bounds"]).contains(pt):
+                logger.info(f"Found matching tile in bounds index: {Path(tile_key).name}")
+                return tile_key
+        except Exception:
+            continue
+    # If the index already covers every candidate tile and none matched,
+    # the point genuinely has no tile in this prefix.
+    if tiles and all(k in bounds_index for k in tiles):
+        logger.warning(f"Bounds index covers all {len(tiles)} tiles; no tile contains point")
+        return None
+
+    # Fast path 2: a locally cached tile that contains the point.
+    naip_cache = DATA_CACHE_DIR / "naip"
+    if naip_cache.exists():
+        by_name = {Path(k).name: k for k in tiles}
+        for local in sorted(naip_cache.glob("*.tif")):
+            key = by_name.get(local.name)
+            if key is None:
+                continue
+            try:
+                with rasterio.open(local) as src:
+                    _index_tile_bounds(bounds_index, key, src)
+                    tr = Transformer.from_crs("EPSG:4326", src.crs, always_xy=True)
+                    pt = shp_transform(tr.transform, building_wgs84)
+                    if box(*src.bounds).contains(pt):
+                        logger.info(f"Found matching tile in local cache: {local.name}")
+                        _save_tile_bounds_index(bounds_index)
+                        return key
+            except Exception:
+                continue
+
     aws_session = aws_session if aws_session is not None else AWSSession(boto3.Session(), requester_pays=True)
 
     checks = max_checks or len(tiles)
@@ -403,6 +480,7 @@ def find_tile_containing_point(
             try:
                 # Read tile metadata without full download
                 with rasterio.open(f"/vsis3/{bucket}/{tile_key}") as src:
+                    _index_tile_bounds(bounds_index, tile_key, src)
                     # Create transformer on first successful tile read
                     if transformer is None:
                         transformer = Transformer.from_crs("EPSG:4326", src.crs, always_xy=True)
@@ -412,6 +490,7 @@ def find_tile_containing_point(
                     tile_poly = box(*src.bounds)
                     if tile_poly.contains(building_transformed):
                         logger.info(f"Found matching tile: {Path(tile_key).name}")
+                        _save_tile_bounds_index(bounds_index)
                         return tile_key
 
             except Exception as e:
@@ -419,6 +498,7 @@ def find_tile_containing_point(
                 logger.debug(f"Could not read tile {i}/{checks}: {str(e)[:100]}")
                 continue
 
+    _save_tile_bounds_index(bounds_index)
     # No tile found after checking all candidates
     logger.warning(f"No tile contains point ({lat:.4f}, {lon:.4f}) after checking {checks} tiles")
     return None
@@ -629,8 +709,10 @@ def clip_naip_to_building(
         >>> from src.config import OUTPUT_DIR
         >>> tif, png, meta = clip_naip_to_building(naip_path, building_gdf, OUTPUT_DIR)
     """
-    # Input validation
-    if not naip_path.exists():
+    # Input validation. GDAL virtual paths (/vsis3/, /vsicurl/...) are remote
+    # datasets opened by rasterio directly — a filesystem existence check
+    # would wrongly reject them.
+    if not str(naip_path).startswith("/vsi") and not naip_path.exists():
         raise ValueError(f"NAIP file does not exist: {naip_path}")
     if building_polygon.empty:
         raise ValueError("Building polygon GeoDataFrame is empty")
@@ -641,13 +723,15 @@ def clip_naip_to_building(
     if output_dir is None:
         output_dir = OUTPUT_DIR
 
+    output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Prepare geometry
+    # Prepare geometry — ensure WGS84 so centroid lon/lat are valid degrees
+    if building_polygon.crs is not None and building_polygon.crs.to_epsg() != 4326:
+        building_polygon = building_polygon.to_crs("EPSG:4326")
     if hasattr(building_polygon, 'union_all'):
         building_geom = building_polygon.union_all()
     else:
-        # Fallback for older geopandas versions
         building_geom = building_polygon.unary_union
 
     buffered_geom = _create_buffered_clip_geometry(building_geom, padding_meters)
@@ -721,6 +805,9 @@ def get_naip_for_location(
     if output_dir is None:
         output_dir = OUTPUT_DIR
 
+    # Normalize: S3 paths use lowercase state codes
+    state = state.lower()
+
     # Get quadrangle
     quadrangle = latlon_to_naip_quadrangle(lat, lon)
     logger.info(f"NAIP quadrangle: {quadrangle} for state: {state}")
@@ -741,14 +828,44 @@ def get_naip_for_location(
         logger.error(error_msg)
         raise NAIPNotFoundError(error_msg)
 
-    # Find matching tile
+    # Find matching tile. When the COG header sweep fails (e.g. GDAL/curl
+    # version mismatch), find_tile_containing_point returns None — in that
+    # case fall back to trying ALL tiles in listing order rather than
+    # blindly picking tiles[0], which may not cover the target point.
     tile_key = find_tile_containing_point(tiles, lat, lon)
-    if not tile_key:
-        logger.warning(f"Point not in any tile bounds, using first tile as fallback")
-        tile_key = tiles[0]
+    ordered = [tile_key] + [t for t in tiles if t != tile_key] if tile_key else list(tiles)
 
-    # Download
-    naip_path = download_naip_tile(tile_key)
+    last_err: Optional[Exception] = None
+    for candidate in ordered:
+        local_tile = DATA_CACHE_DIR / "naip" / Path(candidate).name
+        try:
+            # Prefer (1) cached local tile, (2) windowed S3 read, (3) full download.
+            if local_tile.exists():
+                return clip_naip_to_building(local_tile, building_polygon, output_dir)
 
-    # Clip
-    return clip_naip_to_building(naip_path, building_polygon, output_dir)
+            try:
+                vsipath = f"/vsis3/{NAIP_S3_BUCKET}/{candidate}"
+                aws_sess = AWSSession(boto3.Session(), requester_pays=True)
+                with rasterio.Env(aws_sess):
+                    result = clip_naip_to_building(Path(vsipath), building_polygon, output_dir)
+                logger.info(f"Clipped via windowed S3 read: {Path(candidate).name}")
+                return result
+            except NAIPClipError:
+                raise  # geometry outside bounds — skip to next candidate below
+            except Exception as e:
+                logger.warning(f"Windowed S3 clip failed ({e}) — falling back to full download")
+
+            naip_path = download_naip_tile(candidate)
+            return clip_naip_to_building(naip_path, building_polygon, output_dir)
+
+        except NAIPClipError as e:
+            if "outside raster bounds" in str(e):
+                logger.warning(f"Tile {Path(candidate).name} does not cover point — trying next")
+                last_err = e
+                continue
+            raise
+
+    raise NAIPNotFoundError(
+        f"No NAIP tile in {resolved['prefix']} covers ({lat:.5f}, {lon:.5f}). "
+        f"Last error: {last_err}"
+    )

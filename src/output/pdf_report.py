@@ -78,6 +78,12 @@ def generate_report(report_input: dict, out_pdf: str,
     c.setFont("Helvetica", 11)
     c.drawString(54, H - 128, "Prepared by measure-it")
     c.drawString(54, H - 158, address)
+    # report id + date (world-class reports always carry these for traceability)
+    import datetime as _dt
+    rid = report_input.get("report_id") or model.building_id or "—"
+    rdate = report_input.get("report_date") or _dt.date.today().isoformat()
+    c.setFont("Helvetica", 9)
+    c.drawString(54, H - 174, f"Report {rid}    {rdate}")
     c.setFillColorRGB(*DARK)
     c.setFont("Helvetica", 11)
     stats = [f"{int(round(model.total_area_sqft))} sqft",
@@ -88,13 +94,31 @@ def generate_report(report_input: dict, out_pdf: str,
     # Occluded/unsegmentable roof: stamp a loud full-width strip across the top
     # so a blank-roof report can never be mistaken for a finished one. Drawn at
     # the page top where nothing else lives -> no overpaint.
+    # Stamped when the roof was unsegmentable OR the world-class gate FAILED.
+    # A failing report must never look finished — report_service sets
+    # incomplete_reason with the failing check ids before this runs.
+    _reason = report_input.get("incomplete_reason")
     if report_input.get("occluded_roof"):
+        _reason = _reason or "roof not segmentable from imagery"
+    if _reason:
+        # The headline gets its OWN line and the reason a second, elided one.
+        # Putting both on one centred line overflowed the page once the reasons
+        # became plain English: the string ran off BOTH margins and clipped the
+        # word INCOMPLETE down to "TE", so every automated stamp check (and every
+        # human skim) saw an unstamped report. A failing report that looks
+        # finished is the exact failure this banner exists to prevent.
         c.setFillColorRGB(0.85, 0.20, 0.15)
-        c.rect(0, H - 30, W, 30, fill=1, stroke=0)
+        c.rect(0, H - 46, W, 46, fill=1, stroke=0)
         c.setFillColorRGB(1, 1, 1)
-        c.setFont("Helvetica-Bold", 12)
-        c.drawCentredString(W / 2, H - 20,
-                            "INCOMPLETE - MANUAL REVIEW REQUIRED  (roof not segmentable from imagery)")
+        c.setFont("Helvetica-Bold", 13)
+        c.drawCentredString(W / 2, H - 21, "INCOMPLETE - MANUAL REVIEW REQUIRED")
+        c.setFont("Helvetica", 9)
+        _text, _max = str(_reason), W - 72
+        while _text and c.stringWidth(_text, "Helvetica", 9) > _max:
+            _text = _text[:-2]
+        if _text != str(_reason):
+            _text = _text.rstrip(" ,;-\u2014") + "\u2026"
+        c.drawCentredString(W / 2, H - 37, _text)
         c.setFillColorRGB(*DARK)
     aerial = report_input.get("aerial_image_path")
     box = (90, H - 560, W - 180, 380)
@@ -135,10 +159,28 @@ def generate_report(report_input: dict, out_pdf: str,
     _footer(c, W, 5)
     c.showPage()
 
-    # ---- Page 6: summary ----
-    _header(c, W, H, "Report summary", address)
-    _summary_tables(c, W, H, model)
+    # ---- Page 6: notes diagram (facets lettered A..Z, smallest to largest) ----
+    _header(c, W, H, "Notes — facet index", address)
+    c.setFillColorRGB(*GREY)
+    c.setFont("Helvetica", 10)
+    c.drawString(54, H - 104, "Roof facets are labelled A to Z, smallest to largest, "
+                              "matching the per-facet detail table.")
+    _draw_diagram(c, report_input, "notes", 90, H - 620, W - 180, 460)
     _footer(c, W, 6)
+    c.showPage()
+
+    # ---- Page 7: per-facet detail table ----
+    _header(c, W, H, "Per-facet detail", address)
+    _facet_table(c, W, H, model)
+    _footer(c, W, 7)
+    c.showPage()
+
+    # ---- Page 8: summary ----
+    _header(c, W, H, "Report summary", address)
+    _summary_tables(c, W, H, model, report_input)
+    _pitch_table(c, 54, H - 130, model)    # areas-per-pitch (with % of roof)
+    _obstructions(c, 54, H - 320, model)   # foreign objects (only if detector supplied any)
+    _footer(c, W, 8)
     c.showPage()
 
     c.save()
@@ -179,7 +221,7 @@ def _area_totals(c, W, H, model: ReportModel):
     left = [("Total roof area", f"{int(round(model.total_area_sqft))} sqft"),
             ("Pitched roof area", f"{int(round(model.pitched_area_sqft))} sqft"),
             ("Flat roof area", f"{int(round(model.flat_area_sqft))} sqft"),
-            ("Two story area", "0 sqft"),
+            ("Two story area", f"{int(round(model.two_story_area_sqft))} sqft"),
             ("Two layer area", "0 sqft")]
     _kv_lines(c, 54, H - 120, left)
     right = [("Predominant pitch", _pitch_slash(model.predominant_pitch)),
@@ -188,13 +230,51 @@ def _area_totals(c, W, H, model: ReportModel):
     _kv_lines(c, W / 2, H - 120, right)
 
 
-def _summary_tables(c, W, H, model: ReportModel):
+def _structure_complexity(num_facets: int) -> str:
+    """EagleView-style Simple / Normal / Complex band from facet count."""
+    if num_facets <= 6:
+        return "Simple"
+    if num_facets <= 14:
+        return "Normal"
+    return "Complex"
+
+
+def _imagery_label(report_input: dict) -> str:
+    """e.g. "County 3-inch (0.08 m/px, 2024)" or "NAIP (0.30 m/px)"."""
+    src = report_input.get("imagery_source")
+    if not src:
+        return "not recorded"
+    pretty = {"county-3in": "County 3-inch",
+              "county-3in-unverified": "County 3-inch",
+              "fl-statewide": "FL statewide ortho",
+              "naip": "NAIP"}.get(src, str(src))
+    gsd, year = report_input.get("imagery_gsd_m"), report_input.get("imagery_year")
+    bits = []
+    if gsd:
+        bits.append(f"{float(gsd):.2f} m/px")
+    if year:
+        bits.append(str(year))
+    return f"{pretty} ({', '.join(bits)})" if bits else pretty
+
+
+def _summary_tables(c, W, H, model: ReportModel, report_input: dict | None = None):
     e = model.edge_totals_ftin
+    ft = model.edge_totals_ft
+    stories = 2 if getattr(model, "two_story_area_sqft", 0.0) > 0 else 1
+    drip_ft = ft.get("eave", 0.0) + ft.get("rake", 0.0)   # drip edge = eaves + rakes
     rows = [("Total roof area", f"{int(round(model.total_area_sqft))} sqft"),
             ("Total pitched area", f"{int(round(model.pitched_area_sqft))} sqft"),
             ("Total flat area", f"{int(round(model.flat_area_sqft))} sqft"),
             ("Total roof facets", f"{model.num_facets} facets"),
+            # What the roof was MEASURED FROM. Area and pitch accuracy depend
+            # materially on whether the chip was a 15 cm county ortho or a 30 cm
+            # NAIP tile, and the report said nothing -- two reports of very
+            # different reliability looked identical on the page.
+            ("Imagery source", _imagery_label(report_input or {})),
+            ("Number of stories", f"{stories}"),
+            ("Structure complexity", _structure_complexity(model.num_facets)),
             ("Predominant pitch", _pitch_slash(model.predominant_pitch)),
+            ("Drip edge (eaves+rakes)", f"{int(round(drip_ft))} ft"),
             ("Total eaves", e.get("eave", "0ft 0in")),
             ("Total valleys", e.get("valley", "0ft 0in")),
             ("Total hips", e.get("hip", "0ft 0in")),
@@ -226,3 +306,118 @@ def _summary_tables(c, W, H, model: ReportModel):
     for i, w in enumerate(model.waste_table):
         c.drawString(xs[1] + i * 60, y0 - 16, str(int(round(w["area_sqft"]))))
         c.drawString(xs[1] + i * 60, y0 - 32, str(w["squares"]))
+
+
+# ---------------------------------------------------------------------------
+# Added: per-facet detail table + area-by-pitch table (data existed in the
+# ReportModel but was never rendered). Both mirror the EagleView/Roofr layout.
+# ---------------------------------------------------------------------------
+def _facet_table(c, W, H, model: ReportModel):
+    rows = model.facet_rows or []
+    c.setFillColorRGB(*BLUE)
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(54, H - 118, "Per-facet detail")
+    cols = [("#", 54), ("Area (sqft)", 96), ("Pitch", 190), ("Direction", 260),
+            ("Slope", 350), ("Pitch source", 420), ("Flags", 520)]
+    c.setFillColorRGB(*GREY)
+    c.setFont("Helvetica-Bold", 9)
+    yh = H - 138
+    for label, x in cols:
+        c.drawString(x, yh, label)
+    c.setStrokeColorRGB(*GREY)
+    c.setLineWidth(0.5)
+    c.line(54, yh - 4, W - 54, yh - 4)
+    c.setFont("Helvetica", 9)
+    y = yh - 20
+    for i, r in enumerate(rows):
+        if y < 90:
+            c.setFillColorRGB(*GREY)
+            c.setFont("Helvetica-Oblique", 8)
+            c.drawString(54, y, f"... {len(rows)} facets total (table truncated)")
+            break
+        if i % 2 == 0:                       # zebra striping
+            c.setFillColorRGB(0.96, 0.97, 0.99)
+            c.rect(50, y - 4, W - 100, 15, fill=1, stroke=0)
+        c.setFillColorRGB(*DARK)
+        pitch = _pitch_slash(r.get("pitch_string") or "0:12")
+        slope = r.get("slope_deg")
+        slope_s = f"{slope:.0f} deg" if slope is not None else "-"
+        c.drawString(54, y, str(r.get("facet_id")))
+        c.drawString(96, y, f"{r.get('area_sqft', 0):.0f}")
+        c.drawString(190, y, pitch)
+        c.drawString(260, y, str(r.get("aspect_bin") or "-"))
+        c.drawString(350, y, slope_s)
+        c.drawString(420, y, str(r.get("pitch_source") or "-"))
+        flags = []
+        if r.get("is_flat"):
+            flags.append("flat")
+        if r.get("needs_review"):
+            flags.append("review")
+        if r.get("needs_review"):
+            c.setFillColorRGB(0.85, 0.35, 0.0)
+        c.drawString(520, y, ", ".join(flags))
+        y -= 15
+    # confidence / QC footline
+    nr = model.num_needs_review
+    c.setFillColorRGB(*(GREY if nr == 0 else (0.85, 0.35, 0.0)))
+    c.setFont("Helvetica", 9)
+    msg = ("All facets measured with confidence." if nr == 0
+           else f"{nr} of {model.num_facets} facets flagged for manual review.")
+    c.drawString(54, 70, msg)
+
+
+def _pitch_table(c, x, y, model: ReportModel):
+    pb = model.pitch_breakdown or {}
+    c.setFillColorRGB(*BLUE)
+    c.setFont("Helvetica-Bold", 11)
+    c.drawString(x, y, "Area by pitch")
+    c.setFillColorRGB(*GREY)
+    c.setFont("Helvetica-Bold", 9)
+    c.drawString(x, y - 16, "Pitch")
+    c.drawString(x + 70, y - 16, "Area (sqft)")
+    c.drawString(x + 140, y - 16, "% of roof")
+    c.drawString(x + 200, y - 16, "Squares")
+    c.setFillColorRGB(*DARK)
+    c.setFont("Helvetica", 9)
+    total = max(model.total_area_sqft, 1e-6)
+    yy = y - 32
+    for p, d in sorted(pb.items()):
+        area = d.get("area_sqft", 0)
+        c.drawString(x, yy, _pitch_slash(p))
+        c.drawString(x + 70, yy, f"{area:.0f}")
+        c.drawString(x + 140, yy, f"{100 * area / total:.1f}%")
+        c.drawString(x + 200, yy, f"{d.get('squares', 0)}")
+        yy -= 14
+
+
+def _obstructions(c, x, y, model: ReportModel):
+    """Obstructions & penetrations block (foreign objects). Rendered only when
+    the FO detector supplied any; gross roof area is intentionally NOT reduced."""
+    if not model.obstructions:
+        return
+    NAMES = {"solar_panel": "Solar panels", "skylight": "Skylights",
+             "chimney": "Chimneys", "ac_unit": "AC units",
+             "satellite_dish": "Satellite dishes", "vent": "Vents / penetrations",
+             "tree_overhang": "Tree overhang", "other_object": "Other"}
+    c.setFillColorRGB(*BLUE)
+    c.setFont("Helvetica-Bold", 11)
+    c.drawString(x, y, "Obstructions & penetrations")
+    c.setFillColorRGB(*GREY)
+    c.setFont("Helvetica-Bold", 9)
+    c.drawString(x, y - 16, "Type")
+    c.drawString(x + 150, y - 16, "Count")
+    c.drawString(x + 205, y - 16, "Area (sqft)")
+    c.setFillColorRGB(*DARK)
+    c.setFont("Helvetica", 9)
+    yy = y - 32
+    for t, d in sorted(model.obstructions.items()):
+        c.drawString(x, yy, NAMES.get(t, t.replace("_", " ")))
+        c.drawString(x + 150, yy, str(int(d["count"])))
+        c.drawString(x + 205, yy, f"{d['area_sqft']:.0f}" if d["area_sqft"] > 0 else "-")
+        yy -= 14
+    if model.openings_area_sqft > 0:
+        c.setFillColorRGB(*GREY)
+        c.setFont("Helvetica-Oblique", 8)
+        c.drawString(x, yy - 4,
+                     f"Roof openings (skylights): {model.openings_area_sqft:.0f} sqft "
+                     "— deduct when replacing deck.")

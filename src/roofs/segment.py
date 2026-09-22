@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 # Default parameters
-DEFAULT_K_CANDIDATES = [2, 3, 4]
+DEFAULT_K_CANDIDATES = [4, 5, 6, 7, 8]
 DEFAULT_MIN_FACET_POINTS = 20
 DEFAULT_GRADIENT_THRESHOLD = 0.3
 

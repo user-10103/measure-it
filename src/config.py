@@ -12,9 +12,6 @@ load_dotenv()
 # Project root directory
 PROJECT_ROOT = Path(__file__).parent.parent
 
-# API Keys
-GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "")
-
 # AWS Configuration
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
@@ -58,26 +55,13 @@ DATA_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def validate_config():
-    """
-    Validate that required configuration values are present.
-    Raises ValueError if critical configuration is missing.
-    """
-    if not GOOGLE_MAPS_API_KEY:
-        raise ValueError(
-            "GOOGLE_MAPS_API_KEY is required. "
-            "Please set it in your .env file or environment."
-        )
-
+    """Validate that required configuration values are present."""
     return True
 
 
 def get_config_summary():
-    """
-    Return a dictionary with current configuration values.
-    Useful for debugging and logging.
-    """
+    """Return a dictionary with current configuration values."""
     return {
-        "google_api_configured": bool(GOOGLE_MAPS_API_KEY),
         "wesm_index_path": WESM_INDEX_PATH,
         "lidar_buffer_m": LIDAR_BUFFER_M,
         "ept_resolution_target": EPT_RESOLUTION_TARGET,

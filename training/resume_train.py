@@ -50,7 +50,7 @@ def main():
         ap.add_argument("--grad-accum", type=int, default=4)
         ap.add_argument("--lr", type=float, default=1e-4)
         ap.add_argument("--resolution", type=int, default=512)
-        ap.add_argument("--resume", default="output/last.ckpt",
+        ap.add_argument("--resume", default=None,
                         help="PTL checkpoint to resume from")
         args = ap.parse_args()
 

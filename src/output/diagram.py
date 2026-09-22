@@ -1,9 +1,13 @@
 """
-Top-down vector roof diagram (PIL) for the report pages.
-
-Renders facet polygons (pitched shaded vs flat light) and typed edges, with
-per-mode labels: 'plain', 'length' (edge feet), 'area' (facet sqft),
-'pitch' (facet pitch + downslope arrow). North is up (y flipped).
+Top-down vector roof diagram (PIL) for the report pages — EagleView clean-line
+style: white/lightly-shaded facets, thin grey internal seams, a bold outline, and
+colour-coded typed edges. Per-mode labels:
+  'plain'  — clean outline only
+  'length' — every edge coloured by type (valleys dashed) + its length in feet
+  'area'   — each facet labelled with its square footage
+  'pitch'  — each facet shaded (blue = pitched, grey = flat) + pitch + downslope arrow
+  'notes'  — each facet lettered A..Z, smallest to largest
+North is up (y flipped).
 """
 
 import logging
@@ -13,18 +17,35 @@ from typing import Dict, List, Optional, Tuple
 from PIL import Image, ImageDraw, ImageFont
 
 from src.output.units import m_to_ft, m2_to_sqft
-from src.roofs.categories import EDGE_COLORS
 
 logger = logging.getLogger(__name__)
 
-PITCHED_FILL = (212, 226, 245)
-FLAT_FILL = (242, 242, 242)
-OUTLINE = (70, 110, 165)
-REVIEW_OUTLINE = (230, 140, 30)   # steep/uncertain facet -> verify in oblique
-LABEL_RGB = (40, 40, 40)
+# EagleView-style palette: clean line drawing, not multicolour blobs.
+WHITE_FILL = (255, 255, 255)
+PITCHED_FILL = (214, 228, 246)      # light blue = pitched (>=3/12), pitch diagram
+FLAT_FILL = (224, 224, 224)         # grey = flat, both here and the pitch diagram
+SEAM = (165, 165, 165)              # thin grey internal facet seams
+ROOF_OUTLINE = (25, 25, 25)         # bold near-black roof boundary
+REVIEW_OUTLINE = (230, 140, 30)     # steep/uncertain facet -> verify in oblique
+LABEL_RGB = (35, 35, 35)
 
-ARROWS = {"N": "^", "S": "v", "E": ">", "W": "<",
-          "NE": "/", "SW": "/", "NW": "\\", "SE": "\\"}
+# edge styling: (RGB, dashed) — matches EagleView's length-diagram legend
+EDGE_STYLE: Dict[str, Tuple[Tuple[int, int, int], bool]] = {
+    "ridge": ((198, 32, 32), False),          # red
+    "hip": ((198, 32, 32), False),            # red
+    "valley": ((32, 64, 200), True),          # blue, dashed
+    "rake": ((30, 120, 40), False),           # green
+    "eave": ((25, 25, 25), False),            # black
+    "step_flashing": ((205, 140, 0), False),  # gold
+    "wall_flashing": ((205, 140, 0), False),  # gold
+    "transition": ((130, 130, 130), False),   # grey
+    "parapet": ((130, 130, 130), False),
+    "unspecified": ((130, 130, 130), False),
+}
+
+_DIRV = {"N": (0, -1), "S": (0, 1), "E": (1, 0), "W": (-1, 0),
+         "NE": (0.71, -0.71), "NW": (-0.71, -0.71),
+         "SE": (0.71, 0.71), "SW": (-0.71, 0.71)}
 
 
 def _font(size: int):
@@ -32,6 +53,31 @@ def _font(size: int):
         return ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", size)
     except Exception:
         return ImageFont.load_default()
+
+
+def _draw_arrow(draw, x, y, dx, dy, length, color, width=2):
+    ex, ey = x + dx * length, y + dy * length
+    draw.line([(x, y), (ex, ey)], fill=color, width=width)
+    ang = math.atan2(dy, dx)
+    for da in (2.5, -2.5):
+        draw.line([(ex, ey),
+                   (ex + 5 * math.cos(ang + da), ey + 5 * math.sin(ang + da))],
+                  fill=color, width=width)
+
+
+def _dashed_line(draw, p0, p1, color, width=3, dash=7, gap=5):
+    x0, y0 = p0
+    x1, y1 = p1
+    dist = math.hypot(x1 - x0, y1 - y0)
+    if dist < 1e-6:
+        return
+    ux, uy = (x1 - x0) / dist, (y1 - y0) / dist
+    d = 0.0
+    while d < dist:
+        a = (x0 + ux * d, y0 + uy * d)
+        b = (x0 + ux * min(d + dash, dist), y0 + uy * min(d + dash, dist))
+        draw.line([a, b], fill=color, width=width)
+        d += dash + gap
 
 
 def _bounds(report_input: dict) -> Optional[Tuple[float, float, float, float]]:
@@ -42,6 +88,8 @@ def _bounds(report_input: dict) -> Optional[Tuple[float, float, float, float]]:
     for e in report_input.get("edges", []):
         for x, y in e.get("geometry_xy", []):
             xs.append(x); ys.append(y)
+    for x, y in report_input.get("outline_xy", []):
+        xs.append(x); ys.append(y)
     if not xs:
         return None
     return min(xs), min(ys), max(xs), max(ys)
@@ -63,6 +111,21 @@ def _make_transform(bounds, size, margin):
     return tx
 
 
+def _facet_letters(facets: List[dict]) -> Dict[int, str]:
+    """A..Z (then AA, AB, ...) by ascending area — the EagleView Notes convention."""
+    def area(f):
+        return f.get("surface_area_m2") or f.get("plan_area_m2", 0.0)
+    order = sorted(range(len(facets)), key=lambda i: area(facets[i]))
+    out = {}
+    for rank, i in enumerate(order):
+        out[i] = chr(65 + rank) if rank < 26 else "A" + chr(65 + rank - 26)
+    return out
+
+
+def _centroid(poly):
+    return (sum(p[0] for p in poly) / len(poly), sum(p[1] for p in poly) / len(poly))
+
+
 def render_diagram(report_input: dict, mode: str = "plain",
                    size: Tuple[int, int] = (760, 560), margin: int = 50) -> Image.Image:
     """Render the roof diagram in the given label mode -> PIL RGB image."""
@@ -74,53 +137,75 @@ def render_diagram(report_input: dict, mode: str = "plain",
                   font=_font(14))
         return img
     tx = _make_transform(bounds, size, margin)
-    f_small, f_lab = _font(11), _font(13)
+    # rendered at 2x and downscaled into the PDF, so these are ~half this size
+    # on the page; 12/14 came out at ~6/7pt and could not be read on a projector
+    f_small, f_lab = _font(18), _font(22)
+    facets = report_input.get("facets", [])
 
-    # facets
-    for f in report_input.get("facets", []):
+    # 1. facets — clean fills + thin grey seams (no multicolour blobs)
+    for f in facets:
         poly = f.get("polygon_xy", [])
         if len(poly) < 3:
             continue
         pts = [tx(x, y) for x, y in poly]
-        fill = FLAT_FILL if f.get("is_flat") else PITCHED_FILL
-        edge = REVIEW_OUTLINE if f.get("needs_review") else OUTLINE
+        if f.get("is_flat"):
+            fill = FLAT_FILL
+        elif mode == "pitch":
+            fill = PITCHED_FILL
+        else:
+            fill = WHITE_FILL
+        edge = REVIEW_OUTLINE if f.get("needs_review") else SEAM
         draw.polygon(pts, fill=fill, outline=edge)
 
-    # edges (colored in length mode, otherwise the facet outlines carry the shape)
-    for e in report_input.get("edges", []):
-        g = e.get("geometry_xy", [])
-        if len(g) < 2:
-            continue
-        p0, p1 = tx(*g[0]), tx(*g[1])
-        color = EDGE_COLORS.get(e.get("edge_type"), (90, 90, 90)) if mode == "length" \
-            else OUTLINE
-        draw.line([p0, p1], fill=color, width=3 if mode == "length" else 2)
-        if mode == "length":
-            ft = m_to_ft(e.get("length_m", 0.0))
-            mxy = ((p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2)
-            draw.text((mxy[0] - 6, mxy[1] - 6), str(int(round(ft))), fill=LABEL_RGB,
-                      font=f_small)
+    # 2. roof outline — bold boundary over the facet fills
+    outline_xy = report_input.get("outline_xy", [])
+    if len(outline_xy) >= 3:
+        opts = [tx(x, y) for x, y in outline_xy]
+        draw.line(opts + [opts[0]], fill=ROOF_OUTLINE, width=3)
 
-    # per-facet labels
-    if mode in ("area", "pitch"):
-        for f in report_input.get("facets", []):
+    # 3. edges — coloured by type in length mode (valleys dashed) + length labels
+    if mode == "length":
+        for e in report_input.get("edges", []):
+            g = e.get("geometry_xy", [])
+            if len(g) < 2:
+                continue
+            p0, p1 = tx(*g[0]), tx(*g[1])
+            color, dashed = EDGE_STYLE.get(e.get("edge_type"), ((90, 90, 90), False))
+            if dashed:
+                _dashed_line(draw, p0, p1, color, width=3)
+            else:
+                draw.line([p0, p1], fill=color, width=3)
+            ft = m_to_ft(e.get("length_m", 0.0))
+            if ft >= 1:                          # skip sub-foot clutter like EagleView
+                mx, my = (p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2
+                draw.text((mx - 6, my - 7), str(int(round(ft))), fill=color, font=f_small)
+
+    # 4. per-facet labels
+    if mode in ("area", "pitch", "notes"):
+        letters = _facet_letters(facets) if mode == "notes" else {}
+        for i, f in enumerate(facets):
             poly = f.get("polygon_xy", [])
             if len(poly) < 3:
                 continue
-            cx = sum(p[0] for p in poly) / len(poly)
-            cy = sum(p[1] for p in poly) / len(poly)
-            sx, sy = tx(cx, cy)
+            sx, sy = tx(*_centroid(poly))
             if mode == "area":
-                label = str(int(round(m2_to_sqft(f.get("plan_area_m2", 0.0)))))
-                if f.get("is_flat"):
-                    label = "Flat " + label
+                label = str(int(round(m2_to_sqft(
+                    f.get("surface_area_m2") or f.get("plan_area_m2", 0.0)))))
+                draw.text((sx - 9, sy - 7), label, fill=LABEL_RGB, font=f_small)
+            elif mode == "notes":
+                draw.text((sx - 4, sy - 8), letters.get(i, "?"), fill=LABEL_RGB, font=f_lab)
             else:  # pitch
-                pitch = (f.get("pitch_string") or "0:12").split(":")[0]
-                arrow = "" if f.get("is_flat") else ARROWS.get(f.get("aspect_bin", ""), "")
-                flag = "?" if f.get("needs_review") else ""
-                label = f"{pitch}{flag} {arrow}".strip()
-            color = REVIEW_OUTLINE if (mode == "pitch" and f.get("needs_review")) else LABEL_RGB
-            draw.text((sx - 8, sy - 7), label, fill=color, font=f_small)
+                review = f.get("needs_review")
+                color = REVIEW_OUTLINE if review else LABEL_RGB
+                if f.get("is_flat"):
+                    draw.text((sx - 10, sy - 7), "Flat", fill=color, font=f_small)
+                else:
+                    pitch = f.get("pitch_string") or "–"
+                    draw.text((sx - 12, sy - 15), f"{pitch}{'?' if review else ''}",
+                              fill=color, font=f_small)
+                    d = _DIRV.get(f.get("aspect_bin", ""))
+                    if d:
+                        _draw_arrow(draw, sx, sy + 6, d[0], d[1], 13, color)
 
     _draw_compass(draw, size, _font(12))
     return img

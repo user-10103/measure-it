@@ -1,0 +1,128 @@
+"""Tests for src/roofs/mask_facets.py — SAM3 mask -> clean facet polygons."""
+import numpy as np
+
+from src.roofs.mask_facets import masks_to_facets
+
+
+def _rect(h, w, y0, y1, x0, x1):
+    m = np.zeros((h, w), bool)
+    m[y0:y1, x0:x1] = True
+    return m
+
+
+def test_duplicate_masks_collapse_via_nms():
+    # two near-identical high-score masks of the same facet -> 1 facet
+    h = w = 64
+    a = _rect(h, w, 10, 50, 10, 50)
+    b = _rect(h, w, 11, 51, 11, 51)          # ~IoU 0.9 with a
+    facets, lbl = masks_to_facets([a, b], [0.9, 0.85], iou_thr=0.5,
+                                  regularize=False, min_area_frac=0.0)
+    assert len(facets) == 1
+    assert (lbl > 0).sum() > 0
+
+
+def test_two_partial_overlap_partition_to_two_disjoint():
+    # two overlapping masks -> partition into 2 mutually-exclusive facets
+    h = w = 64
+    a = _rect(h, w, 10, 40, 10, 40)          # higher score claims the overlap
+    b = _rect(h, w, 30, 60, 30, 60)
+    facets, lbl = masks_to_facets([a, b], [0.9, 0.7], iou_thr=0.9,
+                                  regularize=False, min_area_frac=0.0)
+    assert len(facets) == 2
+    # partition is disjoint: the two facet polygons must not overlap in area
+    assert facets[0].polygon.intersection(facets[1].polygon).area < 1.0
+    # higher-score facet keeps the contested overlap region
+    assert facets[0].polygon.area > facets[1].polygon.area
+
+
+def test_score_threshold_drops_weak_mask():
+    h = w = 64
+    strong = _rect(h, w, 10, 50, 10, 50)
+    weak = _rect(h, w, 5, 15, 55, 62)
+    facets, _ = masks_to_facets([strong, weak], [0.9, 0.4],
+                                score_thr=0.65, regularize=False, min_area_frac=0.0)
+    assert len(facets) == 1
+
+
+def test_outline_clip_removes_spillover():
+    # a mask spilling outside the roof outline gets clipped to it
+    from shapely.geometry import box
+    h = w = 80
+    roof = box(20, 20, 60, 60)               # pixel-coord outline
+    spill = _rect(h, w, 25, 55, 25, 75)      # extends past x=60 onto "grass"
+    facets, lbl = masks_to_facets([spill], [0.9], outline=roof,
+                                  regularize=False, min_area_frac=0.0)
+    assert len(facets) == 1
+    # nothing kept outside the outline
+    assert lbl[:, 61:].sum() == 0
+    assert facets[0].polygon.bounds[2] <= 61  # max-x clipped to the roof
+
+
+def test_min_area_filters_specks():
+    h = w = 64
+    big = _rect(h, w, 5, 60, 5, 60)
+    speck = _rect(h, w, 0, 2, 0, 2)          # 4 px
+    facets, _ = masks_to_facets([big, speck], [0.9, 0.8],
+                                min_area_frac=0.01, regularize=False)
+    assert len(facets) == 1
+
+
+def test_fill_tiles_the_outline():
+    # facets with an interior gap get filled to partition the whole outline
+    from shapely.geometry import box
+    h = w = 80
+    roof = box(20, 20, 60, 60)                 # 40x40 outline
+    top = _rect(h, w, 20, 35, 20, 60)          # leaves rows ~35..45 unclaimed
+    bot = _rect(h, w, 45, 60, 20, 60)
+    facets, lbl = masks_to_facets([top, bot], [0.9, 0.85], outline=roof,
+                                  fill_to_outline=True, regularize=False, min_area_frac=0.0)
+    assert len(facets) == 2
+    # facets tile the outline: union ~ outline area, and no interior hole
+    union = facets[0].polygon.union(facets[1].polygon).area
+    assert union > 0.95 * roof.area
+    assert (lbl[22:58, 22:58] > 0).all()       # interior fully labelled
+    # per-facet areas sum to ~roof area (the internal-consistency guarantee)
+    assert abs(sum(f.polygon.area for f in facets) - roof.area) < 0.1 * roof.area
+
+
+def test_fill_off_leaves_gap():
+    from shapely.geometry import box
+    h = w = 80
+    roof = box(20, 20, 60, 60)
+    top = _rect(h, w, 20, 35, 20, 60)
+    bot = _rect(h, w, 45, 60, 20, 60)
+    _, lbl = masks_to_facets([top, bot], [0.9, 0.85], outline=roof,
+                             fill_to_outline=False, regularize=False, min_area_frac=0.0)
+    assert (lbl[37:43, 25:55] == 0).any()      # middle strip stays unclaimed
+
+
+def test_empty_and_all_below_threshold():
+    assert masks_to_facets([], [])[0] == []
+    m = np.zeros((16, 16), bool); m[2:6, 2:6] = True
+    facets, _ = masks_to_facets([m], [0.1], score_thr=0.65)
+    assert facets == []
+
+
+def test_whole_roof_mask_does_not_swallow_facets():
+    # SAM emits a whole-roof mask (top score) alongside the real facets; it must
+    # not collapse them into one region (the report "1 facet" bug).
+    from shapely.geometry import box
+    h = w = 100
+    roof = box(20, 20, 80, 80)
+    whole = _rect(h, w, 20, 80, 20, 80)                       # spans the roof
+    quads = [_rect(h, w, 20, 50, 20, 50), _rect(h, w, 20, 50, 50, 80),
+             _rect(h, w, 50, 80, 20, 50), _rect(h, w, 50, 80, 50, 80)]
+    facets, _ = masks_to_facets([whole] + quads, [0.92, 0.7, 0.68, 0.66, 0.64],
+                                outline=roof, score_thr=0.15, regularize=False)
+    assert len(facets) == 4                                   # not 1
+
+
+def test_single_facet_roof_survives_area_filter():
+    # a roof whose only mask spans the whole roof must keep its one facet, not 0
+    from shapely.geometry import box
+    h = w = 60
+    roof = box(10, 10, 50, 50)
+    whole = _rect(h, w, 10, 50, 10, 50)
+    facets, _ = masks_to_facets([whole], [0.9], outline=roof,
+                                score_thr=0.15, regularize=False)
+    assert len(facets) == 1
